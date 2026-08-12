@@ -1,0 +1,57 @@
+# Environment and secrets
+.env
+*.env
+*.env.local
+*.env.production
+backend/.env
+frontend/.env
+frontend/.env.production
+server/.env
+admin-credentials.txt
+backend/admin-credentials.txt
+server/admin-credentials.txt
+
+# Python
+backend/.venv/
+backend/**/__pycache__/
+backend/**/*.py[cod]
+backend/.pytest_cache/
+.pytest_cache/
+
+# Node / frontend
+frontend/node_modules/
+server/node_modules/
+node_modules/
+frontend/dist/
+frontend/dist-single/
+frontend/singlefile-dist/
+
+# Runtime uploads and generated logs
+uploads/
+backend/uploads/
+frontend/uploads/
+*.log
+backend/email-outbox.log
+
+# Deploy archives and generated bundles
+*.zip
+*.tar.gz
+*.tgz
+
+# Old/generated prototype artifacts not used by the FastAPI + React app
+server/
+support.js
+tl-db.js
+TailoraHub.dc.html
+extracted-doc.txt
+
+# Local editor/system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.thumbnail
+
+# Temporary/generated design extraction folders
+_ds/
+_ppt_reference/

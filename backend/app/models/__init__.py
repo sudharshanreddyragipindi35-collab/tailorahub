@@ -1,0 +1,38 @@
+from app.schema_models import (
+    AdminWallet,
+    AdminWalletTransaction,
+    Booking,
+    Customer,
+    CustomerReferral,
+    CustomerWallet,
+    Dispute,
+    OtpVerification,
+    PlatformSettings,
+    Referral,
+    SchemaBase,
+    Tailor,
+    TailorLocation,
+    TailorService,
+    TailorWallet,
+    WalletTransaction,
+)
+
+
+__all__ = [
+    "AdminWallet",
+    "AdminWalletTransaction",
+    "Booking",
+    "Customer",
+    "CustomerReferral",
+    "CustomerWallet",
+    "Dispute",
+    "OtpVerification",
+    "PlatformSettings",
+    "Referral",
+    "SchemaBase",
+    "Tailor",
+    "TailorLocation",
+    "TailorService",
+    "TailorWallet",
+    "WalletTransaction",
+]
