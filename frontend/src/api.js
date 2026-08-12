@@ -1,21 +1,24 @@
 const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:9000/api").replace(/\/+$/, "");
 const API_ORIGIN = API_BASE.replace(/\/api$/, "");
-const SESSION_STORAGE_VERSION = "2026-08-10-referral-wallet-v1";
+const SESSION_STORAGE_VERSION = "2026-08-12-session-referral-v2";
 export const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
 const LAST_ACTIVE_KEY = "tl_last_active_at";
+const AUTH_STORAGE_KEYS = ["tl_token", "tl_admin_token", "tl_role", "tl_refresh_token", LAST_ACTIVE_KEY];
+
+function removeAuthKeys(storage) {
+  AUTH_STORAGE_KEYS.forEach((key) => storage.removeItem(key));
+}
 
 if (localStorage.getItem("tl_session_storage_version") !== SESSION_STORAGE_VERSION) {
-  localStorage.removeItem("tl_token");
-  localStorage.removeItem("tl_admin_token");
-  localStorage.removeItem("tl_role");
-  localStorage.removeItem("tl_refresh_token");
-  localStorage.removeItem(LAST_ACTIVE_KEY);
+  removeAuthKeys(localStorage);
   localStorage.setItem("tl_session_storage_version", SESSION_STORAGE_VERSION);
 }
 
-let token = localStorage.getItem("tl_token") || localStorage.getItem("tl_admin_token") || "";
-let role = localStorage.getItem("tl_role") || "";
-let refreshToken = localStorage.getItem("tl_refresh_token") || "";
+removeAuthKeys(localStorage);
+
+let token = sessionStorage.getItem("tl_token") || "";
+let role = sessionStorage.getItem("tl_role") || "";
+let refreshToken = sessionStorage.getItem("tl_refresh_token") || "";
 let refreshInFlight = null;
 let sessionClearNotified = false;
 
@@ -24,15 +27,16 @@ export function setSession(nextToken, nextRole, nextRefreshToken = "") {
   role = nextRole || "";
   refreshToken = nextRefreshToken || "";
   if (token) sessionClearNotified = false;
-  if (token) localStorage.setItem("tl_token", token);
-  else localStorage.removeItem("tl_token");
-  if (role) localStorage.setItem("tl_role", role);
-  else localStorage.removeItem("tl_role");
-  if (refreshToken) localStorage.setItem("tl_refresh_token", refreshToken);
-  else localStorage.removeItem("tl_refresh_token");
-  localStorage.removeItem("tl_admin_token");
+  removeAuthKeys(localStorage);
+  if (token) sessionStorage.setItem("tl_token", token);
+  else sessionStorage.removeItem("tl_token");
+  if (role) sessionStorage.setItem("tl_role", role);
+  else sessionStorage.removeItem("tl_role");
+  if (refreshToken) sessionStorage.setItem("tl_refresh_token", refreshToken);
+  else sessionStorage.removeItem("tl_refresh_token");
+  sessionStorage.removeItem("tl_admin_token");
   if (token) markSessionActive();
-  else localStorage.removeItem(LAST_ACTIVE_KEY);
+  else sessionStorage.removeItem(LAST_ACTIVE_KEY);
 }
 
 export function clearSession() {
@@ -57,11 +61,11 @@ export function getRefreshToken() {
 
 export function markSessionActive(now = Date.now()) {
   if (!token) return;
-  localStorage.setItem(LAST_ACTIVE_KEY, String(now));
+  sessionStorage.setItem(LAST_ACTIVE_KEY, String(now));
 }
 
 export function getSessionLastActive() {
-  const value = Number(localStorage.getItem(LAST_ACTIVE_KEY) || 0);
+  const value = Number(sessionStorage.getItem(LAST_ACTIVE_KEY) || 0);
   return Number.isFinite(value) ? value : 0;
 }
 
@@ -69,8 +73,7 @@ export function isSessionExpired(now = Date.now()) {
   if (!token) return false;
   const lastActive = getSessionLastActive();
   if (!lastActive) {
-    markSessionActive(now);
-    return false;
+    return true;
   }
   return now - lastActive > SESSION_TIMEOUT_MS;
 }

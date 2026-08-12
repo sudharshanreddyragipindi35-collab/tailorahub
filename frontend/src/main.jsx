@@ -450,6 +450,24 @@ function useAppHistoryState(scope, initialValue) {
   return [value, navigate];
 }
 
+function normalizeReferralCode(value) {
+  return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9_-]/g, "");
+}
+
+function readReferralEntry() {
+  const params = new URLSearchParams(window.location.search);
+  const code = normalizeReferralCode(params.get("ref") || params.get("referral") || params.get("referralCode"));
+  if (!code) return null;
+  const path = window.location.pathname.toLowerCase();
+  const roleParam = String(params.get("role") || "").toLowerCase();
+  const role = path.includes("/customer/") || roleParam === "customer" ? "customer" : "tailor";
+  return { role, code };
+}
+
+function clearReferralBrowserUrl() {
+  window.history.replaceState(currentHistoryState(), "", "/");
+}
+
 function dateInputToUtcDate(value) {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || "");
   if (!match) return null;
@@ -581,8 +599,9 @@ function MediaGallery({ portfolio, onRemove }) {
 }
 
 function App() {
-  const [role, setRole] = useState(() => (hasValidStoredSession() ? getRole() : ""));
-  const [signedIn, setSignedIn] = useState(() => Boolean(getToken() && getRole()));
+  const [referralEntry, setReferralEntry] = useState(() => readReferralEntry());
+  const [role, setRole] = useState(() => (!referralEntry && hasValidStoredSession() ? getRole() : ""));
+  const [signedIn, setSignedIn] = useState(() => !referralEntry && Boolean(getToken() && getRole()));
   const [theme, setTheme] = useState(initialTheme);
   const [language, setLanguage] = useState(initialLanguage);
   const languageValue = useMemo(() => ({
@@ -599,6 +618,13 @@ function App() {
     window.addEventListener("tailorahub:session-cleared", handleSessionCleared);
     return () => window.removeEventListener("tailorahub:session-cleared", handleSessionCleared);
   }, []);
+
+  useEffect(() => {
+    if (!referralEntry) return;
+    clearSession();
+    setSignedIn(false);
+    setRole("");
+  }, [referralEntry]);
 
   useEffect(() => {
     if (!signedIn) return undefined;
@@ -650,6 +676,10 @@ function App() {
     setSession(res.token || res.access_token, nextRole, res.refreshToken || res.refresh_token);
     setRole(nextRole);
     setSignedIn(true);
+    if (referralEntry) {
+      clearReferralBrowserUrl();
+      setReferralEntry(null);
+    }
   }
 
   function logout() {
@@ -659,7 +689,7 @@ function App() {
   }
 
   let content;
-  if (!signedIn) content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} />;
+  if (!signedIn) content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={referralEntry} />;
   else if (role === "customer") content = <CustomerApp onLogout={logout} />;
   else if (role === "tailor") content = <TailorApp onLogout={logout} />;
   else content = <AdminApp onLogout={logout} />;
@@ -793,7 +823,7 @@ function LuxuryRoleCard({ role, active, onSelect }) {
   );
 }
 
-function AuthShell({ onAuth, theme, setTheme, language, setLanguage }) {
+function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEntry }) {
   const t = useT();
   const [authStage, setAuthStage] = useAppHistoryState("authStage", "home");
   const [selectedRole, setSelectedRole] = useState("customer");
@@ -853,6 +883,24 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage }) {
     emailVerified: false,
     emailCooldown: 0,
   });
+
+  useEffect(() => {
+    if (!referralEntry?.code) return;
+    const referralRole = referralEntry.role === "tailor" ? "tailor" : "customer";
+    setSelectedRole(referralRole);
+    setMode("register");
+    setAuthStage("auth", { replace: true });
+    setWizardStep(0);
+    setError("");
+    setInfo(`${referralRole === "tailor" ? "Tailor" : "Customer"} referral code applied. Register with your own new account details.`);
+    setForm((old) => ({
+      ...old,
+      identifier: "",
+      password: "",
+      confirmPassword: "",
+      referralCode: referralEntry.code,
+    }));
+  }, [referralEntry?.role, referralEntry?.code, setAuthStage]);
 
   useEffect(() => {
     if (selectedRole === "admin") setMode("login");
@@ -1406,6 +1454,8 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage }) {
 
   const tailorReadyToSubmit = tailorWizardSteps.every((_, index) => !stepError(index));
   const strength = passwordScore(form.password);
+  const referralLockedRole = referralEntry?.code ? (referralEntry.role === "tailor" ? "tailor" : "customer") : "";
+  const authRoles = referralLockedRole ? roles.filter(([id]) => id === referralLockedRole) : roles;
   const selectedRoleDetails = roles.find(([id]) => id === selectedRole) || roles[0];
   const selectedRoleLabel = t(`role.${selectedRoleDetails[0]}.label`, selectedRoleDetails[1]);
   const selectedRoleText = t(`role.${selectedRoleDetails[0]}.description`, selectedRoleDetails[3]);
@@ -1804,7 +1854,11 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage }) {
         </div>
         <div className="auth-form-panel">
           <div className="auth-back-row">
-            <button type="button" className="text-link back-link" onClick={backToHome}><ChevronLeft size={16} /> {t("auth.roleSelection", "Role selection")}</button>
+            {referralLockedRole ? (
+              <span className="referral-lock-note">{selectedRoleLabel} referral signup</span>
+            ) : (
+              <button type="button" className="text-link back-link" onClick={backToHome}><ChevronLeft size={16} /> {t("auth.roleSelection", "Role selection")}</button>
+            )}
           </div>
           <div className="brand-row">
             <div className="brand-mark">TH</div>
@@ -1814,15 +1868,16 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage }) {
             </div>
           </div>
           <div className="role-grid compact-role-grid">
-            {roles.map((role) => (
+            {authRoles.map((role) => (
               <LuxuryRoleCard key={role[0]} role={role} active={selectedRole === role[0]} onSelect={(roleId) => {
+                if (referralLockedRole) return;
                 setSelectedRole(roleId);
                 setMode("login");
               }} />
             ))}
           </div>
           <div className="segmented">
-            <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>{t("common.login", "Login")}</button>
+            {!referralLockedRole ? <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>{t("common.login", "Login")}</button> : null}
             {selectedRole !== "admin" ? <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>{t("common.register", "Register")}</button> : null}
           </div>
           <form onSubmit={submit}>
@@ -2596,8 +2651,34 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow }) {
       )}
       {message ? <div className={message.includes("waiting list") ? "notice waiting-notice" : message.includes("Booking") || message.includes("approved") ? "notice ok" : "error"}>{message.includes("waiting list") ? <><span className="live-dot" /> {message}</> : message}</div> : null}
       <h3>Reviews</h3>
-      {reviews.length ? reviews.map((r) => <div className="review" key={r.id}><b>{Number(r.rating).toFixed(1)} star</b><p>{r.body || "No written feedback"}</p><small>{fmtDate(r.ts)}</small></div>) : <Empty text="No public reviews yet." />}
+      {reviews.length ? (
+        <div className="review-list">
+          {reviews.map((r) => <ReviewCard key={r.id} review={r} />)}
+        </div>
+      ) : <Empty text="No public reviews yet." />}
     </div>
+  );
+}
+
+function ReviewCard({ review }) {
+  const rating = Number(review.rating || 0);
+  return (
+    <article className="review">
+      <div className="review-head">
+        <div>
+          <strong>{review.customer_name || "Customer"}</strong>
+          <small>Verified completed order</small>
+        </div>
+        <div className="review-rating" aria-label={`${rating.toFixed(1)} star rating`}>
+          {[1, 2, 3, 4, 5].map((value) => (
+            <Star key={value} size={15} className={value <= Math.round(rating) ? "filled" : ""} />
+          ))}
+          <b>{rating.toFixed(1)}</b>
+        </div>
+      </div>
+      <p>{review.body || "Customer rated this order without a written comment."}</p>
+      <small>{fmtDate(review.ts)}</small>
+    </article>
   );
 }
 
@@ -2774,10 +2855,17 @@ function normalizeOrderStatusPayload(order, statusPayload) {
     ...booking,
     payment_status: booking.payment_status || booking.paymentStatus || order.payment_status,
     paymentStatus: booking.paymentStatus || booking.payment_status || order.paymentStatus,
+    completed_at: booking.completed_at || booking.completedAt || order.completed_at,
+    completedAt: booking.completedAt || booking.completed_at || order.completedAt,
+    rated: Boolean(booking.rated ?? order.rated),
     trackerStage: stage,
     steps,
     otpEnabled: statusPayload?.otpEnabled ?? String(booking.paymentStatus || order.payment_status || "").toLowerCase() === "paid",
   };
+}
+
+function isClosedOrder(order) {
+  return String(order?.status || "").toLowerCase() === "completed" || Boolean(order?.completed_at || order?.completedAt);
 }
 
 function CustomerOrderCard({ order, reload }) {
@@ -2857,8 +2945,23 @@ function CustomerOrderCard({ order, reload }) {
     }
   }
 
+  async function submitFeedback(payload) {
+    setBusy(true);
+    setMessage("");
+    try {
+      await api.reviewOrder(order.id, payload);
+      setStatusData((old) => ({ ...old, rated: true }));
+      setMessage("Feedback submitted. This review is now visible on the tailor profile.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const isPaid = String(statusData.paymentStatus || statusData.payment_status || "").toLowerCase() === "paid";
-  const delivered = statusData.trackerStage === "Delivered" || ["delivered", "completed", "COMPLETED"].includes(statusData.status);
+  const completed = isClosedOrder(statusData);
 
   return (
     <article className="record-card order-tracker-card">
@@ -2879,8 +2982,9 @@ function CustomerOrderCard({ order, reload }) {
         <StatusPill value={statusData.paymentStatus || statusData.payment_status} />
         {!isPaid ? <button type="button" className="primary-btn compact-action" onClick={pay} disabled={busy}>Pay before OTP</button> : <span className="pill ok">OTP unlocked</span>}
       </div>
-      {delivered ? <QualityCheckPrompt onDispute={raiseDispute} busy={busy} /> : null}
-      {message ? <div className={message.includes("raised") || message.includes("completed") ? "notice ok" : "error"}>{message}</div> : null}
+      {completed ? <QualityCheckPrompt onDispute={raiseDispute} busy={busy} /> : null}
+      {completed ? <OrderFeedbackCard order={statusData} onSubmit={submitFeedback} busy={busy} /> : null}
+      {message ? <div className={message.includes("raised") || message.includes("completed") || message.includes("submitted") ? "notice ok" : "error"}>{message}</div> : null}
     </article>
   );
 }
@@ -2990,6 +3094,77 @@ function QualityCheckPrompt({ onDispute, busy }) {
       </label>
       {localError ? <small className="field-error">{localError}</small> : null}
       <button type="submit" className="secondary-btn" disabled={busy}>Do you have a dispute? Raise a ticket.</button>
+    </form>
+  );
+}
+
+function OrderFeedbackCard({ order, onSubmit, busy }) {
+  const [rating, setRating] = useState(0);
+  const [hoverRating, setHoverRating] = useState(0);
+  const [body, setBody] = useState("");
+  const [localError, setLocalError] = useState("");
+  const alreadyReviewed = Boolean(order.rated);
+
+  async function submit(event) {
+    event.preventDefault();
+    setLocalError("");
+    if (!rating) {
+      setLocalError("Please select a star rating before submitting feedback.");
+      return;
+    }
+    await onSubmit({ rating, body: body.trim() || null, images: [] });
+    setBody("");
+    setRating(0);
+    setHoverRating(0);
+  }
+
+  if (alreadyReviewed) {
+    return (
+      <div className="order-feedback-card submitted">
+        <div>
+          <span>Order feedback</span>
+          <h3>Feedback submitted</h3>
+          <p>Your rating is now visible on this tailor's public profile.</p>
+        </div>
+        <span className="pill ok">Reviewed</span>
+      </div>
+    );
+  }
+
+  return (
+    <form className="order-feedback-card" onSubmit={submit}>
+      <div className="feedback-copy">
+        <span>Optional feedback</span>
+        <h3>Rate this order</h3>
+        <p>Share how the fitting, finishing, delivery and service felt for this completed order.</p>
+      </div>
+      <div className="star-rating-input" role="radiogroup" aria-label="Order rating">
+        {[1, 2, 3, 4, 5].map((value) => {
+          const active = value <= (hoverRating || rating);
+          return (
+            <button
+              type="button"
+              key={value}
+              className={active ? "active" : ""}
+              onClick={() => setRating(value)}
+              onMouseEnter={() => setHoverRating(value)}
+              onMouseLeave={() => setHoverRating(0)}
+              aria-label={`${value} star${value === 1 ? "" : "s"}`}
+              aria-checked={rating === value}
+              role="radio"
+            >
+              <Star size={22} />
+            </button>
+          );
+        })}
+        <strong>{rating ? `${rating}.0` : "Select rating"}</strong>
+      </div>
+      <label>
+        Comment (optional)
+        <textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder="Example: Perfect blouse fitting and delivery was on time." />
+      </label>
+      {localError ? <small className="field-error">{localError}</small> : null}
+      <button type="submit" className="primary-btn" disabled={busy}>{busy ? "Submitting..." : "Submit Feedback"}</button>
     </form>
   );
 }
@@ -4071,8 +4246,7 @@ function TailorOrders({ rows, reload }) {
 
 function isCompletedOrder(order) {
   const status = String(order?.status || "").toLowerCase();
-  const trackerStage = String(order?.tracker_stage || order?.trackerStage || "").toLowerCase();
-  return status === "completed" || Boolean(order?.completed_at || order?.completedAt) || trackerStage === "delivered";
+  return status === "completed" || Boolean(order?.completed_at || order?.completedAt);
 }
 
 function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
@@ -4087,7 +4261,7 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
   useEffect(() => {
     setStage(order.tracker_stage || order.trackerStage || "Order Placed");
   }, [order.tracker_stage, order.trackerStage, order.id]);
-  const stageOptions = completed && stage === "Delivered" ? bookingTrackerStages : bookingTrackerStages.filter((value) => value !== "Delivered");
+  const stageOptions = bookingTrackerStages.filter((value) => value !== "Delivered");
 
   async function update() {
     if (completed) return;
@@ -4135,20 +4309,29 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
     }
   }
 
+  if (completed) {
+    return (
+      <div className="completed-order-note">
+        <CheckCircle2 size={16} />
+        <span>Closed after handover OTP</span>
+      </div>
+    );
+  }
+
   return (
-    <div className={completed ? "order-actions tracker-actions completed" : "order-actions tracker-actions"}>
-      <select value={stage} onChange={(e) => setStage(e.target.value)} disabled={completed || busy}>
+    <div className="order-actions tracker-actions">
+      <select value={stage} onChange={(e) => setStage(e.target.value)} disabled={busy}>
         {stageOptions.map((value) => <option key={value} value={value}>{value}</option>)}
       </select>
-      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Status note" disabled={completed || busy} />
-      <button onClick={update} disabled={completed || busy}>Send Update</button>
+      <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Status note" disabled={busy} />
+      <button onClick={update} disabled={busy}>Send Update</button>
       {!completed && ["auto_approved", "measurement_pending", "tailor_confirmed"].includes(order.status) ? <button onClick={onMeasurementDone} disabled={busy}>Measurement Done</button> : null}
-      <button onClick={onCharge} disabled={completed || busy}>Charge</button>
-      <div className={completed ? "delivery-otp-box locked completed" : paid ? "delivery-otp-box unlocked" : "delivery-otp-box locked"}>
-        <small>{completed ? "Order completed. Updates, charges and handover OTP actions are locked." : paid ? "Delivery OTP enabled." : "Complete payment to enable delivery OTP."}</small>
-        <button type="button" onClick={sendOtp} disabled={completed || !paid || busy}>Send OTP</button>
-        <input value={otp} onChange={(e) => setOtp(cleanDigits(e.target.value))} inputMode="numeric" maxLength={6} placeholder="Handover OTP" disabled={completed || !paid || busy} />
-        <button type="button" onClick={verifyOtp} disabled={completed || !paid || busy || !otp}>Verify OTP</button>
+      <button onClick={onCharge} disabled={busy}>Charge</button>
+      <div className={paid ? "delivery-otp-box unlocked" : "delivery-otp-box locked"}>
+        <small>{paid ? "Delivery OTP enabled." : "Complete payment to enable delivery OTP."}</small>
+        <button type="button" onClick={sendOtp} disabled={!paid || busy}>Send OTP</button>
+        <input value={otp} onChange={(e) => setOtp(cleanDigits(e.target.value))} inputMode="numeric" maxLength={6} placeholder="Handover OTP" disabled={!paid || busy} />
+        <button type="button" onClick={verifyOtp} disabled={!paid || busy || !otp}>Verify OTP</button>
       </div>
       {message ? <small className={message.includes("sent") || message.includes("verified") ? "field-success" : "field-error"}>{message}</small> : null}
     </div>

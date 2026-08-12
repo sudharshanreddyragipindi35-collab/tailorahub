@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "npm run build && vite preview --host 127.0.0.1 --port 5173",
-    "vite:dev": "vite",
+    "vite:dev": "vite --host localhost --port 5173 --strictPort",
     "build": "vite build",
     "build:single": "npm run build && node scripts/inline-build.mjs",
     "preview": "vite preview --host 127.0.0.1 --port 5173"

@@ -56,7 +56,7 @@ async def my_referral_code(
         )
         await db.commit()
 
-    shareable_link = f"{_share_base_url()}/register?ref={referral_code}"
+    shareable_link = f"{_share_base_url()}/tailor/register?ref={referral_code}"
     return {
         "referral_code": referral_code,
         "referralCode": referral_code,

@@ -2002,8 +2002,8 @@ def create_review(order_id: str, body: ReviewCreate, customer: dict = Depends(cu
     order = fetch_one(db, "SELECT * FROM orders WHERE id=:id AND customer_id=:uid", {"id": order_id, "uid": customer["id"]})
     if not order:
         raise HTTPException(404, "Order not found")
-    if order["status"] != "COMPLETED":
-        raise HTTPException(409, "Feedback is allowed only after completion")
+    if not is_completed_order(order):
+        raise HTTPException(409, "Feedback is allowed only after the order is closed with final handover OTP.")
     if order["rated"]:
         raise HTTPException(409, "This order already has feedback")
     db.execute(
@@ -2015,13 +2015,21 @@ def create_review(order_id: str, body: ReviewCreate, customer: dict = Depends(cu
         text(
             """UPDATE tailors SET rating=(SELECT round(avg(rating)::numeric,2) FROM reviews WHERE tailor_id=:tid AND hidden=FALSE),
             rating_count=(SELECT count(*) FROM reviews WHERE tailor_id=:tid AND hidden=FALSE),
-            completed=(SELECT count(*) FROM orders WHERE tailor_id=:tid AND status='COMPLETED')
+            completed=(SELECT count(*) FROM orders WHERE tailor_id=:tid AND lower(status)='completed')
             WHERE id=:tid"""
         ),
         {"tid": order["tailor_id"]},
     )
     db.commit()
-    return {"ok": True}
+    review = fetch_one(
+        db,
+        """SELECT r.*, u.name AS customer_name
+        FROM reviews r
+        JOIN users u ON u.id=r.customer_id
+        WHERE r.order_id=:order_id""",
+        {"order_id": order_id},
+    )
+    return {"ok": True, "review": review}
 
 
 @app.get("/api/tailor/me")

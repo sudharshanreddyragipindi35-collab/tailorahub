@@ -88,7 +88,6 @@ def is_completed_order(order: dict | None) -> bool:
     return (
         str(order.get("status") or "").lower() == "completed"
         or bool(order.get("completed_at"))
-        or str(order.get("tracker_stage") or "").lower() == "delivered"
     )
 
 
@@ -332,6 +331,7 @@ def public_booking(row: dict) -> dict:
         "tracker_stage": row.get("tracker_stage"),
         "otpVerified": bool(row.get("otp_verified")),
         "otp_verified": bool(row.get("otp_verified")),
+        "rated": bool(row.get("rated")),
         "disputeRaised": bool(row.get("dispute_raised")),
         "dispute_raised": bool(row.get("dispute_raised")),
         "deliveredAt": row.get("delivered_at"),
