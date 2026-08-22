@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_tailor
 from app.api.v1.otp import OTP_TTL_MINUTES, OtpFlowError, issue_otp, verify_otp
 from app.core.database import get_db
-from app.integrations import payout_service, sms_service
+from app.integrations import sms_service
 from app.emailer import send_email
 from app.qr import generate_wallet_qr
 from app.schemas.wallet import SetUpiIn, WithdrawIn, WalletOut
@@ -162,42 +162,58 @@ async def withdraw(body: WithdrawIn, tailor: dict = Depends(get_current_tailor),
         raise HTTPException(400, "Withdrawal amount must be greater than zero")
     if Decimal(wallet["balance"]) < amount:
         raise HTTPException(400, "Insufficient wallet balance")
-    if body.destination_type == "upi_id" and not wallet.get("upi_id"):
-        raise HTTPException(400, "Set your UPI ID before withdrawing to UPI")
+    destination_upi_id = None
+    destination_bank_account = None
+    destination_bank_ifsc = None
+    if body.destination_type == "upi_id":
+        destination_upi_id = (wallet.get("upi_id") or "").strip()
+        if not destination_upi_id:
+            raise HTTPException(400, "Set your UPI ID before withdrawing to UPI")
     if body.destination_type == "bank_account":
         account = (body.bank_account_number or wallet.get("bank_account_number") or "").strip()
         ifsc = (body.bank_ifsc or wallet.get("bank_ifsc") or "").strip().upper()
         if not account or not ifsc:
             raise HTTPException(400, "Bank account number and IFSC are required for bank withdrawal")
+        destination_bank_account = account
+        destination_bank_ifsc = ifsc
         await db.execute(
             text("UPDATE tailor_wallets SET bank_account_number=:account, bank_ifsc=:ifsc, updated_at=now() WHERE wallet_id=:wallet_id"),
             {"account": account, "ifsc": ifsc, "wallet_id": wallet["wallet_id"]},
         )
 
     await verify_withdrawal_otp(db, tailor, body.otp)
-    payout = payout_service.withdraw(int(amount), body.destination_type)
-    status = "success" if payout.get("ok") else "failed"
     try:
-        await db.execute(
+        result = await db.execute(
             text(
-                """INSERT INTO wallet_transactions (id,wallet_id,type,amount,status,withdrawal_destination)
-                   VALUES (gen_random_uuid(),:wallet_id,'debit',:amount,CAST(:status AS wallet_transaction_status),CAST(:destination AS withdrawal_destination_type))"""
+                """
+                INSERT INTO withdrawal_requests
+                  (wallet_id,tailor_id,amount,destination_type,destination_upi_id,
+                   destination_bank_account_number,destination_bank_ifsc,status,otp_verified_at,requested_at,updated_at)
+                VALUES
+                  (:wallet_id,:tailor_id,:amount,CAST(:destination AS withdrawal_destination_type),:upi_id,
+                   :bank_account,:bank_ifsc,'pending_admin_review',now(),now(),now())
+                RETURNING *
+                """
             ),
-            {"wallet_id": wallet["wallet_id"], "amount": amount, "status": status, "destination": body.destination_type},
+            {
+                "wallet_id": wallet["wallet_id"],
+                "tailor_id": tailor["tailor_id"],
+                "amount": amount,
+                "destination": body.destination_type,
+                "upi_id": destination_upi_id,
+                "bank_account": destination_bank_account,
+                "bank_ifsc": destination_bank_ifsc,
+            },
         )
-        if status == "success":
-            await db.execute(
-                text("UPDATE tailor_wallets SET balance=balance - :amount, updated_at=now() WHERE wallet_id=:wallet_id"),
-                {"amount": amount, "wallet_id": wallet["wallet_id"]},
-            )
+        request_row = dict(result.mappings().first())
         await db.commit()
     except Exception:
         await db.rollback()
         raise
-    updated = await fetch_one(db, "SELECT balance FROM tailor_wallets WHERE wallet_id=:wallet_id", {"wallet_id": wallet["wallet_id"]})
     return {
-        "ok": bool(payout.get("ok")),
-        "status": status,
-        "txn_ref": payout.get("txnRef"),
-        "balance": updated["balance"],
+        "ok": True,
+        "status": request_row["status"],
+        "txn_ref": str(request_row["id"]),
+        "balance": wallet["balance"],
+        "message": "Withdrawal request sent to admin. Manual payout will be reviewed within 24 hours.",
     }

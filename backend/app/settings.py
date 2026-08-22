@@ -78,6 +78,10 @@ class Settings:
     payment_webhook_secret = env_value("PAYMENT_WEBHOOK_SECRET")
     payout_api_key = env_value("PAYOUT_API_KEY")
     payout_api_secret = env_value("PAYOUT_API_SECRET")
+    admin_whatsapp_number = env_value("ADMIN_WHATSAPP_NUMBER", "918790901281")
+    admin_payment_upi_id = env_value("ADMIN_PAYMENT_UPI_ID")
+    admin_payment_qr_url = env_value("ADMIN_PAYMENT_QR_URL")
+    manual_payment_expiry_minutes = env_int("MANUAL_PAYMENT_EXPIRY_MINUTES", 5)
 
     maps_provider = env_value("MAPS_PROVIDER", "mock").lower()
     maps_api_key = env_value("MAPS_API_KEY")

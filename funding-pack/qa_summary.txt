@@ -1,0 +1,2 @@
+OK: TailoraHub_Funding_Proposal_Executive_Brief.docx valid package, has_document_xml=True, size=46585 bytes
+OK: TailoraHub_Funding_Pitch_Deck.pptx valid package, slides=14, size=1546345 bytes

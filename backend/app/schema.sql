@@ -776,7 +776,73 @@ DO $$ BEGIN
 END $$;
 
 ALTER TABLE wallet_transactions ALTER COLUMN reference_booking_id TYPE TEXT USING reference_booking_id::text;
+ALTER TABLE payments ALTER COLUMN amount TYPE NUMERIC(12,2) USING amount::numeric;
 
 -- Do not drop legacy/accidental `bookings` or `customers` tables here.
 -- Keeping this schema non-destructive protects any local data while the
 -- real app continues to use users/orders as the PostgreSQL source of truth.
+
+-- Manual WhatsApp/admin-verified payment flow.
+DO $$ BEGIN
+  CREATE TYPE payment_intent_status AS ENUM ('pending', 'verified', 'expired', 'rejected', 'cancelled');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+DO $$ BEGIN
+  CREATE TYPE withdrawal_request_status AS ENUM ('pending_admin_review', 'approved', 'rejected', 'cancelled');
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
+
+CREATE TABLE IF NOT EXISTS payment_intents (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id TEXT NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  customer_id TEXT NOT NULL REFERENCES users(id),
+  tailor_id TEXT NOT NULL REFERENCES tailors(id),
+  payment_reference TEXT UNIQUE NOT NULL,
+  method TEXT NOT NULL DEFAULT 'manual_whatsapp',
+  order_amount NUMERIC(12,2) NOT NULL,
+  gst_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+  platform_fee_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+  gst_platform_charge_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+  commission_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+  tailor_credit_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+  payable_total NUMERIC(12,2) NOT NULL,
+  status payment_intent_status NOT NULL DEFAULT 'pending',
+  whatsapp_url TEXT,
+  admin_whatsapp_number TEXT,
+  admin_upi_id TEXT,
+  admin_qr_url TEXT,
+  customer_note TEXT,
+  admin_note TEXT,
+  proof_reference TEXT,
+  expires_at TIMESTAMPTZ NOT NULL,
+  verified_at TIMESTAMPTZ,
+  verified_by_admin_id TEXT REFERENCES users(id),
+  rejected_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS payment_intents_booking_idx ON payment_intents(booking_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS payment_intents_status_idx ON payment_intents(status, expires_at);
+
+CREATE TABLE IF NOT EXISTS withdrawal_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  wallet_id UUID NOT NULL REFERENCES tailor_wallets(wallet_id) ON DELETE CASCADE,
+  tailor_id UUID NOT NULL REFERENCES tailors(tailor_id) ON DELETE CASCADE,
+  amount NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+  destination_type withdrawal_destination_type NOT NULL,
+  destination_upi_id TEXT,
+  destination_bank_account_number TEXT,
+  destination_bank_ifsc VARCHAR(20),
+  status withdrawal_request_status NOT NULL DEFAULT 'pending_admin_review',
+  admin_note TEXT,
+  payout_reference TEXT,
+  otp_verified_at TIMESTAMPTZ,
+  requested_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  approved_at TIMESTAMPTZ,
+  approved_by_admin_id TEXT REFERENCES users(id),
+  rejected_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS withdrawal_requests_tailor_idx ON withdrawal_requests(tailor_id, requested_at DESC);
+CREATE INDEX IF NOT EXISTS withdrawal_requests_status_idx ON withdrawal_requests(status, requested_at DESC);

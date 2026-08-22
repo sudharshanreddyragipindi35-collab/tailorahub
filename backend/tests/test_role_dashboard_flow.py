@@ -25,6 +25,9 @@ def _engine_or_skip():
 def _delete_in(conn, table: str, column: str, values: list[str]) -> None:
     if not values:
         return
+    table_exists = conn.execute(text("SELECT to_regclass(:table_name)"), {"table_name": table}).scalar()
+    if not table_exists:
+        return
     params = {f"v{i}": value for i, value in enumerate(values)}
     placeholders = ", ".join(f":v{i}" for i in range(len(values)))
     conn.execute(text(f"DELETE FROM {table} WHERE {column} IN ({placeholders})"), params)
@@ -113,6 +116,7 @@ def _cleanup_flow_data(engine, phone: str, email: str, username: str) -> None:
 
         if order_ids:
             _delete_in(conn, "admin_wallet_transactions", "source_booking_id", order_ids)
+            _delete_in(conn, "payment_intents", "booking_id", order_ids)
             _delete_in(conn, "disputes", "booking_id", order_ids)
             _delete_in(conn, "wallet_transactions", "reference_booking_id", order_ids)
             _delete_in(conn, "payments", "order_id", order_ids)
@@ -153,6 +157,7 @@ def _cleanup_flow_data(engine, phone: str, email: str, username: str) -> None:
         _delete_in(conn, "tailor_offers", "tailor_id", tailor_ids)
         _delete_in(conn, "tailor_services", "tailor_id", tailor_ids)
         _delete_in(conn, "tailor_locations", "tailor_id", tailor_uuids)
+        _delete_in(conn, "withdrawal_requests", "tailor_id", tailor_uuids)
         _delete_in(conn, "tailor_wallets", "tailor_id", tailor_uuids)
         _delete_in(conn, "referrals", "referrer_tailor_id", tailor_uuids)
         _delete_in(conn, "referrals", "referred_tailor_id", tailor_uuids)
@@ -300,6 +305,8 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
                     "serviceId": service_id,
                     "quantity": 1,
                     "measurementMode": "customer_visits_tailor",
+                    "preferredDate": "2026-08-25",
+                    "appointmentDate": "2026-08-20",
                 },
                 headers=customer_headers,
             )
@@ -313,14 +320,30 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
             gated_otp = client.post(f"/api/v1/bookings/{booking_id}/send-delivery-otp", headers=tailor_headers)
             assert gated_otp.status_code == 403
 
-            paid = client.post(f"/api/v1/bookings/{booking_id}/pay", json={"method": "wallet"}, headers=customer_headers)
-            assert paid.status_code == 200, paid.text
-            order_amount = Decimal(str(paid.json()["breakdown"]["order_amount"]))
+            pay_request = client.post(f"/api/v1/bookings/{booking_id}/pay", json={"method": "manual_whatsapp"}, headers=customer_headers)
+            assert pay_request.status_code == 200, pay_request.text
+            payment_json = pay_request.json()
+            assert payment_json["paymentIntent"]["status"] == "pending"
+            tailor_credit_amount = Decimal(str(payment_json["breakdown"]["tailor_credit_amount"]))
+
+            wallet_before_verification = client.get("/api/v1/wallet/me", headers=tailor_headers)
+            assert wallet_before_verification.status_code == 200, wallet_before_verification.text
+            assert Decimal(str(wallet_before_verification.json()["balance"])) == Decimal("0")
+
+            still_gated_otp = client.post(f"/api/v1/bookings/{booking_id}/send-delivery-otp", headers=tailor_headers)
+            assert still_gated_otp.status_code == 403
+
+            verified_payment = client.post(
+                f"/api/v1/admin/payment-intents/{payment_json['paymentIntent']['id']}/verify",
+                json={"proofReference": "TEST-UPI-PAID"},
+                headers={"Authorization": f"Bearer {admin_token}"},
+            )
+            assert verified_payment.status_code == 200, verified_payment.text
 
             wallet_after_payment = client.get("/api/v1/wallet/me", headers=tailor_headers)
             assert wallet_after_payment.status_code == 200, wallet_after_payment.text
             paid_wallet_balance = Decimal(str(wallet_after_payment.json()["balance"]))
-            assert paid_wallet_balance == order_amount
+            assert paid_wallet_balance == tailor_credit_amount
 
             dashboard_after_payment = client.get("/api/tailor/dashboard", headers=tailor_headers)
             assert dashboard_after_payment.status_code == 200, dashboard_after_payment.text
@@ -341,7 +364,8 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
             wallet_after_completion = client.get("/api/v1/wallet/me", headers=tailor_headers)
             assert wallet_after_completion.status_code == 200, wallet_after_completion.text
             completed_wallet_balance = Decimal(str(wallet_after_completion.json()["balance"]))
-            assert completed_wallet_balance == paid_wallet_balance - commission
+            assert commission > 0
+            assert completed_wallet_balance == paid_wallet_balance
 
             dashboard_after_completion = client.get("/api/tailor/dashboard", headers=tailor_headers)
             assert dashboard_after_completion.status_code == 200, dashboard_after_completion.text

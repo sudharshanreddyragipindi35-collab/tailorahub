@@ -513,6 +513,129 @@ function Empty({ text = "No records yet." }) {
   return <div className="empty">{text}</div>;
 }
 
+const DEFAULT_TABLE_PAGE_SIZE = 8;
+const DEFAULT_CARD_PAGE_SIZE = 6;
+
+function usePagedRows(rows = [], pageSize = DEFAULT_TABLE_PAGE_SIZE) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const safePageSize = Math.max(1, Number(pageSize) || DEFAULT_TABLE_PAGE_SIZE);
+  const [page, setPage] = useState(1);
+  const total = safeRows.length;
+  const totalPages = Math.max(1, Math.ceil(total / safePageSize));
+
+  useEffect(() => {
+    setPage(1);
+  }, [total, safePageSize]);
+
+  useEffect(() => {
+    setPage((current) => Math.min(Math.max(1, current), totalPages));
+  }, [totalPages]);
+
+  const currentPage = Math.min(Math.max(1, page), totalPages);
+  const startIndex = total ? (currentPage - 1) * safePageSize : 0;
+  const endIndex = total ? Math.min(startIndex + safePageSize, total) : 0;
+
+  return {
+    page: currentPage,
+    pageSize: safePageSize,
+    total,
+    totalPages,
+    start: total ? startIndex + 1 : 0,
+    end: endIndex,
+    rows: safeRows.slice(startIndex, endIndex),
+    setPage,
+  };
+}
+
+function PaginationControls({ page, totalPages, total, start, end, onPage, label = "records" }) {
+  if (!total || totalPages <= 1) return null;
+  const firstPage = Math.max(1, Math.min(page - 2, totalPages - 4));
+  const lastPage = Math.min(totalPages, firstPage + 4);
+  const pages = [];
+  for (let value = firstPage; value <= lastPage; value += 1) pages.push(value);
+
+  return (
+    <nav className="pagination-bar" aria-label={`${label} pagination`}>
+      <span className="pagination-summary">Showing {start}-{end} of {total} {label}</span>
+      <div className="pagination-pages">
+        <button type="button" onClick={() => onPage(page - 1)} disabled={page <= 1}>Previous</button>
+        {pages.map((value) => (
+          <button
+            type="button"
+            key={value}
+            className={value === page ? "active" : ""}
+            onClick={() => onPage(value)}
+            aria-current={value === page ? "page" : undefined}
+          >
+            {value}
+          </button>
+        ))}
+        <button type="button" onClick={() => onPage(page + 1)} disabled={page >= totalPages}>Next</button>
+      </div>
+    </nav>
+  );
+}
+
+function PaginatedCards({ items = [], pageSize = DEFAULT_CARD_PAGE_SIZE, className = "cards", label = "items", emptyText = "No records yet.", renderItem }) {
+  const pageData = usePagedRows(items, pageSize);
+  if (!pageData.total) return <Empty text={emptyText} />;
+  return (
+    <>
+      <div className={className}>
+        {pageData.rows.map((item, index) => (
+          <React.Fragment key={item?.id || item?.code || item?.customerProfileId || item?.customer_profile_id || index}>
+            {renderItem(item, index)}
+          </React.Fragment>
+        ))}
+      </div>
+      <PaginationControls
+        page={pageData.page}
+        totalPages={pageData.totalPages}
+        total={pageData.total}
+        start={pageData.start}
+        end={pageData.end}
+        onPage={pageData.setPage}
+        label={label}
+      />
+    </>
+  );
+}
+
+function ViewMoreGrid({ items = [], initial = 6, step = 6, className = "updates-list", label = "items", emptyText = "No records yet.", renderItem }) {
+  const safeItems = Array.isArray(items) ? items : [];
+  const [visibleCount, setVisibleCount] = useState(initial);
+
+  useEffect(() => {
+    setVisibleCount(initial);
+  }, [safeItems.length, initial]);
+
+  if (!safeItems.length) return <Empty text={emptyText} />;
+  const visibleItems = safeItems.slice(0, visibleCount);
+  const canViewMore = visibleCount < safeItems.length;
+
+  return (
+    <>
+      <div className={className}>
+        {visibleItems.map((item, index) => (
+          <React.Fragment key={item?.id || item?.code || index}>
+            {renderItem(item, index)}
+          </React.Fragment>
+        ))}
+      </div>
+      {safeItems.length > initial ? (
+        <div className="view-more-row">
+          <span>Showing {visibleItems.length} of {safeItems.length} {label}</span>
+          {canViewMore ? (
+            <button type="button" className="view-more-btn" onClick={() => setVisibleCount((count) => Math.min(count + step, safeItems.length))}>View more</button>
+          ) : (
+            <button type="button" className="view-more-btn" onClick={() => setVisibleCount(initial)}>Show less</button>
+          )}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 function portfolioItems(portfolio = []) {
   return portfolio.map((entry, index) => {
     let item = {};
@@ -578,11 +701,16 @@ function CustomerAvatar({ customer, size = "md" }) {
 
 function MediaGallery({ portfolio, onRemove }) {
   const items = portfolioItems(portfolio);
-  if (!items.length) return <Empty text="No photos or videos uploaded yet." />;
   return (
-    <div className="media-grid">
-      {items.map((item) => (
-        <div className="media-tile" key={`${item.id}-${item.index}`}>
+    <ViewMoreGrid
+      items={items}
+      initial={6}
+      step={6}
+      className="media-grid"
+      label="media items"
+      emptyText="No photos or videos uploaded yet."
+      renderItem={(item) => (
+        <div className="media-tile">
           {item.kind === "video" ? (
             <video src={item.url} controls preload="metadata" />
           ) : (
@@ -593,8 +721,8 @@ function MediaGallery({ portfolio, onRemove }) {
             {onRemove ? <button type="button" onClick={() => onRemove(item.index)} title="Remove media"><Trash2 size={14} /></button> : null}
           </div>
         </div>
-      ))}
-    </div>
+      )}
+    />
   );
 }
 
@@ -2169,6 +2297,22 @@ function CustomerApp({ onLogout }) {
     }
   }
 
+  async function handleBookingCreated(createdBooking) {
+    if (createdBooking?.id) {
+      setBookings((old) => {
+        const existingOrders = old.orders || [];
+        const nextOrders = existingOrders.some((row) => row.id === createdBooking.id)
+          ? existingOrders.map((row) => row.id === createdBooking.id ? { ...row, ...createdBooking } : row)
+          : [createdBooking, ...existingOrders];
+        return { ...old, orders: nextOrders };
+      });
+    }
+    setSelected(null);
+    setProfile(null);
+    setActivePanel("orders");
+    await load();
+  }
+
   const panels = [
     ["browse", t("customer.panel.browse", "Browse Tailors"), UsersRound, null],
     ["profile", t("customer.panel.profile", "Selected Tailor"), Scissors, null],
@@ -2208,7 +2352,7 @@ function CustomerApp({ onLogout }) {
         <div className="customer-content">
           {activePanel === "browse" ? <CustomerBrowsePanel filters={filters} setFilters={setFilters} allTailors={tailors} tailors={visibleTailors} openProfile={openProfile} onBook={openProfile} onFavorite={toggleFavorite} onFollow={toggleFollow} geo={geo} radiusKm={radiusKm} setRadiusKm={setRadiusKm} /> : null}
           {activePanel === "profile" ? (
-            selected && profile ? <CustomerTailorProfile profile={profile} reload={load} onFavorite={toggleFavorite} onFollow={toggleFollow} /> : <Empty text={t("customer.selectTailorEmpty", "Select a tailor from Browse Tailors to see profile, services, reviews, availability and booking form.")} />
+            selected && profile ? <CustomerTailorProfile profile={profile} reload={load} onFavorite={toggleFavorite} onFollow={toggleFollow} onBookingCreated={handleBookingCreated} /> : <Empty text={t("customer.selectTailorEmpty", "Select a tailor from Browse Tailors to see profile, services, reviews, availability and booking form.")} />
           ) : null}
           {activePanel === "favorites" ? <CustomerFavoritesPanel tailors={favorites} openProfile={openProfile} onFavorite={toggleFavorite} onFollow={toggleFollow} /> : null}
           {activePanel === "updates" ? <Updates title={t("customer.updatesTitle", "Customer Updates")} rows={bookings.notifications || []} /> : null}
@@ -2383,9 +2527,13 @@ function CustomerBrowsePanel({ filters, setFilters, allTailors, tailors, openPro
       </section>
       <small className="filter-result-count">{tailors.length} tailor{tailors.length === 1 ? "" : "s"} match your filters.</small>
       <h3>{geo.status === "ready" ? t("customer.nearbyTailors", "Nearby Tailors") : t("customer.approvedTailors", "Approved Tailors")}</h3>
-      <div className="cards">
-        {tailors.length ? tailors.map((t) => <TailorCard key={t.id} tailor={t} onOpen={() => openProfile(t)} onBook={() => onBook(t)} onFavorite={onFavorite} onFollow={onFollow} />) : <Empty text={t("customer.noTailors", "No approved tailors match the current filters. Clear filters or approve a tailor from Admin.")} />}
-      </div>
+      <PaginatedCards
+        items={tailors}
+        pageSize={6}
+        label="tailors"
+        emptyText={t("customer.noTailors", "No approved tailors match the current filters. Clear filters or approve a tailor from Admin.")}
+        renderItem={(tailor) => <TailorCard tailor={tailor} onOpen={() => openProfile(tailor)} onBook={() => onBook(tailor)} onFavorite={onFavorite} onFollow={onFollow} />}
+      />
     </section>
   );
 }
@@ -2395,9 +2543,13 @@ function CustomerFavoritesPanel({ tailors, openProfile, onFavorite, onFollow }) 
   return (
     <section className="section-block no-top">
       <h3>{t("customer.favoriteTailors", "Favorite Tailors")}</h3>
-      <div className="cards">
-        {tailors.length ? tailors.map((t) => <TailorCard key={t.id} tailor={t} onOpen={() => openProfile(t)} onBook={() => openProfile(t)} onFavorite={onFavorite} onFollow={onFollow} />) : <Empty text={t("customer.noFavorites", "No favorite tailors yet. Tap the heart on a tailor you like.")} />}
-      </div>
+      <PaginatedCards
+        items={tailors}
+        pageSize={6}
+        label="favorites"
+        emptyText={t("customer.noFavorites", "No favorite tailors yet. Tap the heart on a tailor you like.")}
+        renderItem={(tailor) => <TailorCard tailor={tailor} onOpen={() => openProfile(tailor)} onBook={() => openProfile(tailor)} onFavorite={onFavorite} onFollow={onFollow} />}
+      />
     </section>
   );
 }
@@ -2466,10 +2618,15 @@ function TailorCard({ tailor, onOpen, onBook, onFavorite, onFollow }) {
 }
 
 function OfferList({ offers = [], onRemove }) {
-  if (!offers.length) return <Empty text="No active offers posted yet." />;
   return (
-    <div className="offer-grid">
-      {offers.map((offer) => {
+    <ViewMoreGrid
+      items={offers}
+      initial={4}
+      step={4}
+      className="offer-grid"
+      label="offers"
+      emptyText="No active offers posted yet."
+      renderItem={(offer) => {
         const mediaUrl = assetUrl(offer.mediaUrl);
         const mediaKind = mediaKindFrom(offer.mediaType, mediaUrl);
         return (
@@ -2488,8 +2645,8 @@ function OfferList({ offers = [], onRemove }) {
             {onRemove && offer.active !== false ? <button className="danger-link" type="button" onClick={() => onRemove(offer.id)}>Deactivate</button> : null}
           </article>
         );
-      })}
-    </div>
+      }}
+    />
   );
 }
 
@@ -2516,7 +2673,7 @@ function servicePatchId(service) {
   return service.serviceUuid || service.service_id || service.serviceId || service.id;
 }
 
-function CustomerTailorProfile({ profile, reload, onFavorite, onFollow }) {
+function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookingCreated }) {
   const { tailor, services, reviews, offers = [] } = profile;
   const serviceRows = useMemo(() => (services || []).map(normalizeService), [services]);
   const [serviceId, setServiceId] = useState(serviceRows[0]?.id || "");
@@ -2572,7 +2729,12 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow }) {
         customerLocationLng: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.longitude : undefined,
       });
       setMessage(res.message || `Booking ${res.code} created with ${tailor.shop}.`);
-      reload();
+      setForm({ quantity: 1, requirements: "", preferredDate: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
+      if (onBookingCreated) {
+        await onBookingCreated(res.booking || res);
+      } else {
+        await reload();
+      }
     } catch (err) {
       setMessage(err.message);
     }
@@ -2607,16 +2769,21 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow }) {
       <h3>Photos and Videos</h3>
       <MediaGallery portfolio={tailor.portfolio} />
       <h3>Services</h3>
-      <div className="service-list">
-        {serviceRows.length ? serviceRows.map((s) => (
-          <button key={s.id} className={serviceId === s.id ? "service active" : "service"} onClick={() => setServiceId(s.id)}>
+      <PaginatedCards
+        items={serviceRows}
+        pageSize={5}
+        className="service-list"
+        label="services"
+        emptyText="No active services added yet."
+        renderItem={(s) => (
+          <button className={serviceId === s.id ? "service active" : "service"} onClick={() => setServiceId(s.id)}>
             <span>{s.name}</span>
             <b>{money(s.price)}</b>
             <small>{s.category}{s.isCombo && s.comboItems.length ? ` - Includes ${s.comboItems.join(", ")}` : ""}</small>
             {s.description ? <small>{s.description}</small> : null}
           </button>
-        )) : <Empty text="No active services added yet." />}
-      </div>
+        )}
+      />
       <h3>Send Booking Request</h3>
       {disabled ? <div className="notice">Currently Not Accepting New Orders</div> : (
         <form className="stack-form" onSubmit={submit}>
@@ -2651,11 +2818,15 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow }) {
       )}
       {message ? <div className={message.includes("waiting list") ? "notice waiting-notice" : message.includes("Booking") || message.includes("approved") ? "notice ok" : "error"}>{message.includes("waiting list") ? <><span className="live-dot" /> {message}</> : message}</div> : null}
       <h3>Reviews</h3>
-      {reviews.length ? (
-        <div className="review-list">
-          {reviews.map((r) => <ReviewCard key={r.id} review={r} />)}
-        </div>
-      ) : <Empty text="No public reviews yet." />}
+      <ViewMoreGrid
+        items={reviews}
+        initial={4}
+        step={4}
+        className="review-list"
+        label="reviews"
+        emptyText="No public reviews yet."
+        renderItem={(review) => <ReviewCard review={review} />}
+      />
     </div>
   );
 }
@@ -2827,14 +2998,78 @@ function CustomerRequests({ rows }) {
 }
 
 function CustomerOrders({ rows, reload }) {
+  const [filter, setFilter] = useState("in_progress");
+  const inProgressOrders = rows.filter((order) => !isClosedOrder(order) && !isCancelledCustomerOrder(order));
+  const completedOrders = rows.filter((order) => isClosedOrder(order) && !isCancelledCustomerOrder(order));
+  const cancelledOrders = rows.filter((order) => isCancelledCustomerOrder(order));
+  const filters = [
+    ["in_progress", "In progress", inProgressOrders],
+    ["completed", "Completed", completedOrders],
+    ["cancelled", "Cancelled", cancelledOrders],
+    ["all", "All orders", rows],
+  ];
+  const activeFilter = filters.find(([key]) => key === filter) || filters[0];
+  const activeRows = activeFilter[2];
+
   return (
     <section className="section-block no-top">
-      <h3>Orders</h3>
-      {rows.length ? (
-        <div className="order-card-list">
-          {rows.map((order) => <CustomerOrderCard key={order.id} order={order} reload={reload} />)}
+      <div className="section-head">
+        <div>
+          <h3>Orders</h3>
+          <p>Track active orders, review completed orders, or check cancelled orders.</p>
         </div>
+      </div>
+      {rows.length ? (
+        <>
+          <div className="order-filter-tabs" role="tablist" aria-label="Order filters">
+            {filters.map(([key, label, items]) => (
+              <button
+                type="button"
+                key={key}
+                className={filter === key ? "active" : ""}
+                onClick={() => setFilter(key)}
+                role="tab"
+                aria-selected={filter === key}
+              >
+                <span>{label}</span>
+                <b>{items.length}</b>
+              </button>
+            ))}
+          </div>
+          {filter === "all" ? (
+            <div className="order-card-list">
+              <CustomerOrderGroup title="In progress orders" rows={inProgressOrders} emptyText="No in-progress orders right now." reload={reload} />
+              <CustomerOrderGroup title="Completed orders" rows={completedOrders} emptyText="No completed orders yet." reload={reload} />
+              <CustomerOrderGroup title="Cancelled orders" rows={cancelledOrders} emptyText="No cancelled orders." reload={reload} />
+            </div>
+          ) : (
+            <CustomerOrderGroup title={`${activeFilter[1]} orders`} rows={activeRows} emptyText={`No ${activeFilter[1].toLowerCase()} orders right now.`} reload={reload} />
+          )}
+        </>
       ) : <Empty />}
+    </section>
+  );
+}
+
+function CustomerOrderGroup({ title, rows, emptyText, reload }) {
+  return (
+    <section className="customer-order-group">
+      <div className="section-head tight">
+        <div>
+          <h3>{title}</h3>
+          <p>{rows.length} order{rows.length === 1 ? "" : "s"}</p>
+        </div>
+      </div>
+      {rows.length ? (
+        <PaginatedCards
+          items={rows}
+          pageSize={4}
+          className="customer-order-card-list"
+          label="orders"
+          emptyText={emptyText}
+          renderItem={(order) => <CustomerOrderCard order={order} reload={reload} />}
+        />
+      ) : <Empty text={emptyText} />}
     </section>
   );
 }
@@ -2861,6 +3096,7 @@ function normalizeOrderStatusPayload(order, statusPayload) {
     trackerStage: stage,
     steps,
     otpEnabled: statusPayload?.otpEnabled ?? String(booking.paymentStatus || order.payment_status || "").toLowerCase() === "paid",
+    paymentIntent: statusPayload?.paymentIntent || statusPayload?.payment_intent || booking.paymentIntent || booking.payment_intent || order.paymentIntent || order.payment_intent || null,
   };
 }
 
@@ -2868,16 +3104,89 @@ function isClosedOrder(order) {
   return String(order?.status || "").toLowerCase() === "completed" || Boolean(order?.completed_at || order?.completedAt);
 }
 
+function isCancelledCustomerOrder(order) {
+  return String(order?.status || "").toLowerCase() === "cancelled";
+}
+
+function orderDateInput(value) {
+  if (!value) return "";
+  const raw = String(value);
+  if (/^\d{4}-\d{2}-\d{2}/.test(raw)) return raw.slice(0, 10);
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "" : utcDateToDateInput(parsed);
+}
+
+function todayDateInput() {
+  const today = new Date();
+  return [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+function laterDateInput(...values) {
+  return values.filter(Boolean).sort().at(-1) || "";
+}
+
+function isCustomerManageAllowed(order) {
+  if (order?.canCustomerManage === false) return false;
+  if (isClosedOrder(order) || isCancelledCustomerOrder(order)) return false;
+  const status = String(order?.status || "").toLowerCase();
+  const stage = String(order?.trackerStage || order?.tracker_stage || "").toLowerCase();
+  if (["measurement_done", "in_progress", "ready_for_delivery", "out_for_delivery", "disputed"].includes(status)) return false;
+  if (["measurement done", "stitching in progress", "ready for delivery", "out for delivery", "delivered"].includes(stage)) return false;
+  if (order?.measurement_done_at || order?.measurementDoneAt) return false;
+  const appointmentDate = orderDateInput(order?.appointmentDate || order?.appointment_date);
+  return !appointmentDate || todayDateInput() < appointmentDate;
+}
+
+function whatsappPaymentUrl(rawUrl, intent) {
+  const fallbackPhone = intent?.adminWhatsappNumber || intent?.admin_whatsapp_number || "918790901281";
+  const reference = intent?.paymentReference || intent?.payment_reference || "";
+  const total = intent?.payableTotal || intent?.payable_total || "";
+  const fallbackText = [
+    "Hi TailoraHub, I want to pay for my order.",
+    reference ? `Payment reference: ${reference}` : "",
+    total ? `Amount to pay: Rs ${total}` : "",
+  ].filter(Boolean).join("\n");
+
+  try {
+    const parsed = new URL(rawUrl || "", window.location.href);
+    const host = parsed.hostname.toLowerCase();
+    const text = parsed.searchParams.get("text") || fallbackText;
+    let phone = parsed.searchParams.get("phone") || fallbackPhone;
+    if (host === "wa.me") {
+      phone = parsed.pathname.replace(/\D/g, "") || fallbackPhone;
+    }
+    return `https://api.whatsapp.com/send?phone=${String(phone).replace(/\D/g, "")}&text=${encodeURIComponent(text)}`;
+  } catch {
+    return `https://api.whatsapp.com/send?phone=${String(fallbackPhone).replace(/\D/g, "")}&text=${encodeURIComponent(fallbackText)}`;
+  }
+}
+
+function openWhatsappPayment(rawUrl, intent) {
+  const url = whatsappPaymentUrl(rawUrl, intent);
+  const opened = window.open(url, "_blank", "noopener");
+  if (opened) return true;
+  window.location.assign(url);
+  return true;
+}
+
 function CustomerOrderCard({ order, reload }) {
   const [statusData, setStatusData] = useState(() => normalizeOrderStatusPayload(order, null));
   const [breakdown, setBreakdown] = useState(null);
+  const [paymentIntent, setPaymentIntent] = useState(order.paymentIntent || order.payment_intent || null);
+  const [activeView, setActiveView] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function loadStatus() {
     try {
       const payload = await api.bookingStatus(order.id);
-      setStatusData(normalizeOrderStatusPayload(order, payload));
+      const nextStatus = normalizeOrderStatusPayload(order, payload);
+      setStatusData(nextStatus);
+      if (nextStatus.paymentIntent) setPaymentIntent(nextStatus.paymentIntent);
     } catch {
       setStatusData(normalizeOrderStatusPayload(order, null));
     }
@@ -2901,7 +3210,9 @@ function CustomerOrderCard({ order, reload }) {
       socket.onmessage = (event) => {
         if (closed) return;
         const payload = JSON.parse(event.data);
-        setStatusData(normalizeOrderStatusPayload(order, payload));
+        const nextStatus = normalizeOrderStatusPayload(order, payload);
+        setStatusData(nextStatus);
+        if (nextStatus.paymentIntent) setPaymentIntent(nextStatus.paymentIntent);
       };
     } catch {}
     const timer = setInterval(loadStatus, 15000);
@@ -2918,8 +3229,12 @@ function CustomerOrderCard({ order, reload }) {
     try {
       const currentBreakdown = breakdown || await api.bookingPaymentBreakdown(order.id);
       setBreakdown(currentBreakdown);
-      const res = await api.payBooking(order.id, { method: "wallet" });
-      setMessage(res.message || "Payment completed.");
+      const res = await api.payBooking(order.id, { method: "manual_whatsapp" });
+      const nextIntent = res.paymentIntent || res.payment_intent || null;
+      if (nextIntent) setPaymentIntent(nextIntent);
+      const whatsappUrl = res.whatsappUrl || res.whatsapp_url || nextIntent?.whatsappUrl || nextIntent?.whatsapp_url;
+      if (whatsappUrl) openWhatsappPayment(whatsappUrl, nextIntent);
+      setMessage(res.message || "Payment request opened in WhatsApp. Admin verification is required before delivery OTP unlocks.");
       if (res.breakdown) setBreakdown(res.breakdown);
       await loadStatus();
       await reload();
@@ -2960,32 +3275,237 @@ function CustomerOrderCard({ order, reload }) {
     }
   }
 
+  async function updateCustomerOrder(payload) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const res = await api.updateCustomerBooking(order.id, payload);
+      const nextBooking = res.booking || statusData;
+      setStatusData((old) => normalizeOrderStatusPayload({ ...old, ...nextBooking }, { booking: nextBooking, steps: old.steps }));
+      setMessage(res.message || "Order details updated before measurement.");
+      await loadStatus();
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelCustomerOrder(payload) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const res = await api.cancelCustomerBooking(order.id, payload);
+      const nextBooking = res.booking || statusData;
+      setStatusData((old) => normalizeOrderStatusPayload({ ...old, ...nextBooking }, { booking: nextBooking, steps: old.steps }));
+      setActiveView("");
+      setMessage(res.message || "Order cancelled before measurement.");
+      await loadStatus();
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const isPaid = String(statusData.paymentStatus || statusData.payment_status || "").toLowerCase() === "paid";
   const completed = isClosedOrder(statusData);
+  const cancelled = isCancelledCustomerOrder(statusData);
+  const manageable = isCustomerManageAllowed(statusData);
+  const currentStep = (statusData.steps || []).find((step) => step.current) || [...(statusData.steps || [])].reverse().find((step) => step.completed) || { stage: statusData.trackerStage || "Order Placed" };
+  const completedCount = (statusData.steps || []).filter((step) => step.completed || step.current).length;
+  const progress = statusData.steps?.length ? Math.round((completedCount / statusData.steps.length) * 100) : 14;
+  const appointmentDate = statusData.appointmentDate || statusData.appointment_date;
+  const deliveryDate = statusData.expectedCompletion || statusData.expected_completion;
+  const blockedReason = statusData.customerManageBlockedReason || statusData.customer_manage_blocked_reason || "Manage options close on the measurement appointment date.";
 
   return (
-    <article className="record-card order-tracker-card">
-      <div className="section-head">
+    <article className={completed ? "compact-order-card completed" : cancelled ? "compact-order-card cancelled" : "compact-order-card"}>
+      <div className="compact-order-summary">
+        <div className="compact-order-id">
+          <strong>{statusData.code || order.code}</strong>
+          <StatusPill value={statusData.status} />
+          <StatusPill value={statusData.paymentStatus || statusData.payment_status} />
+        </div>
         <div>
-          <h3>{statusData.code || order.code}</h3>
-          <p>{statusData.serviceName || order.service_name} - {statusData.tailorName || order.shop}</p>
+          <h3>{statusData.serviceName || order.service_name}</h3>
+          <p>{statusData.tailorName || order.shop}</p>
         </div>
-        <div className="order-total">
-          <small>Total</small>
-          <strong>{money(statusData.total || order.total)}</strong>
+        <div className="compact-progress-row" aria-label={`Order progress ${progress}%`}>
+          <span><i style={{ width: `${progress}%` }} /></span>
+          <b>{currentStep.stage}</b>
+        </div>
+        <div className="compact-order-meta">
+          <span><small>Measurement</small><b>{fmtDay(appointmentDate)}</b></span>
+          <span><small>Delivery</small><b>{fmtDay(deliveryDate)}</b></span>
+          <span><small>Total</small><b>{money(statusData.total || order.total)}</b></span>
         </div>
       </div>
-      <OrderTracker steps={statusData.steps} />
-      {!isPaid ? <PaymentBreakdownCard breakdown={breakdown} /> : null}
-      <div className="order-payment-row">
-        <StatusPill value={statusData.status} />
-        <StatusPill value={statusData.paymentStatus || statusData.payment_status} />
-        {!isPaid ? <button type="button" className="primary-btn compact-action" onClick={pay} disabled={busy}>Pay before OTP</button> : <span className="pill ok">OTP unlocked</span>}
+
+      <div className="compact-order-actions" role="tablist" aria-label={`Actions for ${statusData.code || order.code}`}>
+        <button type="button" className={activeView === "track" ? "active" : ""} onClick={() => setActiveView((view) => view === "track" ? "" : "track")}>
+          Track order
+        </button>
+        {!completed && !cancelled ? (
+          <button type="button" className={activeView === "manage" ? "active" : ""} onClick={() => setActiveView((view) => view === "manage" ? "" : "manage")} disabled={!manageable}>
+            Manage order
+          </button>
+        ) : null}
+        {!completed && !cancelled ? (
+          <button type="button" className={activeView === "instructions" ? "active" : ""} onClick={() => setActiveView((view) => view === "instructions" ? "" : "instructions")} disabled={!manageable}>
+            Update instructions
+          </button>
+        ) : null}
+        {!isPaid && !completed && !cancelled ? <button type="button" onClick={pay} disabled={busy}>{busy ? "Opening..." : "Pay on WhatsApp"}</button> : null}
+        {completed ? <button type="button" className={activeView === "feedback" ? "active" : ""} onClick={() => setActiveView((view) => view === "feedback" ? "" : "feedback")}>Feedback</button> : null}
       </div>
-      {completed ? <QualityCheckPrompt onDispute={raiseDispute} busy={busy} /> : null}
-      {completed ? <OrderFeedbackCard order={statusData} onSubmit={submitFeedback} busy={busy} /> : null}
-      {message ? <div className={message.includes("raised") || message.includes("completed") || message.includes("submitted") ? "notice ok" : "error"}>{message}</div> : null}
+
+      {!manageable && !completed && !cancelled ? <small className="manage-cutoff-note">{blockedReason}</small> : null}
+      {cancelled ? <div className="notice">Order cancelled: {statusData.cancelReason || statusData.cancel_reason || "Cancelled before measurement."}</div> : null}
+
+      {activeView === "track" ? (
+        <div className="compact-order-panel">
+          <OrderTracker steps={statusData.steps} />
+          {!isPaid && !cancelled ? <PaymentBreakdownCard breakdown={breakdown} /> : null}
+          {!isPaid && paymentIntent && !cancelled ? <PaymentIntentNotice intent={paymentIntent} /> : null}
+          {completed ? <QualityCheckPrompt onDispute={raiseDispute} busy={busy} /> : null}
+        </div>
+      ) : null}
+
+      {activeView === "manage" && !completed && !cancelled ? (
+        <CustomerOrderManagePanel
+          order={statusData}
+          busy={busy}
+          mode="manage"
+          onUpdate={updateCustomerOrder}
+          onCancel={cancelCustomerOrder}
+        />
+      ) : null}
+
+      {activeView === "instructions" && !completed && !cancelled ? (
+        <CustomerOrderManagePanel
+          order={statusData}
+          busy={busy}
+          mode="instructions"
+          onUpdate={updateCustomerOrder}
+          onCancel={cancelCustomerOrder}
+        />
+      ) : null}
+
+      {activeView === "feedback" && completed ? <OrderFeedbackCard order={statusData} onSubmit={submitFeedback} busy={busy} /> : null}
+      {message ? <div className={message.includes("raised") || message.includes("completed") || message.includes("submitted") || message.includes("created") || message.includes("opened") || message.includes("updated") || message.includes("cancelled") ? "notice ok" : "error"}>{message}</div> : null}
     </article>
+  );
+}
+
+function CustomerOrderManagePanel({ order, busy, mode, onUpdate, onCancel }) {
+  const [deliveryDate, setDeliveryDate] = useState(orderDateInput(order.expectedCompletion || order.expected_completion));
+  const [instructions, setInstructions] = useState(order.notes || "");
+  const [cancelReason, setCancelReason] = useState("");
+  const [localError, setLocalError] = useState("");
+  const appointmentDate = orderDateInput(order.appointmentDate || order.appointment_date);
+  const minFromAppointment = appointmentDate ? addDaysToDateInput(appointmentDate, MEASUREMENT_APPOINTMENT_BLOCKED_WINDOW_DAYS + 1) : "";
+  const minDeliveryDate = laterDateInput(todayDateInput(), minFromAppointment);
+
+  useEffect(() => {
+    setDeliveryDate(orderDateInput(order.expectedCompletion || order.expected_completion));
+    setInstructions(order.notes || "");
+    setCancelReason("");
+    setLocalError("");
+  }, [order.id, order.expectedCompletion, order.expected_completion, order.notes]);
+
+  async function submitDelivery(event) {
+    event.preventDefault();
+    setLocalError("");
+    if (!deliveryDate) {
+      setLocalError("Choose the new delivery date.");
+      return;
+    }
+    if (minDeliveryDate && deliveryDate < minDeliveryDate) {
+      setLocalError("Delivery date must be at least 3 days after the measurement appointment.");
+      return;
+    }
+    await onUpdate({ preferredDate: deliveryDate });
+  }
+
+  async function submitInstructions(event) {
+    event.preventDefault();
+    setLocalError("");
+    if (!instructions.trim()) {
+      setLocalError("Write the updated stitching instructions.");
+      return;
+    }
+    await onUpdate({ instructions: instructions.trim() });
+  }
+
+  async function submitCancel(event) {
+    event.preventDefault();
+    setLocalError("");
+    const reason = cancelReason.trim();
+    if (reason.length < 5) {
+      setLocalError("Add a clear cancellation reason.");
+      return;
+    }
+    await onCancel({ reason });
+  }
+
+  if (!isCustomerManageAllowed(order)) {
+    return <div className="compact-order-panel"><div className="notice">{order.customerManageBlockedReason || "Manage options are available only before the measurement appointment date."}</div></div>;
+  }
+
+  if (mode === "instructions") {
+    return (
+      <form className="compact-order-panel order-manage-grid single" onSubmit={submitInstructions}>
+        <label>
+          Updated stitching instructions
+          <textarea value={instructions} onChange={(event) => setInstructions(event.target.value)} placeholder="Example: Keep sleeve length 10 inches and add extra margin." />
+        </label>
+        {localError ? <small className="field-error">{localError}</small> : null}
+        <button type="submit" className="primary-btn compact-action" disabled={busy}>{busy ? "Saving..." : "Save instructions"}</button>
+      </form>
+    );
+  }
+
+  return (
+    <div className="compact-order-panel order-manage-grid">
+      <form onSubmit={submitDelivery}>
+        <h3>Modify delivery date</h3>
+        <p>Allowed only before the measurement appointment date.</p>
+        <label>
+          New delivery date
+          <input type="date" value={deliveryDate} min={minDeliveryDate || undefined} onChange={(event) => setDeliveryDate(event.target.value)} />
+        </label>
+        <button type="submit" className="secondary-btn" disabled={busy}>{busy ? "Saving..." : "Update delivery date"}</button>
+      </form>
+      <form onSubmit={submitCancel}>
+        <h3>Cancel order</h3>
+        <p>Cancellation closes automatically once the measurement date starts.</p>
+        <label>
+          Cancellation reason
+          <textarea value={cancelReason} onChange={(event) => setCancelReason(event.target.value)} placeholder="Example: Need to change fabric and will book again later." />
+        </label>
+        <button type="submit" className="danger-btn" disabled={busy}>{busy ? "Cancelling..." : "Cancel order"}</button>
+      </form>
+      {localError ? <small className="field-error span-2">{localError}</small> : null}
+    </div>
+  );
+}
+
+function PaymentIntentNotice({ intent }) {
+  const status = String(intent.status || "").replaceAll("_", " ");
+  const reference = intent.paymentReference || intent.payment_reference;
+  const expiresIn = Number(intent.expiresInSeconds ?? intent.expires_in_seconds ?? 0);
+  const expiresText = expiresIn > 0 ? `${Math.ceil(expiresIn / 60)} min left` : "expired";
+  const url = whatsappPaymentUrl(intent.whatsappUrl || intent.whatsapp_url, intent);
+  return (
+    <div className={String(intent.status).toLowerCase() === "pending" ? "notice payment-intent-notice" : "notice"}>
+      <strong>WhatsApp payment reference: {reference}</strong>
+      <span>Status: {status || "pending"} · {expiresText}</span>
+      <small>Money is credited to the tailor wallet only after admin confirms the payment in the admin panel.</small>
+      <a className="whatsapp-payment-link" href={url} target="_blank" rel="noreferrer">Open WhatsApp payment chat</a>
+    </div>
   );
 }
 
@@ -3279,14 +3799,21 @@ function SupportPanel({ role, orders = [] }) {
             <button className="secondary-btn" onClick={() => loadTickets()} disabled={busy}>Refresh</button>
           </div>
           {message ? <div className={message.includes("created") ? "notice ok" : "error"}>{message}</div> : null}
-          {tickets.length ? tickets.map((ticket) => (
-            <button key={ticket.id} className={selected?.id === ticket.id ? "support-ticket active" : "support-ticket"} onClick={() => openTicket(ticket)}>
-              <strong>{ticket.code}</strong>
-              <span>{ticket.subject}</span>
-              <small>{ticket.category} - {ticket.message_count || ticket.messages?.length || 0} messages</small>
-              <div className="inline-actions"><StatusPill value={ticket.priority} /><StatusPill value={ticket.status} /></div>
-            </button>
-          )) : <Empty text="No support tickets yet." />}
+          <PaginatedCards
+            items={tickets}
+            pageSize={5}
+            className="support-ticket-list"
+            label="tickets"
+            emptyText="No support tickets yet."
+            renderItem={(ticket) => (
+              <button className={selected?.id === ticket.id ? "support-ticket active" : "support-ticket"} onClick={() => openTicket(ticket)}>
+                <strong>{ticket.code}</strong>
+                <span>{ticket.subject}</span>
+                <small>{ticket.category} - {ticket.message_count || ticket.messages?.length || 0} messages</small>
+                <div className="inline-actions"><StatusPill value={ticket.priority} /><StatusPill value={ticket.status} /></div>
+              </button>
+            )}
+          />
         </div>
       </div>
       {selected ? (
@@ -3298,15 +3825,21 @@ function SupportPanel({ role, orders = [] }) {
             </div>
             <div className="inline-actions"><StatusPill value={selected.priority} /><StatusPill value={selected.status} /></div>
           </div>
-          <div className="support-thread">
-            {(selected.messages || []).map((row) => (
-              <div key={row.id} className={`support-message ${row.author_role === "admin" ? "agent" : "requester"}`}>
+          <ViewMoreGrid
+            items={selected.messages || []}
+            initial={6}
+            step={6}
+            className="support-thread"
+            label="messages"
+            emptyText="No messages yet."
+            renderItem={(row) => (
+              <div className={`support-message ${row.author_role === "admin" ? "agent" : "requester"}`}>
                 <strong>{row.author_name} <span>{row.author_role}</span></strong>
                 <p>{row.body}</p>
                 <small>{fmtDate(row.created_at)}</small>
               </div>
-            ))}
-          </div>
+            )}
+          />
           {selected.status !== "CLOSED" ? (
             <form className="support-reply" onSubmit={sendReply}>
               <label>Reply<textarea value={reply} onChange={(e) => setReply(e.target.value)} placeholder="Add more details or respond to support" /></label>
@@ -3557,12 +4090,13 @@ function TailorWalletPanel() {
         payload.bank_ifsc = withdraw.bankIfsc;
       }
       const res = await api.withdrawWallet(payload);
-      setWallet((old) => ({ ...old, balance: res.balance }));
+      setWallet((old) => ({ ...old, balance: res.balance ?? old?.balance }));
       setWithdraw({ amount: "", destinationType: "upi_id", otp: "", bankAccountNumber: "", bankIfsc: "" });
       setOtpSent(false);
       setOtpTarget("");
-      setMessage(`Withdrawal ${res.status}. Reference: ${res.txn_ref || "not available"}.`);
+      const successMessage = res.message || `Withdrawal request ${res.status}. Reference: ${res.txn_ref || "not available"}. Admin will process manual payout within 24 hours.`;
       await load();
+      setMessage(successMessage);
     } catch (err) {
       setMessage(err.message);
     } finally {
@@ -4049,11 +4583,15 @@ function TailorServicesPanel() {
       </form>
       {message ? <div className={/(added|updated|reactivated|deactivated)/i.test(message) ? "notice ok" : "error"}>{message}</div> : null}
       {loading ? (
-        <Empty label="Loading services..." />
+        <Empty text="Loading services..." />
       ) : services.length ? (
-        <div className="record-list">
-          {services.map((service) => (
-            <article className="record-card service-row" key={servicePatchId(service)}>
+        <PaginatedCards
+          items={services}
+          pageSize={5}
+          className="record-list"
+          label="services"
+          renderItem={(service) => (
+            <article className="record-card service-row">
               <div className="record-card-head">
                 <Tag size={16} />
                 <strong>{service.name}</strong>
@@ -4072,10 +4610,10 @@ function TailorServicesPanel() {
                 </button>
               </div>
             </article>
-          ))}
-        </div>
+          )}
+        />
       ) : (
-        <Empty label="No services added yet." />
+        <Empty text="No services added yet." />
       )}
     </section>
   );
@@ -4090,10 +4628,14 @@ function TailorFollowersPanel({ followers }) {
           <p>Only customer profile ID and profile picture are shown here.</p>
         </div>
       </div>
-      {followers.length ? (
-        <div className="follower-grid">
-          {followers.map((customer) => (
-            <article className="follower-card" key={customer.customerProfileId}>
+      <PaginatedCards
+        items={followers}
+        pageSize={8}
+        className="follower-grid"
+        label="followers"
+        emptyText="No followers yet. Customers can follow you from your public profile."
+        renderItem={(customer) => (
+            <article className="follower-card">
               <CustomerAvatar customer={customer} size="lg" />
               <div>
                 <small>Customer Profile ID</small>
@@ -4101,9 +4643,8 @@ function TailorFollowersPanel({ followers }) {
                 <small>Followed {fmtDate(customer.followedAt)}</small>
               </div>
             </article>
-          ))}
-        </div>
-      ) : <Empty text="No followers yet. Customers can follow you from your public profile." />}
+        )}
+      />
     </section>
   );
 }
@@ -4112,7 +4653,15 @@ function Updates({ title, rows }) {
   return (
     <section className="section-block">
       <h3>{title}</h3>
-      {rows.length ? <div className="updates-list">{rows.slice(0, 8).map((row) => <div className="update-item" key={row.id}><strong>{row.title}</strong><p>{row.body}</p><small>{fmtDate(row.ts)}</small></div>)}</div> : <Empty text="No updates yet." />}
+      <ViewMoreGrid
+        items={rows}
+        initial={8}
+        step={8}
+        className="updates-list"
+        label="updates"
+        emptyText="No updates yet."
+        renderItem={(row) => <div className="update-item"><strong>{row.title}</strong><p>{row.body}</p><small>{fmtDate(row.ts)}</small></div>}
+      />
     </section>
   );
 }
@@ -4189,9 +4738,13 @@ function TailorWaitingListPanel({ reloadDashboard }) {
       </div>
       {message ? <div className={message.includes("confirmed") || message.includes("pending") ? "notice ok" : "error"}>{message}</div> : null}
       {loading ? <div className="loading">Loading waiting list...</div> : rows.length ? (
-        <div className="record-list">
-          {rows.map((row) => (
-            <article className="record-card waiting-card" key={row.id}>
+        <PaginatedCards
+          items={rows}
+          pageSize={5}
+          className="record-list"
+          label="waiting customers"
+          renderItem={(row) => (
+            <article className="record-card waiting-card">
               <div>
                 <strong>{row.code}</strong>
                 <p>{row.customerName || row.customer_name} - {row.serviceName || row.service_name}</p>
@@ -4203,14 +4756,28 @@ function TailorWaitingListPanel({ reloadDashboard }) {
                 <button type="button" className="primary-btn compact-action" onClick={() => confirm(row)} disabled={busy === row.id}>{busy === row.id ? "Confirming..." : "Confirm Next"}</button>
               </div>
             </article>
-          ))}
-        </div>
+          )}
+        />
       ) : <Empty text="No customers are waiting right now." />}
     </section>
   );
 }
 
 function TailorOrders({ rows, reload }) {
+  const [filter, setFilter] = useState("in_progress");
+
+  const cancelledOrders = rows.filter((order) => String(order?.status || "").toLowerCase() === "cancelled");
+  const completedOrders = rows.filter((order) => isCompletedOrder(order) && String(order?.status || "").toLowerCase() !== "cancelled");
+  const inProgressOrders = rows.filter((order) => !isCompletedOrder(order) && String(order?.status || "").toLowerCase() !== "cancelled");
+  const filters = [
+    ["in_progress", "In progress", inProgressOrders],
+    ["completed", "Completed", completedOrders],
+    ["cancelled", "Cancelled", cancelledOrders],
+    ["all", "All orders", rows],
+  ];
+  const activeFilter = filters.find(([key]) => key === filter) || filters[0];
+  const activeRows = activeFilter[2];
+
   async function addCharge(order) {
     if (isCompletedOrder(order)) return;
     const description = prompt("Charge description:", "Extra fitting");
@@ -4230,16 +4797,42 @@ function TailorOrders({ rows, reload }) {
 
   return (
     <section className="section-block">
-      <h3>Orders</h3>
-      {rows.length ? <Table columns={["Order", "Customer", "Status", "Payment", "Due", "Total", "Actions"]} rows={rows.map((o) => [
-        <><strong>{o.code}</strong><small>{o.service_name}</small></>,
-        <><span>{o.customer_name}</span><small>{o.customer_phone || ""}</small></>,
-        <StatusPill value={o.status} />,
-        <StatusPill value={o.payment_status} />,
-        fmtDay(o.expected_completion),
-        money(o.total),
-        <TailorOrderActions order={o} reload={reload} onCharge={() => addCharge(o)} onMeasurementDone={() => markMeasurementDone(o)} />,
-      ])} /> : <Empty text="No orders yet." />}
+      <div className="section-head">
+        <div>
+          <h3>Orders</h3>
+          <p>Filter active, completed and cancelled orders without losing the full order controls.</p>
+        </div>
+      </div>
+      {rows.length ? (
+        <>
+          <div className="order-filter-tabs" role="tablist" aria-label="Tailor order filters">
+            {filters.map(([key, label, items]) => (
+              <button
+                type="button"
+                key={key}
+                className={filter === key ? "active" : ""}
+                onClick={() => setFilter(key)}
+                role="tab"
+                aria-selected={filter === key}
+              >
+                <span>{label}</span>
+                <b>{items.length}</b>
+              </button>
+            ))}
+          </div>
+          {activeRows.length ? (
+            <Table columns={["Order", "Customer", "Status", "Payment", "Due", "Total", "Actions"]} label="orders" rows={activeRows.map((o) => [
+              <><strong>{o.code}</strong><small>{o.service_name}</small></>,
+              <><span>{o.customer_name}</span><small>{o.customer_phone || ""}</small></>,
+              <StatusPill value={o.status} />,
+              <StatusPill value={o.payment_status} />,
+              fmtDay(o.expected_completion),
+              money(o.total),
+              <TailorOrderActions order={o} reload={reload} onCharge={() => addCharge(o)} onMeasurementDone={() => markMeasurementDone(o)} />,
+            ])} />
+          ) : <Empty text={`No ${activeFilter[1].toLowerCase()} orders right now.`} />}
+        </>
+      ) : <Empty text="No orders yet." />}
     </section>
   );
 }
@@ -4341,7 +4934,7 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
 function AdminApp({ onLogout }) {
   const { language, setLanguage, t } = useLanguage();
   const [section, setSection] = useAppHistoryState("adminSection", "dashboard");
-  const [data, setData] = useState({ metrics: {}, customers: [], tailors: [], requests: [], orders: [], payments: [], reviews: [], supportTickets: [], complaints: [], audit: [] });
+  const [data, setData] = useState({ metrics: {}, customers: [], tailors: [], requests: [], orders: [], payments: [], paymentIntents: [], withdrawalRequests: [], reviews: [], supportTickets: [], complaints: [], audit: [] });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
@@ -4350,19 +4943,21 @@ function AdminApp({ onLogout }) {
     setLoading(true);
     setError("");
     try {
-      const [metrics, customers, tailors, requests, orders, payments, reviews, supportTickets, complaints, audit] = await Promise.all([
+      const [metrics, customers, tailors, requests, orders, payments, paymentIntents, withdrawalRequests, reviews, supportTickets, complaints, audit] = await Promise.all([
         api.metrics(),
         api.customers(),
         api.tailors(),
         api.bookingRequests(),
         api.orders(),
         api.payments(),
+        api.adminPaymentIntents(),
+        api.adminWithdrawalRequests(),
         api.reviews(),
         api.supportTickets(),
         api.complaints(),
         api.audit(),
       ]);
-      setData({ metrics, customers, tailors, requests, orders, payments, reviews, supportTickets, complaints, audit });
+      setData({ metrics, customers, tailors, requests, orders, payments, paymentIntents, withdrawalRequests, reviews, supportTickets, complaints, audit });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -4381,6 +4976,8 @@ function AdminApp({ onLogout }) {
       requests: data.requests.filter(includes),
       orders: data.orders.filter(includes),
       payments: data.payments.filter(includes),
+      paymentIntents: data.paymentIntents.filter(includes),
+      withdrawalRequests: data.withdrawalRequests.filter(includes),
       reviews: data.reviews.filter(includes),
       supportTickets: data.supportTickets.filter(includes),
       complaints: data.complaints.filter(includes),
@@ -4429,7 +5026,7 @@ function AdminApp({ onLogout }) {
         {section === "approvals" && <Approvals rows={filtered.tailors.filter((t) => t.approvalStatus === "PENDING_APPROVAL")} reload={loadAll} />}
         {section === "requests" && <AdminRequests rows={filtered.requests} />}
         {section === "orders" && <Orders rows={filtered.orders} reload={loadAll} />}
-        {section === "payments" && <Payments rows={filtered.payments} />}
+        {section === "payments" && <Payments rows={filtered.payments} intents={filtered.paymentIntents} withdrawals={filtered.withdrawalRequests} reload={loadAll} />}
         {section === "finance" && <AdminFinancePanel />}
         {section === "referrals" && <AdminReferralTreePanel tailors={filtered.tailors} />}
         {section === "customerReferrals" && <AdminCustomerReferralTreePanel customers={filtered.customers} />}
@@ -4988,15 +5585,24 @@ function Tailors({ rows, reload }) {
 
 function Approvals({ rows, reload }) {
   if (!rows.length) return <Empty />;
-  return <div className="cards">{rows.map((r) => <div className="record-card" key={r.id}>
-    <h3>{r.shop}</h3>
-    <p>{r.ownerName} - {(r.expertise || []).join(", ")}</p>
-    <p>{r.email || r.phone}</p>
-    <div className="actions">
-      <button className="ok-btn" onClick={async () => { await api.approveTailor(r.id); reload(); }}>Approve + Verify</button>
-      <button className="danger-btn" onClick={async () => { await api.rejectTailor(r.id, prompt("Reject reason:") || "Documents incomplete"); reload(); }}>Reject</button>
-    </div>
-  </div>)}</div>;
+  return (
+    <PaginatedCards
+      items={rows}
+      pageSize={6}
+      label="approvals"
+      renderItem={(r) => (
+        <div className="record-card">
+          <h3>{r.shop}</h3>
+          <p>{r.ownerName} - {(r.expertise || []).join(", ")}</p>
+          <p>{r.email || r.phone}</p>
+          <div className="actions">
+            <button className="ok-btn" onClick={async () => { await api.approveTailor(r.id); reload(); }}>Approve + Verify</button>
+            <button className="danger-btn" onClick={async () => { await api.rejectTailor(r.id, prompt("Reject reason:") || "Documents incomplete"); reload(); }}>Reject</button>
+          </div>
+        </div>
+      )}
+    />
+  );
 }
 
 function AdminRequests({ rows }) {
@@ -5023,17 +5629,159 @@ function Orders({ rows, reload }) {
   ])} />;
 }
 
-function Payments({ rows }) {
-  if (!rows.length) return <Empty />;
-  return <Table columns={["Payment", "Order", "Amount", "Method", "Gateway", "Status", "Updated"]} rows={rows.map((r) => [
-    r.id,
-    r.order_code,
-    money(r.amount),
-    r.method || "-",
-    r.gateway_verified === false || r.verification_status === "unverified_by_gateway" ? <StatusPill value="UNVERIFIED BY GATEWAY" /> : <StatusPill value="GATEWAY VERIFIED" />,
-    <StatusPill value={r.status} />,
-    fmtDate(r.updated),
-  ])} />;
+function Payments({ rows, intents = [], withdrawals = [], reload = () => {} }) {
+  const [proofs, setProofs] = useState({});
+  const [payoutRefs, setPayoutRefs] = useState({});
+  const [message, setMessage] = useState("");
+  const [busyId, setBusyId] = useState("");
+
+  const pendingIntents = intents.filter((item) => String(item.status || "").toLowerCase() === "pending");
+  const pendingWithdrawals = withdrawals.filter((item) => String(item.status || "").toLowerCase() === "pending_admin_review");
+
+  async function verifyIntent(item) {
+    const proofReference = (proofs[item.id] || "").trim();
+    if (!proofReference) {
+      setMessage("Enter the UPI/WhatsApp transaction reference before verifying payment.");
+      return;
+    }
+    setBusyId(item.id);
+    setMessage("");
+    try {
+      const res = await api.verifyPaymentIntent(item.id, { proofReference });
+      setMessage(res.message || "Payment verified.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function rejectIntent(item) {
+    setBusyId(item.id);
+    setMessage("");
+    try {
+      const res = await api.rejectPaymentIntent(item.id, { adminNote: "Payment was not confirmed in the business account." });
+      setMessage(res.message || "Payment request rejected.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function approveWithdrawal(item) {
+    const payoutReference = (payoutRefs[item.id] || "").trim();
+    if (!payoutReference) {
+      setMessage("Enter your manual bank/UPI payout reference before approving withdrawal.");
+      return;
+    }
+    setBusyId(item.id);
+    setMessage("");
+    try {
+      const res = await api.approveWithdrawalRequest(item.id, { payoutReference });
+      setMessage(res.message || "Withdrawal approved.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  async function rejectWithdrawal(item) {
+    setBusyId(item.id);
+    setMessage("");
+    try {
+      const res = await api.rejectWithdrawalRequest(item.id, { adminNote: "Manual payout could not be processed. Please contact support." });
+      setMessage(res.message || "Withdrawal rejected.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusyId("");
+    }
+  }
+
+  if (!rows.length && !intents.length && !withdrawals.length) return <Empty />;
+
+  return (
+    <div className="admin-payment-panel">
+      {message ? <div className={message.includes("Enter") || message.includes("not") || message.includes("rejected") ? "error banner" : "notice ok"}>{message}</div> : null}
+
+      <section className="section-block no-top">
+        <div className="section-head">
+          <div>
+            <h3>WhatsApp Payment Verification</h3>
+            <p>Customer money reaches the business account first. Verify here only after checking WhatsApp/UPI proof.</p>
+          </div>
+          <StatusPill value={`${pendingIntents.length} pending`} />
+        </div>
+        {pendingIntents.length ? <Table columns={["Order", "Customer", "Reference", "Payable", "Tailor credit", "Expires", "Action"]} rows={pendingIntents.map((item) => [
+          <><strong>{item.orderCode || item.order_code}</strong><small>{item.shop}</small></>,
+          <><span>{item.customerName || item.customer_name}</span><small>{item.customerPhone || item.customer_phone || "-"}</small></>,
+          item.paymentReference || item.payment_reference,
+          money(item.payableTotal ?? item.payable_total),
+          <><span>{money(item.tailorCreditAmount ?? item.tailor_credit_amount)}</span><small>Commission {money(item.commissionAmount ?? item.commission_amount)}</small></>,
+          fmtDate(item.expiresAt || item.expires_at),
+          <div className="inline-actions finance-actions">
+            <input
+              value={proofs[item.id] || ""}
+              onChange={(event) => setProofs((old) => ({ ...old, [item.id]: event.target.value }))}
+              placeholder="UPI/WhatsApp txn ref"
+            />
+            <button type="button" onClick={() => verifyIntent(item)} disabled={busyId === item.id}>Verify</button>
+            <button type="button" className="danger-link" onClick={() => rejectIntent(item)} disabled={busyId === item.id}>Reject</button>
+          </div>,
+        ])} /> : <Empty text="No WhatsApp payments waiting for verification." />}
+      </section>
+
+      <section className="section-block">
+        <div className="section-head">
+          <div>
+            <h3>Withdrawal Approval Queue</h3>
+            <p>Debit the tailor wallet only after you manually pay the tailor from the business account.</p>
+          </div>
+          <StatusPill value={`${pendingWithdrawals.length} pending`} />
+        </div>
+        {pendingWithdrawals.length ? <Table columns={["Tailor", "Amount", "Destination", "Wallet", "Requested", "Action"]} rows={pendingWithdrawals.map((item) => [
+          <><strong>{item.shop}</strong><small>{item.tailorPhone || item.tailor_phone || item.tailorEmail || item.tailor_email || "-"}</small></>,
+          money(item.amount),
+          <><span>{item.destinationType || item.destination_type}</span><small>{item.destination}</small></>,
+          money(item.walletBalance ?? item.wallet_balance),
+          fmtDate(item.requestedAt || item.requested_at),
+          <div className="inline-actions finance-actions">
+            <input
+              value={payoutRefs[item.id] || ""}
+              onChange={(event) => setPayoutRefs((old) => ({ ...old, [item.id]: event.target.value }))}
+              placeholder="Manual payout ref"
+            />
+            <button type="button" onClick={() => approveWithdrawal(item)} disabled={busyId === item.id}>Approve</button>
+            <button type="button" className="danger-link" onClick={() => rejectWithdrawal(item)} disabled={busyId === item.id}>Reject</button>
+          </div>,
+        ])} /> : <Empty text="No tailor withdrawal requests waiting for approval." />}
+      </section>
+
+      <section className="section-block">
+        <div className="section-head">
+          <div>
+            <h3>Payment Records</h3>
+            <p>Ledger records and gateway/manual verification status.</p>
+          </div>
+        </div>
+        {rows.length ? <Table columns={["Payment", "Order", "Amount", "Method", "Gateway", "Status", "Updated"]} rows={rows.map((r) => [
+          r.id,
+          r.order_code,
+          money(r.amount),
+          r.method || "-",
+          r.gateway_verified === false || r.verification_status === "unverified_by_gateway" || r.method === "manual_whatsapp" ? <StatusPill value="MANUAL VERIFICATION" /> : <StatusPill value="GATEWAY VERIFIED" />,
+          <StatusPill value={r.status} />,
+          fmtDate(r.updated),
+        ])} /> : <Empty text="No payment records yet." />}
+      </section>
+    </div>
+  );
 }
 
 function Reviews({ rows, reload }) {
@@ -5097,8 +5845,35 @@ function ActionSet({ onActive, onSuspend, onBlock, onDelete }) {
   return <div className="inline-actions"><button onClick={onActive}>Activate</button><button onClick={onSuspend}>Suspend</button><button onClick={onBlock}>Block</button><button className="danger-link" onClick={onDelete}>Delete</button></div>;
 }
 
-function Table({ columns, rows }) {
-  return <div className="table-wrap"><table><thead><tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr></thead><tbody>{rows.map((row, i) => <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>)}</tbody></table></div>;
+function Table({ columns, rows, pageSize = DEFAULT_TABLE_PAGE_SIZE, label = "records" }) {
+  const pageData = usePagedRows(rows, pageSize);
+  return (
+    <>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>{columns.map((c) => <th key={c}>{c}</th>)}</tr>
+          </thead>
+          <tbody>
+            {pageData.rows.map((row, i) => (
+              <tr key={`${pageData.start}-${i}`}>
+                {row.map((cell, j) => <td key={j}>{cell}</td>)}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <PaginationControls
+        page={pageData.page}
+        totalPages={pageData.totalPages}
+        total={pageData.total}
+        start={pageData.start}
+        end={pageData.end}
+        onPage={pageData.setPage}
+        label={label}
+      />
+    </>
+  );
 }
 
 createRoot(document.getElementById("root")).render(<App />);

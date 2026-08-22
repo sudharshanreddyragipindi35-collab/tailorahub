@@ -4,6 +4,7 @@ import csv
 from datetime import date
 from decimal import Decimal
 from io import StringIO
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
@@ -12,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
 from app.core.database import get_db
+from app.qr import generate_wallet_qr
 from app.schemas.admin import PlatformSettingsIn
 
 
@@ -25,8 +27,32 @@ class AdminDisputePatchIn(BaseModel):
     refund_amount: Decimal | None = Field(default=None, alias="refundAmount", ge=0)
 
 
+class PaymentIntentVerifyIn(BaseModel):
+    proof_reference: str = Field(alias="proofReference", min_length=2, max_length=160)
+    admin_note: str | None = Field(default=None, alias="adminNote", max_length=1000)
+
+
+class PaymentIntentRejectIn(BaseModel):
+    admin_note: str | None = Field(default=None, alias="adminNote", max_length=1000)
+
+
+class WithdrawalDecisionIn(BaseModel):
+    payout_reference: str | None = Field(default=None, alias="payoutReference", max_length=160)
+    admin_note: str | None = Field(default=None, alias="adminNote", max_length=1000)
+
+
 def money_decimal(value) -> Decimal:
     return Decimal(str(value or 0)).quantize(Decimal("0.01"))
+
+
+def uid(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:10]}"
+
+
+async def _fetch_one(db: AsyncSession, sql: str, params: dict | None = None) -> dict | None:
+    result = await db.execute(text(sql), params or {})
+    row = result.mappings().first()
+    return dict(row) if row else None
 
 
 @router.get("/scaffold")
@@ -115,6 +141,277 @@ async def finance_wallet_export(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=admin-wallet-transactions.csv"},
     )
+
+
+@router.get("/payment-intents")
+async def payment_intents(
+    _: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    await db.execute(text("UPDATE payment_intents SET status='expired', updated_at=now() WHERE status='pending' AND expires_at <= now()"))
+    result = await db.execute(
+        text(
+            """
+            SELECT
+              pi.*,
+              o.code AS order_code,
+              o.status AS order_status,
+              o.payment_status AS order_payment_status,
+              u.name AS customer_name,
+              u.phone AS customer_phone,
+              t.shop,
+              t.owner_name
+            FROM payment_intents pi
+            JOIN orders o ON o.id=pi.booking_id
+            JOIN users u ON u.id=pi.customer_id
+            JOIN tailors t ON t.id=pi.tailor_id
+            ORDER BY
+              CASE pi.status WHEN 'pending' THEN 1 WHEN 'verified' THEN 2 WHEN 'expired' THEN 3 ELSE 4 END,
+              pi.created_at DESC
+            """
+        )
+    )
+    await db.commit()
+    return [_payment_intent_admin_payload(dict(row)) for row in result.mappings().all()]
+
+
+@router.post("/payment-intents/{intent_id}/verify")
+async def verify_payment_intent(
+    intent_id: str,
+    body: PaymentIntentVerifyIn,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    intent = await _payment_intent_for_update(db, intent_id)
+    if not intent:
+        raise HTTPException(404, "Payment request not found")
+    if intent.get("is_expired") and intent.get("status") == "pending":
+        await db.execute(text("UPDATE payment_intents SET status='expired', updated_at=now() WHERE id=:id"), {"id": intent_id})
+        await db.commit()
+        raise HTTPException(409, "This payment request expired. Ask the customer to create a new WhatsApp payment request.")
+    if intent.get("status") != "pending":
+        raise HTTPException(409, f"This payment request is already {intent.get('status')}.")
+
+    order = await _order_for_update(db, intent["booking_id"])
+    if not order:
+        raise HTTPException(404, "Order not found")
+    if str(order.get("payment_status") or "").lower() == "paid":
+        await db.execute(
+            text(
+                """
+                UPDATE payment_intents
+                SET status='verified', proof_reference=:proof, admin_note=:note,
+                    verified_at=COALESCE(verified_at, now()), verified_by_admin_id=:admin_id, updated_at=now()
+                WHERE id=:id
+                """
+            ),
+            {"id": intent_id, "proof": body.proof_reference, "note": body.admin_note, "admin_id": admin["id"]},
+        )
+        await db.commit()
+        return {"ok": True, "message": "Order was already paid. Payment request marked verified."}
+
+    tailor_wallet = await _ensure_tailor_wallet(db, order["tailor_uuid"])
+    tailor_credit = money_decimal(intent.get("tailor_credit_amount"))
+    admin_charge = money_decimal(intent.get("gst_platform_charge_amount"))
+    commission = money_decimal(intent.get("commission_amount"))
+    payable_total = money_decimal(intent.get("payable_total"))
+
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+            SET payment_status='paid',
+                payment_method_selected='qr',
+                payment_method_selected_at=now(),
+                gst_platform_charge_amount=:admin_charge,
+                commission_amount=:commission
+            WHERE id=:id
+            """
+        ),
+        {"id": order["id"], "admin_charge": admin_charge, "commission": commission},
+    )
+    if tailor_credit > 0:
+        await db.execute(
+            text(
+                """
+                INSERT INTO wallet_transactions (id,wallet_id,type,amount,reference_booking_id,status)
+                VALUES (gen_random_uuid(),:wallet_id,'credit',:amount,:booking_id,'success')
+                """
+            ),
+            {"wallet_id": tailor_wallet["wallet_id"], "amount": tailor_credit, "booking_id": order["id"]},
+        )
+        await db.execute(
+            text("UPDATE tailor_wallets SET balance=balance + :amount, updated_at=now() WHERE wallet_id=:wallet_id"),
+            {"amount": tailor_credit, "wallet_id": tailor_wallet["wallet_id"]},
+        )
+    await _credit_admin_wallet(db, "gst_platform_charge", admin_charge, order["id"], source_customer_id=order["customer_id"])
+    await _credit_admin_wallet(db, "commission", commission, order["id"], source_tailor_id=order["tailor_uuid"])
+    payment = await _fetch_one(db, "SELECT * FROM payments WHERE order_id=:id ORDER BY ts DESC LIMIT 1", {"id": order["id"]})
+    if payment:
+        await db.execute(
+            text("UPDATE payments SET amount=:amount, method='manual_whatsapp', status='paid', txn_ref=:txn, updated=now() WHERE id=:id"),
+            {"id": payment["id"], "amount": payable_total, "txn": intent["payment_reference"]},
+        )
+    else:
+        await db.execute(
+            text("INSERT INTO payments (id,order_id,amount,method,status,txn_ref) VALUES (:id,:order_id,:amount,'manual_whatsapp','paid',:txn)"),
+            {"id": uid("pay"), "order_id": order["id"], "amount": payable_total, "txn": intent["payment_reference"]},
+        )
+    await db.execute(
+        text(
+            """
+            UPDATE payment_intents
+            SET status='verified', proof_reference=:proof, admin_note=:note,
+                verified_at=now(), verified_by_admin_id=:admin_id, updated_at=now()
+            WHERE id=:id
+            """
+        ),
+        {"id": intent_id, "proof": body.proof_reference, "note": body.admin_note, "admin_id": admin["id"]},
+    )
+    await _add_history(db, order["id"], "paid", f"Admin verified WhatsApp payment {intent['payment_reference']}. Tailor wallet credited net amount {tailor_credit}.", "admin")
+    await _notify(db, "user:" + order["customer_id"], "Payment verified", f"Payment for order {order['code']} is verified. Delivery OTP is now enabled.", order["id"])
+    await _notify(db, "tailor:" + order["tailor_id"], "Payment verified", f"Payment for order {order['code']} is verified. Net wallet credit: Rs {tailor_credit}.", order["id"])
+    await db.commit()
+    return {"ok": True, "message": "Payment verified. Tailor wallet credited and delivery OTP unlocked."}
+
+
+@router.post("/payment-intents/{intent_id}/reject")
+async def reject_payment_intent(
+    intent_id: str,
+    body: PaymentIntentRejectIn,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    intent = await _payment_intent_for_update(db, intent_id)
+    if not intent:
+        raise HTTPException(404, "Payment request not found")
+    if intent.get("status") != "pending":
+        raise HTTPException(409, f"This payment request is already {intent.get('status')}.")
+    await db.execute(
+        text(
+            """
+            UPDATE payment_intents
+            SET status='rejected', admin_note=:note, rejected_at=now(),
+                verified_by_admin_id=:admin_id, updated_at=now()
+            WHERE id=:id
+            """
+        ),
+        {"id": intent_id, "note": body.admin_note, "admin_id": admin["id"]},
+    )
+    await db.execute(
+        text("UPDATE payments SET status='FAILED', updated=now() WHERE txn_ref=:txn"),
+        {"txn": intent["payment_reference"]},
+    )
+    await _notify(db, "user:" + intent["customer_id"], "Payment request rejected", body.admin_note or "Payment proof was not confirmed. Please create a new payment request.", intent["booking_id"])
+    await db.commit()
+    return {"ok": True, "message": "Payment request rejected."}
+
+
+@router.get("/withdrawal-requests")
+async def withdrawal_requests(
+    _: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    result = await db.execute(
+        text(
+            """
+            SELECT
+              wr.*,
+              tw.balance AS wallet_balance,
+              t.id AS tailor_legacy_id,
+              t.shop,
+              t.owner_name,
+              u.name AS tailor_user_name,
+              u.phone AS tailor_phone,
+              u.email AS tailor_email
+            FROM withdrawal_requests wr
+            JOIN tailor_wallets tw ON tw.wallet_id=wr.wallet_id
+            JOIN tailors t ON t.tailor_id=wr.tailor_id
+            JOIN users u ON u.id=t.user_id
+            ORDER BY
+              CASE wr.status WHEN 'pending_admin_review' THEN 1 WHEN 'approved' THEN 2 ELSE 3 END,
+              wr.requested_at DESC
+            """
+        )
+    )
+    return [_withdrawal_request_payload(dict(row)) for row in result.mappings().all()]
+
+
+@router.post("/withdrawal-requests/{request_id}/approve")
+async def approve_withdrawal_request(
+    request_id: str,
+    body: WithdrawalDecisionIn,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    request = await _withdrawal_request_for_update(db, request_id)
+    if not request:
+        raise HTTPException(404, "Withdrawal request not found")
+    if request.get("status") != "pending_admin_review":
+        raise HTTPException(409, f"This withdrawal request is already {request.get('status')}.")
+    amount = money_decimal(request["amount"])
+    if money_decimal(request["wallet_balance"]) < amount:
+        raise HTTPException(400, "Tailor wallet balance is lower than the requested withdrawal amount.")
+    await db.execute(
+        text(
+            """
+            INSERT INTO wallet_transactions (id,wallet_id,type,amount,status,withdrawal_destination)
+            VALUES (gen_random_uuid(),:wallet_id,'debit',:amount,'success',CAST(:destination AS withdrawal_destination_type))
+            """
+        ),
+        {"wallet_id": request["wallet_id"], "amount": amount, "destination": request["destination_type"]},
+    )
+    await db.execute(
+        text("UPDATE tailor_wallets SET balance=balance - :amount, updated_at=now() WHERE wallet_id=:wallet_id"),
+        {"amount": amount, "wallet_id": request["wallet_id"]},
+    )
+    await db.execute(
+        text(
+            """
+            UPDATE withdrawal_requests
+            SET status='approved', payout_reference=:payout_reference, admin_note=:admin_note,
+                approved_at=now(), approved_by_admin_id=:admin_id, updated_at=now()
+            WHERE id=:id
+            """
+        ),
+        {
+            "id": request_id,
+            "payout_reference": body.payout_reference,
+            "admin_note": body.admin_note,
+            "admin_id": admin["id"],
+        },
+    )
+    await _notify(db, "tailor:" + request["tailor_legacy_id"], "Withdrawal approved", f"Withdrawal of Rs {amount} was approved. Payout reference: {body.payout_reference or 'manual payout'}.", None)
+    await db.commit()
+    return {"ok": True, "message": "Withdrawal approved and wallet debited."}
+
+
+@router.post("/withdrawal-requests/{request_id}/reject")
+async def reject_withdrawal_request(
+    request_id: str,
+    body: WithdrawalDecisionIn,
+    admin: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    request = await _withdrawal_request_for_update(db, request_id)
+    if not request:
+        raise HTTPException(404, "Withdrawal request not found")
+    if request.get("status") != "pending_admin_review":
+        raise HTTPException(409, f"This withdrawal request is already {request.get('status')}.")
+    await db.execute(
+        text(
+            """
+            UPDATE withdrawal_requests
+            SET status='rejected', admin_note=:admin_note, rejected_at=now(),
+                approved_by_admin_id=:admin_id, updated_at=now()
+            WHERE id=:id
+            """
+        ),
+        {"id": request_id, "admin_note": body.admin_note, "admin_id": admin["id"]},
+    )
+    await _notify(db, "tailor:" + request["tailor_legacy_id"], "Withdrawal rejected", body.admin_note or "Withdrawal request was rejected by admin.", None)
+    await db.commit()
+    return {"ok": True, "message": "Withdrawal request rejected."}
 
 
 def _node_from_row(row: dict) -> dict:
@@ -328,6 +625,225 @@ async def _admin_wallet_transactions(db: AsyncSession, date_from: date | None, d
     )
     transactions = [_admin_wallet_tx_payload(dict(row)) for row in rows_result.mappings().all()]
     return totals, transactions
+
+
+def _payment_intent_admin_payload(row: dict) -> dict:
+    return {
+        "id": str(row["id"]),
+        "booking_id": row.get("booking_id"),
+        "bookingId": row.get("booking_id"),
+        "order_code": row.get("order_code"),
+        "orderCode": row.get("order_code"),
+        "customer_id": row.get("customer_id"),
+        "customerId": row.get("customer_id"),
+        "customer_name": row.get("customer_name"),
+        "customerName": row.get("customer_name"),
+        "customer_phone": row.get("customer_phone"),
+        "customerPhone": row.get("customer_phone"),
+        "tailor_id": row.get("tailor_id"),
+        "tailorId": row.get("tailor_id"),
+        "shop": row.get("shop"),
+        "owner_name": row.get("owner_name"),
+        "ownerName": row.get("owner_name"),
+        "payment_reference": row.get("payment_reference"),
+        "paymentReference": row.get("payment_reference"),
+        "method": row.get("method"),
+        "status": row.get("status"),
+        "order_status": row.get("order_status"),
+        "orderStatus": row.get("order_status"),
+        "order_payment_status": row.get("order_payment_status"),
+        "orderPaymentStatus": row.get("order_payment_status"),
+        "order_amount": row.get("order_amount"),
+        "orderAmount": row.get("order_amount"),
+        "gst_platform_charge_amount": row.get("gst_platform_charge_amount"),
+        "gstPlatformChargeAmount": row.get("gst_platform_charge_amount"),
+        "commission_amount": row.get("commission_amount"),
+        "commissionAmount": row.get("commission_amount"),
+        "tailor_credit_amount": row.get("tailor_credit_amount"),
+        "tailorCreditAmount": row.get("tailor_credit_amount"),
+        "payable_total": row.get("payable_total"),
+        "payableTotal": row.get("payable_total"),
+        "admin_whatsapp_number": row.get("admin_whatsapp_number"),
+        "adminWhatsappNumber": row.get("admin_whatsapp_number"),
+        "proof_reference": row.get("proof_reference"),
+        "proofReference": row.get("proof_reference"),
+        "admin_note": row.get("admin_note"),
+        "adminNote": row.get("admin_note"),
+        "expires_at": row.get("expires_at"),
+        "expiresAt": row.get("expires_at"),
+        "created_at": row.get("created_at"),
+        "createdAt": row.get("created_at"),
+        "verified_at": row.get("verified_at"),
+        "verifiedAt": row.get("verified_at"),
+        "rejected_at": row.get("rejected_at"),
+        "rejectedAt": row.get("rejected_at"),
+    }
+
+
+def _withdrawal_request_payload(row: dict) -> dict:
+    destination = row.get("destination_upi_id") or row.get("destination_bank_account_number") or "-"
+    return {
+        "id": str(row["id"]),
+        "wallet_id": str(row["wallet_id"]),
+        "walletId": str(row["wallet_id"]),
+        "tailor_id": str(row["tailor_id"]),
+        "tailorId": str(row["tailor_id"]),
+        "tailor_legacy_id": row.get("tailor_legacy_id"),
+        "tailorLegacyId": row.get("tailor_legacy_id"),
+        "shop": row.get("shop"),
+        "owner_name": row.get("owner_name"),
+        "ownerName": row.get("owner_name"),
+        "tailor_user_name": row.get("tailor_user_name"),
+        "tailorUserName": row.get("tailor_user_name"),
+        "tailor_phone": row.get("tailor_phone"),
+        "tailorPhone": row.get("tailor_phone"),
+        "tailor_email": row.get("tailor_email"),
+        "tailorEmail": row.get("tailor_email"),
+        "amount": row.get("amount"),
+        "wallet_balance": row.get("wallet_balance"),
+        "walletBalance": row.get("wallet_balance"),
+        "destination_type": row.get("destination_type"),
+        "destinationType": row.get("destination_type"),
+        "destination": destination,
+        "destination_upi_id": row.get("destination_upi_id"),
+        "destinationUpiId": row.get("destination_upi_id"),
+        "destination_bank_account_number": row.get("destination_bank_account_number"),
+        "destinationBankAccountNumber": row.get("destination_bank_account_number"),
+        "destination_bank_ifsc": row.get("destination_bank_ifsc"),
+        "destinationBankIfsc": row.get("destination_bank_ifsc"),
+        "status": row.get("status"),
+        "admin_note": row.get("admin_note"),
+        "adminNote": row.get("admin_note"),
+        "payout_reference": row.get("payout_reference"),
+        "payoutReference": row.get("payout_reference"),
+        "requested_at": row.get("requested_at"),
+        "requestedAt": row.get("requested_at"),
+        "approved_at": row.get("approved_at"),
+        "approvedAt": row.get("approved_at"),
+        "rejected_at": row.get("rejected_at"),
+        "rejectedAt": row.get("rejected_at"),
+    }
+
+
+async def _payment_intent_for_update(db: AsyncSession, intent_id: str) -> dict | None:
+    return await _fetch_one(
+        db,
+        """
+        SELECT pi.*, (pi.expires_at <= now()) AS is_expired
+        FROM payment_intents pi
+        WHERE pi.id=:id
+        FOR UPDATE
+        """,
+        {"id": intent_id},
+    )
+
+
+async def _order_for_update(db: AsyncSession, booking_id: str) -> dict | None:
+    return await _fetch_one(
+        db,
+        """
+        SELECT o.*, t.tailor_id AS tailor_uuid
+        FROM orders o
+        JOIN tailors t ON t.id=o.tailor_id
+        WHERE o.id=:id
+        FOR UPDATE
+        """,
+        {"id": booking_id},
+    )
+
+
+async def _ensure_tailor_wallet(db: AsyncSession, tailor_uuid) -> dict:
+    row = await _fetch_one(db, "SELECT * FROM tailor_wallets WHERE tailor_id=:tailor_id", {"tailor_id": tailor_uuid})
+    if row:
+        return row
+    wallet_id = uuid.uuid4()
+    qr_url = generate_wallet_qr(str(wallet_id))
+    result = await db.execute(
+        text(
+            """
+            INSERT INTO tailor_wallets (wallet_id,tailor_id,qr_code_url,balance,created_at,updated_at)
+            VALUES (:wallet_id,:tailor_id,:qr_url,0,now(),now())
+            RETURNING *
+            """
+        ),
+        {"wallet_id": wallet_id, "tailor_id": tailor_uuid, "qr_url": qr_url},
+    )
+    return dict(result.mappings().first())
+
+
+async def _credit_admin_wallet(
+    db: AsyncSession,
+    txn_type: str,
+    amount: Decimal,
+    booking_id: str,
+    source_tailor_id=None,
+    source_customer_id=None,
+) -> None:
+    if money_decimal(amount) <= 0:
+        return
+    existing = await _fetch_one(
+        db,
+        "SELECT 1 FROM admin_wallet_transactions WHERE source_booking_id=:booking_id AND type=CAST(:type AS admin_wallet_transaction_type) LIMIT 1",
+        {"booking_id": booking_id, "type": txn_type},
+    )
+    if existing:
+        return
+    await db.execute(
+        text(
+            """
+            INSERT INTO admin_wallet_transactions
+              (id,type,amount,source_booking_id,source_tailor_id,source_customer_id,created_at)
+            VALUES
+              (gen_random_uuid(),CAST(:type AS admin_wallet_transaction_type),:amount,:booking_id,:tailor_id,:customer_id,now())
+            """
+        ),
+        {
+            "type": txn_type,
+            "amount": money_decimal(amount),
+            "booking_id": booking_id,
+            "tailor_id": source_tailor_id,
+            "customer_id": source_customer_id,
+        },
+    )
+    await _ensure_admin_wallet(db)
+
+
+async def _notify(db: AsyncSession, to_ref: str, title: str, body: str, order_id: str | None = None) -> None:
+    await db.execute(
+        text("INSERT INTO notifications (id,to_ref,channel,title,body,order_id) VALUES (:id,:to_ref,'in_app',:title,:body,:order_id)"),
+        {"id": uid("n"), "to_ref": to_ref, "title": title, "body": body, "order_id": order_id},
+    )
+
+
+async def _add_history(db: AsyncSession, order_id: str, status: str, note: str, by_role: str) -> None:
+    await db.execute(
+        text("INSERT INTO order_status_history (order_id,status,note,by_role) VALUES (:order_id,:status,:note,:by_role)"),
+        {"order_id": order_id, "status": status, "note": note, "by_role": by_role},
+    )
+
+
+async def _withdrawal_request_for_update(db: AsyncSession, request_id: str) -> dict | None:
+    return await _fetch_one(
+        db,
+        """
+        SELECT
+          wr.*,
+          tw.balance AS wallet_balance,
+          t.id AS tailor_legacy_id,
+          t.shop,
+          t.owner_name,
+          u.name AS tailor_user_name,
+          u.phone AS tailor_phone,
+          u.email AS tailor_email
+        FROM withdrawal_requests wr
+        JOIN tailor_wallets tw ON tw.wallet_id=wr.wallet_id
+        JOIN tailors t ON t.tailor_id=wr.tailor_id
+        JOIN users u ON u.id=t.user_id
+        WHERE wr.id=:id
+        FOR UPDATE OF wr, tw
+        """,
+        {"id": request_id},
+    )
 
 
 @router.get("/referrals/tree/{tailor_id}")

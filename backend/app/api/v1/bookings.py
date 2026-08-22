@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import re
 import uuid
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_customer, get_current_tailor, get_current_user
 from app.api.v1.otp import OTP_TTL_MINUTES, OtpFlowError, issue_otp, verify_otp
+from app.core.config import get_settings
 from app.core.database import get_db
 from app.emailer import send_email
 from app.qr import generate_wallet_qr
@@ -48,7 +50,7 @@ class StageUpdateIn(BaseModel):
 
 
 class PaymentIn(BaseModel):
-    method: str = "wallet"
+    method: str = "manual_whatsapp"
     txn_ref: str | None = Field(default=None, alias="txnRef")
 
 
@@ -61,6 +63,15 @@ class RaiseDisputeIn(BaseModel):
     photo_url: str | None = Field(default=None, alias="photoUrl")
     photo_name: str | None = Field(default=None, alias="photoName")
     photo_media_type: str | None = Field(default=None, alias="photoMediaType")
+
+
+class CustomerOrderUpdateIn(BaseModel):
+    instructions: str | None = Field(default=None, max_length=2000)
+    preferred_date: date | None = Field(default=None, alias="preferredDate")
+
+
+class CustomerCancelOrderIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
 
 
 TRACKER_STAGES = [
@@ -89,6 +100,39 @@ def is_completed_order(order: dict | None) -> bool:
         str(order.get("status") or "").lower() == "completed"
         or bool(order.get("completed_at"))
     )
+
+
+def is_cancelled_order(order: dict | None) -> bool:
+    return str((order or {}).get("status") or "").lower() == "cancelled"
+
+
+def is_measurement_started(order: dict | None) -> bool:
+    if not order:
+        return False
+    status = str(order.get("status") or "").lower()
+    tracker_stage = str(order.get("tracker_stage") or "").lower()
+    return (
+        bool(order.get("measurement_done_at"))
+        or status in {"measurement_done", "in_progress", "ready_for_delivery", "out_for_delivery", "completed", "disputed"}
+        or tracker_stage in {"measurement done", "stitching in progress", "ready for delivery", "out for delivery", "delivered"}
+    )
+
+
+def customer_manage_cutoff_error(order: dict | None) -> str | None:
+    if not order:
+        return "Order not found"
+    if is_completed_order(order):
+        return "This order is already completed. Manage options are closed after final handover."
+    if is_cancelled_order(order):
+        return "This order is already cancelled."
+    if is_measurement_started(order):
+        return "Manage options are available only before measurement starts."
+    appointment_date = order.get("appointment_date")
+    if isinstance(appointment_date, datetime):
+        appointment_date = appointment_date.date()
+    if appointment_date and date.today() >= appointment_date:
+        return "Manage options are available only before the measurement appointment date."
+    return None
 
 
 def latest_measurement_appointment_date(delivery_date: date) -> date:
@@ -185,10 +229,18 @@ async def payment_breakdown_for_order(db: AsyncSession, order: dict) -> dict:
     gst_amount = percent_amount(order_amount, settings.get("gst_percentage"))
     platform_fee_amount = percent_amount(order_amount, settings.get("platform_fee_percentage"))
     charge_amount = gst_amount + platform_fee_amount
+    commission_amount = percent_amount(order_amount, settings.get("commission_percentage"))
+    tailor_credit_amount = max(order_amount - commission_amount, Decimal("0.00"))
     grand_total = order_amount + charge_amount
     return {
         "order_amount": order_amount,
         "orderAmount": order_amount,
+        "commission_percentage": money_decimal(settings.get("commission_percentage")),
+        "commissionPercentage": money_decimal(settings.get("commission_percentage")),
+        "commission_amount": commission_amount,
+        "commissionAmount": commission_amount,
+        "tailor_credit_amount": tailor_credit_amount,
+        "tailorCreditAmount": tailor_credit_amount,
         "gst_percentage": money_decimal(settings.get("gst_percentage")),
         "gstPercentage": money_decimal(settings.get("gst_percentage")),
         "gst_amount": gst_amount,
@@ -202,6 +254,95 @@ async def payment_breakdown_for_order(db: AsyncSession, order: dict) -> dict:
         "payable_total": grand_total,
         "payableTotal": grand_total,
     }
+
+
+def normalize_whatsapp_number(value: str | None) -> str:
+    digits = re.sub(r"\D", "", value or "")
+    if len(digits) == 10:
+        return "91" + digits
+    return digits or "918790901281"
+
+
+def payment_intent_payload(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    expires_at = row.get("expires_at")
+    now = datetime.now(timezone.utc)
+    expires_in = 0
+    if expires_at:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_in = max(0, int((expires_at - now).total_seconds()))
+    return {
+        "id": str(row["id"]),
+        "booking_id": row.get("booking_id"),
+        "bookingId": row.get("booking_id"),
+        "payment_reference": row.get("payment_reference"),
+        "paymentReference": row.get("payment_reference"),
+        "method": row.get("method"),
+        "status": row.get("status"),
+        "order_amount": row.get("order_amount"),
+        "orderAmount": row.get("order_amount"),
+        "gst_platform_charge_amount": row.get("gst_platform_charge_amount"),
+        "gstPlatformChargeAmount": row.get("gst_platform_charge_amount"),
+        "commission_amount": row.get("commission_amount"),
+        "commissionAmount": row.get("commission_amount"),
+        "tailor_credit_amount": row.get("tailor_credit_amount"),
+        "tailorCreditAmount": row.get("tailor_credit_amount"),
+        "payable_total": row.get("payable_total"),
+        "payableTotal": row.get("payable_total"),
+        "whatsapp_url": row.get("whatsapp_url"),
+        "whatsappUrl": row.get("whatsapp_url"),
+        "admin_whatsapp_number": row.get("admin_whatsapp_number"),
+        "adminWhatsappNumber": row.get("admin_whatsapp_number"),
+        "expires_at": row.get("expires_at"),
+        "expiresAt": row.get("expires_at"),
+        "expires_in_seconds": expires_in,
+        "expiresInSeconds": expires_in,
+        "created_at": row.get("created_at"),
+        "createdAt": row.get("created_at"),
+        "verified_at": row.get("verified_at"),
+        "verifiedAt": row.get("verified_at"),
+        "admin_note": row.get("admin_note"),
+        "adminNote": row.get("admin_note"),
+        "proof_reference": row.get("proof_reference"),
+        "proofReference": row.get("proof_reference"),
+    }
+
+
+async def latest_payment_intent(db: AsyncSession, booking_id: str) -> dict | None:
+    await db.execute(
+        text(
+            """
+            UPDATE payment_intents
+            SET status='expired', updated_at=now()
+            WHERE booking_id=:booking_id
+              AND status='pending'
+              AND expires_at <= now()
+            """
+        ),
+        {"booking_id": booking_id},
+    )
+    return await fetch_one(
+        db,
+        "SELECT * FROM payment_intents WHERE booking_id=:booking_id ORDER BY created_at DESC LIMIT 1",
+        {"booking_id": booking_id},
+    )
+
+
+def build_whatsapp_payment_url(order: dict, payment_reference: str, payable_total: Decimal) -> tuple[str, str]:
+    app_settings = get_settings()
+    phone = normalize_whatsapp_number(app_settings.admin_whatsapp_number)
+    message = "\n".join(
+        [
+            "Hi TailoraHub, I want to pay for my order.",
+            f"Order: {order.get('code') or order.get('id')}",
+            f"Payment reference: {payment_reference}",
+            f"Amount to pay: Rs {payable_total}",
+            "Please send UPI ID or QR. I will complete this within 5 minutes.",
+        ]
+    )
+    return f"https://api.whatsapp.com/send?phone={phone}&text={quote(message)}", phone
 
 
 async def credit_admin_wallet(db: AsyncSession, txn_type: str, amount: Decimal, booking_id: str, source_tailor_id=None, source_customer_id=None) -> None:
@@ -353,6 +494,10 @@ def public_booking(row: dict) -> dict:
         "gst_platform_charge_amount": row.get("gst_platform_charge_amount") or 0,
         "payableTotal": money_decimal(row.get("total")) + money_decimal(row.get("gst_platform_charge_amount")),
         "notes": row.get("notes"),
+        "cancelReason": row.get("cancel_reason"),
+        "cancel_reason": row.get("cancel_reason"),
+        "canCustomerManage": customer_manage_cutoff_error(row) is None,
+        "customerManageBlockedReason": customer_manage_cutoff_error(row),
         "ts": row.get("ts"),
     }
 
@@ -425,6 +570,7 @@ async def tracker_status_payload(db: AsyncSession, order: dict) -> dict:
                 "timestamp": timestamp,
             }
         )
+    payment_intent = await latest_payment_intent(db, order["id"])
     return {
         "booking": public_booking(order),
         "trackerStage": current_stage,
@@ -433,6 +579,8 @@ async def tracker_status_payload(db: AsyncSession, order: dict) -> dict:
         "history": history,
         "paymentStatus": order.get("payment_status"),
         "otpEnabled": str(order.get("payment_status") or "").lower() == "paid",
+        "paymentIntent": payment_intent_payload(payment_intent),
+        "payment_intent": payment_intent_payload(payment_intent),
     }
 
 
@@ -640,6 +788,145 @@ async def booking_payment_breakdown(
     return await payment_breakdown_for_order(db, order)
 
 
+@router.patch("/{booking_id}/customer-update")
+async def customer_update_booking(
+    booking_id: str,
+    body: CustomerOrderUpdateIn,
+    customer: dict = Depends(get_current_customer),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    order = await fetch_one(
+        db,
+        """
+        SELECT o.*, t.shop
+        FROM orders o
+        JOIN tailors t ON t.id=o.tailor_id
+        WHERE o.id=:id AND o.customer_id=:customer_id
+        FOR UPDATE
+        """,
+        {"id": booking_id, "customer_id": customer["id"]},
+    )
+    if not order:
+        raise HTTPException(404, "Booking not found")
+    blocked_reason = customer_manage_cutoff_error(order)
+    if blocked_reason:
+        raise HTTPException(409, blocked_reason)
+    if body.instructions is None and body.preferred_date is None:
+        raise HTTPException(400, "Choose instructions or a new delivery date to update.")
+
+    if body.preferred_date is not None:
+        if body.preferred_date < date.today():
+            raise HTTPException(400, "Delivery date cannot be in the past.")
+        appointment_date = order.get("appointment_date")
+        if isinstance(appointment_date, datetime):
+            appointment_date = appointment_date.date()
+        if appointment_date and appointment_date > latest_measurement_appointment_date(body.preferred_date):
+            raise HTTPException(400, "Delivery date must stay at least 3 days after the measurement appointment.")
+
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+            SET notes=COALESCE(:notes, notes),
+                expected_completion=COALESCE(:expected_completion, expected_completion)
+            WHERE id=:id
+            """
+        ),
+        {
+            "id": booking_id,
+            "notes": body.instructions,
+            "expected_completion": body.preferred_date,
+        },
+    )
+    changed_parts = []
+    if body.instructions is not None:
+        changed_parts.append("instructions")
+    if body.preferred_date is not None:
+        changed_parts.append("delivery date")
+    await add_history(db, booking_id, "customer_update", f"Customer updated {', '.join(changed_parts)} before measurement.", "customer")
+    await notify(
+        db,
+        "tailor:" + order["tailor_id"],
+        "Customer updated order details",
+        f"{customer['name']} updated {', '.join(changed_parts)} for order {order['code']}.",
+        booking_id,
+    )
+    await db.commit()
+    updated = await fetch_one(
+        db,
+        "SELECT o.*, t.shop, u.name AS customer_name FROM orders o JOIN tailors t ON t.id=o.tailor_id JOIN users u ON u.id=o.customer_id WHERE o.id=:id",
+        {"id": booking_id},
+    )
+    payload = await tracker_status_payload(db, updated)
+    await tracker_connections.broadcast(booking_id, jsonable_encoder(payload))
+    return {"ok": True, "booking": public_booking(updated), "message": "Order details updated before measurement."}
+
+
+@router.post("/{booking_id}/customer-cancel")
+async def customer_cancel_booking(
+    booking_id: str,
+    body: CustomerCancelOrderIn,
+    customer: dict = Depends(get_current_customer),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    order = await fetch_one(
+        db,
+        """
+        SELECT o.*, t.shop
+        FROM orders o
+        JOIN tailors t ON t.id=o.tailor_id
+        WHERE o.id=:id AND o.customer_id=:customer_id
+        FOR UPDATE
+        """,
+        {"id": booking_id, "customer_id": customer["id"]},
+    )
+    if not order:
+        raise HTTPException(404, "Booking not found")
+    blocked_reason = customer_manage_cutoff_error(order)
+    if blocked_reason:
+        raise HTTPException(409, blocked_reason)
+    if str(order.get("payment_status") or "").lower() == "paid":
+        raise HTTPException(409, "Paid orders cannot be cancelled here. Raise a support ticket for refund review.")
+
+    reason = (body.reason or "Cancelled by customer before measurement").strip()
+    await db.execute(
+        text("UPDATE orders SET status='cancelled', cancel_reason=:reason WHERE id=:id"),
+        {"id": booking_id, "reason": reason},
+    )
+    await db.execute(
+        text("UPDATE payment_intents SET status='cancelled', updated_at=now() WHERE booking_id=:id AND status='pending'"),
+        {"id": booking_id},
+    )
+    await db.execute(
+        text("UPDATE payments SET status='CANCELLED', updated=now() WHERE order_id=:id AND status IN ('PENDING','PROCESSING')"),
+        {"id": booking_id},
+    )
+    await add_history(db, booking_id, "cancelled", reason, "customer")
+    await notify(
+        db,
+        "tailor:" + order["tailor_id"],
+        "Order cancelled before measurement",
+        f"{customer['name']} cancelled order {order['code']} before the measurement appointment.",
+        booking_id,
+    )
+    await notify(
+        db,
+        "user:" + customer["id"],
+        "Order cancelled",
+        f"Your order {order['code']} was cancelled before measurement.",
+        booking_id,
+    )
+    await db.commit()
+    updated = await fetch_one(
+        db,
+        "SELECT o.*, t.shop, u.name AS customer_name FROM orders o JOIN tailors t ON t.id=o.tailor_id JOIN users u ON u.id=o.customer_id WHERE o.id=:id",
+        {"id": booking_id},
+    )
+    payload = await tracker_status_payload(db, updated)
+    await tracker_connections.broadcast(booking_id, jsonable_encoder(payload))
+    return {"ok": True, "booking": public_booking(updated), "message": "Order cancelled before measurement."}
+
+
 @router.patch("/{booking_id}/stage")
 async def update_booking_stage(
     booking_id: str,
@@ -693,9 +980,6 @@ async def pay_booking(
     )
     if not order:
         raise HTTPException(404, "Booking not found")
-    method = (body.method or "wallet").strip().lower()
-    if method not in {"cash", "wallet", "qr"}:
-        raise HTTPException(400, "Payment method must be cash, wallet, or qr")
     breakdown = await payment_breakdown_for_order(db, order)
     if str(order.get("payment_status") or "").lower() == "paid":
         return {
@@ -704,51 +988,92 @@ async def pay_booking(
             "breakdown": breakdown,
             "message": "Payment was already completed. Delivery OTP is enabled.",
         }
+    method = (body.method or "manual_whatsapp").strip().lower()
+    if method not in {"manual_whatsapp", "whatsapp", "qr", "upi"}:
+        raise HTTPException(400, "Payment is currently accepted through WhatsApp UPI/QR only")
+    await latest_payment_intent(db, booking_id)
+    active_intent = await fetch_one(
+        db,
+        """
+        SELECT *
+        FROM payment_intents
+        WHERE booking_id=:booking_id
+          AND status='pending'
+          AND expires_at > now()
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        {"booking_id": booking_id},
+    )
+    if active_intent:
+        intent = payment_intent_payload(active_intent)
+        return {
+            "ok": True,
+            "booking": public_booking(order),
+            "breakdown": breakdown,
+            "paymentIntent": intent,
+            "payment_intent": intent,
+            "whatsappUrl": active_intent.get("whatsapp_url"),
+            "whatsapp_url": active_intent.get("whatsapp_url"),
+            "message": "Payment request already exists. Complete it on WhatsApp before it expires.",
+        }
+
+    app_settings = get_settings()
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=max(1, app_settings.manual_payment_expiry_minutes))
     order_amount = money_decimal(breakdown["order_amount"])
-    admin_charge = money_decimal(breakdown["gst_platform_charge_amount"])
     payable_total = money_decimal(breakdown["payable_total"])
-    tailor_wallet = await ensure_tailor_wallet(db, order["tailor_uuid"])
-    await db.execute(
+    payment_reference = f"THPAY-{str(order.get('code') or booking_id).replace('ORD-', '')}-{uuid.uuid4().hex[:6].upper()}"
+    whatsapp_url, whatsapp_phone = build_whatsapp_payment_url(order, payment_reference, payable_total)
+    intent_result = await db.execute(
         text(
             """
-            UPDATE orders
-            SET payment_status='paid',
-                payment_method_selected=:method,
-                payment_method_selected_at=now(),
-                gst_platform_charge_amount=:admin_charge
-            WHERE id=:id
+            INSERT INTO payment_intents
+              (booking_id,customer_id,tailor_id,payment_reference,method,order_amount,gst_amount,
+               platform_fee_amount,gst_platform_charge_amount,commission_amount,tailor_credit_amount,
+               payable_total,status,whatsapp_url,admin_whatsapp_number,admin_upi_id,admin_qr_url,
+               customer_note,expires_at,created_at,updated_at)
+            VALUES
+              (:booking_id,:customer_id,:tailor_id,:payment_reference,'manual_whatsapp',:order_amount,:gst_amount,
+               :platform_fee_amount,:gst_platform_charge_amount,:commission_amount,:tailor_credit_amount,
+               :payable_total,'pending',:whatsapp_url,:admin_whatsapp_number,:admin_upi_id,:admin_qr_url,
+               :customer_note,:expires_at,now(),now())
+            RETURNING *
             """
         ),
-        {"id": booking_id, "method": method, "admin_charge": admin_charge},
+        {
+            "booking_id": booking_id,
+            "customer_id": customer["id"],
+            "tailor_id": order["tailor_id"],
+            "payment_reference": payment_reference,
+            "order_amount": order_amount,
+            "gst_amount": money_decimal(breakdown["gst_amount"]),
+            "platform_fee_amount": money_decimal(breakdown["platform_fee_amount"]),
+            "gst_platform_charge_amount": money_decimal(breakdown["gst_platform_charge_amount"]),
+            "commission_amount": money_decimal(breakdown["commission_amount"]),
+            "tailor_credit_amount": money_decimal(breakdown["tailor_credit_amount"]),
+            "payable_total": payable_total,
+            "whatsapp_url": whatsapp_url,
+            "admin_whatsapp_number": whatsapp_phone,
+            "admin_upi_id": app_settings.admin_payment_upi_id,
+            "admin_qr_url": app_settings.admin_payment_qr_url,
+            "customer_note": body.txn_ref,
+            "expires_at": expires_at,
+        },
     )
-    await db.execute(
-        text(
-            """
-            INSERT INTO wallet_transactions (id,wallet_id,type,amount,reference_booking_id,status)
-            VALUES (gen_random_uuid(),:wallet_id,'credit',:amount,:booking_id,'success')
-            """
-        ),
-        {"wallet_id": tailor_wallet["wallet_id"], "amount": order_amount, "booking_id": booking_id},
-    )
-    await db.execute(
-        text("UPDATE tailor_wallets SET balance=balance + :amount, updated_at=now() WHERE wallet_id=:wallet_id"),
-        {"amount": order_amount, "wallet_id": tailor_wallet["wallet_id"]},
-    )
-    await credit_admin_wallet(db, "gst_platform_charge", admin_charge, booking_id, source_customer_id=customer["id"])
+    active_intent = dict(intent_result.mappings().first())
     payment = await fetch_one(db, "SELECT * FROM payments WHERE order_id=:id ORDER BY ts DESC LIMIT 1", {"id": booking_id})
-    txn_ref = body.txn_ref or uid("txn")
     if payment:
         await db.execute(
-            text("UPDATE payments SET amount=:amount, method=:method, status='paid', txn_ref=:txn, updated=now() WHERE id=:id"),
-            {"id": payment["id"], "amount": payable_total, "method": method, "txn": txn_ref},
+            text("UPDATE payments SET amount=:amount, method='manual_whatsapp', status='PROCESSING', txn_ref=:txn, updated=now() WHERE id=:id"),
+            {"id": payment["id"], "amount": payable_total, "txn": payment_reference},
         )
     else:
         await db.execute(
-            text("INSERT INTO payments (id,order_id,amount,method,status,txn_ref) VALUES (:id,:order_id,:amount,:method,'paid',:txn)"),
-            {"id": uid("pay"), "order_id": booking_id, "amount": payable_total, "method": method, "txn": txn_ref},
+            text("INSERT INTO payments (id,order_id,amount,method,status,txn_ref) VALUES (:id,:order_id,:amount,'manual_whatsapp','PROCESSING',:txn)"),
+            {"id": uid("pay"), "order_id": booking_id, "amount": payable_total, "txn": payment_reference},
         )
-    await add_history(db, booking_id, "paid", f"Customer paid {payable_total} including GST/platform charges", "customer")
-    await notify(db, "tailor:" + order["tailor_id"], "Payment completed", f"Payment for order {order['code']} is completed. Delivery OTP is now enabled.", booking_id)
+    await add_history(db, booking_id, "payment_pending", f"Customer opened WhatsApp payment request {payment_reference}.", "customer")
+    await notify(db, "user:" + customer["id"], "WhatsApp payment request created", f"Payment reference {payment_reference} expires in {app_settings.manual_payment_expiry_minutes} minutes.", booking_id)
     await db.commit()
     updated = await fetch_one(
         db,
@@ -757,11 +1082,16 @@ async def pay_booking(
     )
     payload = await tracker_status_payload(db, updated)
     await tracker_connections.broadcast(booking_id, jsonable_encoder(payload))
+    intent = payment_intent_payload(active_intent)
     return {
         "ok": True,
         "booking": public_booking(updated),
         "breakdown": breakdown,
-        "message": "Payment completed. Delivery OTP is now enabled.",
+        "paymentIntent": intent,
+        "payment_intent": intent,
+        "whatsappUrl": whatsapp_url,
+        "whatsapp_url": whatsapp_url,
+        "message": "Payment request created. Open WhatsApp and complete payment within 5 minutes. Delivery OTP unlocks only after admin verifies payment.",
     }
 
 

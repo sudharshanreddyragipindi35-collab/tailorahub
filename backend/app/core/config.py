@@ -35,6 +35,10 @@ class AppSettings(BaseSettings):
     maps_provider: str = Field(default="mock", alias="MAPS_PROVIDER")
 
     payment_webhook_secret: str = Field(default="", alias="PAYMENT_WEBHOOK_SECRET")
+    admin_whatsapp_number: str = Field(default="918790901281", alias="ADMIN_WHATSAPP_NUMBER")
+    admin_payment_upi_id: str = Field(default="", alias="ADMIN_PAYMENT_UPI_ID")
+    admin_payment_qr_url: str = Field(default="", alias="ADMIN_PAYMENT_QR_URL")
+    manual_payment_expiry_minutes: int = Field(default=5, alias="MANUAL_PAYMENT_EXPIRY_MINUTES")
 
     @property
     def async_database_url(self) -> str:
