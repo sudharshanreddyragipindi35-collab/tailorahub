@@ -10,6 +10,9 @@ server/.env
 admin-credentials.txt
 backend/admin-credentials.txt
 server/admin-credentials.txt
+*.pem
+*.key
+*.p8
 
 # Python
 backend/.venv/
@@ -23,6 +26,7 @@ frontend/node_modules/
 server/node_modules/
 node_modules/
 frontend/dist/
+frontend/dist-single-deploy/
 frontend/dist-single/
 frontend/singlefile-dist/
 
@@ -37,6 +41,16 @@ backend/email-outbox.log
 *.zip
 *.tar.gz
 *.tgz
+
+# Android / PWA generated artifacts and signing material
+pwa/android-twa/.gradle/
+pwa/android-twa/app/build/
+pwa/android-twa/build/
+pwa/android-twa/*.keystore
+pwa/android-twa/*.jks
+pwa/android-twa/app-release*.apk
+pwa/android-twa/app-release*.aab
+pwa/android-twa/*.idsig
 
 # Old/generated prototype artifacts not used by the FastAPI + React app
 server/

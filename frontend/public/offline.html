@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0b0d10" />
+    <title>TailoraHub is offline</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #050606;
+        color: #f8f5ec;
+      }
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at top right, rgba(212, 175, 55, 0.18), transparent 34rem),
+          linear-gradient(135deg, #050606 0%, #111417 100%);
+      }
+      main {
+        width: min(90vw, 34rem);
+        padding: 2rem;
+        border: 1px solid rgba(212, 175, 55, 0.35);
+        border-radius: 1.25rem;
+        background: rgba(18, 20, 22, 0.88);
+        box-shadow: 0 2rem 5rem rgba(0, 0, 0, 0.35);
+      }
+      .mark {
+        width: 4rem;
+        height: 4rem;
+        display: grid;
+        place-items: center;
+        border-radius: 1rem;
+        margin-bottom: 1.25rem;
+        border: 1px solid rgba(212, 175, 55, 0.6);
+        color: #f5d15d;
+        font-weight: 900;
+        letter-spacing: 0.08em;
+      }
+      h1 {
+        margin: 0 0 0.75rem;
+        font-size: 2rem;
+      }
+      p {
+        margin: 0 0 1.25rem;
+        color: #c7c0b3;
+        line-height: 1.55;
+      }
+      button {
+        width: 100%;
+        padding: 0.9rem 1rem;
+        border: 0;
+        border-radius: 0.9rem;
+        background: linear-gradient(135deg, #f7d96d, #b8871b);
+        color: #08090a;
+        font-weight: 800;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="mark">TH</div>
+      <h1>You are offline</h1>
+      <p>TailoraHub needs internet for live bookings, maps, OTPs, payments and dashboards. Reconnect and try again.</p>
+      <button type="button" onclick="window.location.reload()">Retry</button>
+    </main>
+  </body>
+</html>

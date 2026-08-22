@@ -1,0 +1,64 @@
+{
+  "packageId": "com.tailorahub.twa",
+  "host": "www.tailorahub.com",
+  "name": "TailoraHub",
+  "launcherName": "TailoraHub",
+  "display": "standalone",
+  "themeColor": "#0B0D10",
+  "themeColorDark": "#000000",
+  "navigationColor": "#000000",
+  "navigationColorDark": "#000000",
+  "navigationDividerColor": "#000000",
+  "navigationDividerColorDark": "#000000",
+  "backgroundColor": "#050606",
+  "enableNotifications": true,
+  "startUrl": "/?source=pwa",
+  "iconUrl": "https://tailorahub-assets.s3.eu-north-1.amazonaws.com/icons/icon-512.png",
+  "maskableIconUrl": "https://tailorahub-assets.s3.eu-north-1.amazonaws.com/icons/maskable-512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "android.keystore",
+    "alias": "android"
+  },
+  "appVersionName": "2",
+  "appVersionCode": 2,
+  "shortcuts": [
+    {
+      "name": "Customer booking",
+      "shortName": "Customer",
+      "url": "https://www.tailorahub.com/?role=customer&source=pwa-shortcut",
+      "chosenIconUrl": "https://tailorahub-assets.s3.eu-north-1.amazonaws.com/icons/icon-192.png"
+    },
+    {
+      "name": "Tailor dashboard",
+      "shortName": "Tailor",
+      "url": "https://www.tailorahub.com/?role=tailor&source=pwa-shortcut",
+      "chosenIconUrl": "https://tailorahub-assets.s3.eu-north-1.amazonaws.com/icons/icon-192.png"
+    }
+  ],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://www.tailorahub.com/manifest.json",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://www.tailorahub.com/",
+  "minSdkVersion": 21,
+  "orientation": "portrait-primary",
+  "fingerprints": [],
+  "additionalTrustedOrigins": [],
+  "retainedBundles": [],
+  "protocolHandlers": [],
+  "fileHandlers": [],
+  "launchHandlerClientMode": "",
+  "displayOverride": [
+    "window-controls-overlay",
+    "standalone",
+    "browser"
+  ],
+  "appVersion": "2"
+}

@@ -327,6 +327,7 @@ export const api = {
   closeCustomerSupportTicket: (id) => request(`/customer/support/tickets/${id}/close`, { method: "POST" }),
   payOrder: (id, payload) => request(`/customer/orders/${id}/pay`, { method: "POST", body: JSON.stringify(payload || {}) }),
   payBooking: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/pay`, { method: "POST", body: JSON.stringify(payload || {}) }),
+  verifyRazorpayBookingPayment: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/razorpay/verify`, { method: "POST", body: JSON.stringify(payload || {}) }),
   bookingPaymentBreakdown: (id) => request(`/v1/bookings/${encodeURIComponent(id)}/payment-breakdown`),
   reviewOrder: (id, payload) => request(`/customer/orders/${id}/review`, { method: "POST", body: JSON.stringify(payload) }),
   orderTimeline: (id) => request(`/customer/orders/${id}/timeline`),

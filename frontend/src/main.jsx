@@ -33,6 +33,7 @@ import Video from "lucide-react/dist/esm/icons/video.js";
 import XCircle from "lucide-react/dist/esm/icons/x-circle.js";
 import { api, assetUrl, clearSession, getRole, getToken, hasValidStoredSession, isSessionExpired, markSessionActive, setSession } from "./api";
 import MapPicker from "./components/MapPicker";
+import { registerPwa } from "./registerPwa";
 import "./styles.css";
 
 const roles = [
@@ -374,6 +375,39 @@ const tailorSupportCategories = [
 
 function money(value) {
   return `Rs ${Number(value || 0).toLocaleString("en-IN")}`;
+}
+
+const TRAVEL_CHARGE_PER_KM = 5;
+const BOOKING_TAX_ESTIMATE_PERCENTAGE = 20;
+
+function finiteNumber(value) {
+  const next = Number(value);
+  return Number.isFinite(next) ? next : null;
+}
+
+function distanceKm(lat1, lng1, lat2, lng2) {
+  const aLat = finiteNumber(lat1);
+  const aLng = finiteNumber(lng1);
+  const bLat = finiteNumber(lat2);
+  const bLng = finiteNumber(lng2);
+  if ([aLat, aLng, bLat, bLng].some((value) => value === null)) return 0;
+  const toRad = (value) => (value * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const originLat = toRad(aLat);
+  const targetLat = toRad(bLat);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(originLat) * Math.cos(targetLat) * Math.sin(dLng / 2) ** 2;
+  return Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
+}
+
+function estimateTravelDistanceKm(tailor, location) {
+  const tailorLat = tailor?.lat ?? tailor?.latitude ?? tailor?.shopLat;
+  const tailorLng = tailor?.lng ?? tailor?.longitude ?? tailor?.shopLng;
+  const pickedLat = location?.latitude ?? location?.lat;
+  const pickedLng = location?.longitude ?? location?.lng;
+  const exactDistance = distanceKm(tailorLat, tailorLng, pickedLat, pickedLng);
+  if (exactDistance > 0) return exactDistance;
+  return finiteNumber(tailor?.distanceKm ?? tailor?.distance_km) || 0;
 }
 
 function fmtDate(value) {
@@ -965,6 +999,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
     name: "",
     email: "",
     phone: "",
+    gender: "",
     zoneId: "tnagar",
     address: "",
     shop: "",
@@ -1214,6 +1249,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
           email: form.email,
           dob: form.dob,
           aadhaar_number: cleanDigits(form.aadhaarNumber),
+          gender: form.gender || undefined,
           username: form.username,
           password: form.password,
           confirm_password: form.confirmPassword,
@@ -1866,6 +1902,15 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
       return (
         <div className="wizard-grid">
           <Field label="Shop name"><input value={form.shop} onChange={(e) => update("shop", e.target.value)} /></Field>
+          <Field label="Gender">
+            <select value={form.gender} onChange={(e) => update("gender", e.target.value)}>
+              <option value="">Select gender</option>
+              <option value="female">Female</option>
+              <option value="male">Male</option>
+              <option value="non_binary">Non-binary</option>
+              <option value="prefer_not_to_say">Prefer not to say</option>
+            </select>
+          </Field>
           <Field label="Experience level" error={fieldErrors.years}><input value={form.years} onChange={(e) => update("years", e.target.value)} type="number" min="0" step="0.5" /></Field>
           <Field label="Stitching since" error={fieldErrors.stitchingSinceDate}><input value={form.stitchingSinceDate} onChange={(e) => update("stitchingSinceDate", e.target.value)} type="date" /></Field>
           <Field label="Expertise"><input value={form.specs} onChange={(e) => update("specs", e.target.value)} placeholder="Blouse, Alteration" /></Field>
@@ -2678,9 +2723,22 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
   const serviceRows = useMemo(() => (services || []).map(normalizeService), [services]);
   const [serviceId, setServiceId] = useState(serviceRows[0]?.id || "");
   const [form, setForm] = useState({ quantity: 1, requirements: "", preferredDate: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
+  const [showHomeMap, setShowHomeMap] = useState(false);
   const [message, setMessage] = useState("");
   const disabled = tailor.availability === "NOT_AVAILABLE" || !tailor.acceptingRequests;
   const latestAppointmentDate = useMemo(() => measurementAppointmentLatestDate(form.preferredDate), [form.preferredDate]);
+  const selectedService = useMemo(() => serviceRows.find((s) => s.id === serviceId) || serviceRows[0], [serviceRows, serviceId]);
+  const bookingQuantity = Math.max(1, Number(form.quantity || 1));
+  const serviceAmount = Number(selectedService?.price || 0) * bookingQuantity;
+  const travelDistanceKm = form.measurementMode === "tailor_visits_customer" && form.homeLocation
+    ? estimateTravelDistanceKm(tailor, form.homeLocation)
+    : 0;
+  const travelCharge = form.measurementMode === "tailor_visits_customer" && form.homeLocation
+    ? Math.round(travelDistanceKm * TRAVEL_CHARGE_PER_KM)
+    : 0;
+  const orderSubtotal = serviceAmount + travelCharge;
+  const gstPlatformEstimate = Math.round((orderSubtotal * BOOKING_TAX_ESTIMATE_PERCENTAGE) / 100);
+  const bookingEstimateTotal = orderSubtotal + gstPlatformEstimate;
 
   useEffect(() => {
     setServiceId(serviceRows[0]?.id || "");
@@ -2692,6 +2750,9 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
       if (key === "preferredDate" && old.appointmentDate && !isMeasurementAppointmentAllowed(old.appointmentDate, value)) {
         next.appointmentDate = "";
       }
+      if (key === "measurementMode" && value !== "tailor_visits_customer") {
+        next.homeLocation = null;
+      }
       return next;
     });
   }
@@ -2699,17 +2760,30 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
   async function submit(event) {
     event.preventDefault();
     setMessage("");
-    const service = serviceRows.find((s) => s.id === serviceId);
+    const service = selectedService || serviceRows.find((s) => s.id === serviceId);
+    const today = todayDateInput();
     if (!form.preferredDate) {
       setMessage("Choose expected delivery date first.");
+      return;
+    }
+    if (form.preferredDate < today) {
+      setMessage("Expected delivery date cannot be in the past. Choose today or a future date.");
       return;
     }
     if (!form.appointmentDate) {
       setMessage("Choose measurement appointment date.");
       return;
     }
+    if (form.appointmentDate < today) {
+      setMessage("Measurement appointment cannot be in the past. Choose today or a future date.");
+      return;
+    }
     if (!isMeasurementAppointmentAllowed(form.appointmentDate, form.preferredDate)) {
       setMessage(MEASUREMENT_APPOINTMENT_ERROR);
+      return;
+    }
+    if (form.measurementMode === "tailor_visits_customer" && !form.homeLocation) {
+      setMessage("Confirm your home location before booking. Use the map pin and click Confirm this location.");
       return;
     }
     try {
@@ -2730,6 +2804,7 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
       });
       setMessage(res.message || `Booking ${res.code} created with ${tailor.shop}.`);
       setForm({ quantity: 1, requirements: "", preferredDate: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
+      setShowHomeMap(false);
       if (onBookingCreated) {
         await onBookingCreated(res.booking || res);
       } else {
@@ -2789,22 +2864,63 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
         <form className="stack-form" onSubmit={submit}>
           <label>Quantity<input type="number" min="1" value={form.quantity} onChange={(e) => update("quantity", e.target.value)} /></label>
           <label>Stitching requirements<textarea value={form.requirements} onChange={(e) => update("requirements", e.target.value)} /></label>
-          <label>Expected delivery date<input type="date" value={form.preferredDate} onChange={(e) => update("preferredDate", e.target.value)} required /></label>
-          <label>Measurement method<select value={form.measurementMode} onChange={(e) => update("measurementMode", e.target.value)}><option value="customer_visits_tailor">Customer visits tailor</option><option value="tailor_visits_customer">Tailor visits customer</option></select></label>
+          <label>Expected delivery date<input type="date" value={form.preferredDate} min={todayDateInput()} onChange={(e) => update("preferredDate", e.target.value)} required /></label>
+          <label>
+            Measurement method
+            <select
+              value={form.measurementMode}
+              onChange={(e) => {
+                const nextMode = e.target.value;
+                update("measurementMode", nextMode);
+                setShowHomeMap(nextMode === "tailor_visits_customer" && !form.homeLocation);
+              }}
+            >
+              <option value="customer_visits_tailor">Customer visits tailor</option>
+              <option value="tailor_visits_customer">Tailor visits customer</option>
+            </select>
+          </label>
           {form.measurementMode === "tailor_visits_customer" ? (
-            <div className="booking-map span-2">
-              <MapPicker
-                initialLocation={form.homeLocation || {}}
-                onConfirm={(location) => update("homeLocation", location)}
-              />
-              {form.homeLocation ? <div className="notice ok">Home location confirmed for this booking only.</div> : <div className="notice">Confirm your exact home location before booking.</div>}
+            <div className={form.homeLocation && !showHomeMap ? "booking-map booking-map-collapsed span-2" : "booking-map span-2"}>
+              {form.homeLocation && !showHomeMap ? (
+                <div className="booking-location-picked">
+                  <div>
+                    <span>Location picked</span>
+                    <strong>{form.homeLocation.address_text || "Pinned home location"}</strong>
+                    <small>{finiteNumber(form.homeLocation.latitude)?.toFixed(5)}, {finiteNumber(form.homeLocation.longitude)?.toFixed(5)}</small>
+                  </div>
+                  <button type="button" className="secondary-btn" onClick={() => setShowHomeMap(true)}>Change location</button>
+                </div>
+              ) : (
+                <>
+                  <MapPicker
+                    initialLocation={form.homeLocation || {}}
+                    onConfirm={(location) => {
+                      update("homeLocation", location);
+                      setShowHomeMap(false);
+                    }}
+                  />
+                  {form.homeLocation ? <div className="notice ok">Home location confirmed for this booking only.</div> : <div className="notice">Confirm your exact home location before booking.</div>}
+                </>
+              )}
             </div>
           ) : <div className="notice">Visit shop: {tailor.shopAddress || tailor.zoneId}</div>}
+          <BookingEstimateCard
+            serviceName={selectedService?.name || "Selected service"}
+            serviceAmount={serviceAmount}
+            quantity={bookingQuantity}
+            measurementMode={form.measurementMode}
+            travelDistanceKm={travelDistanceKm}
+            travelCharge={travelCharge}
+            gstPlatformEstimate={gstPlatformEstimate}
+            total={bookingEstimateTotal}
+            needsLocation={form.measurementMode === "tailor_visits_customer" && !form.homeLocation}
+          />
           <label>
             Measurement appointment date
             <input
               type="date"
               value={form.appointmentDate}
+              min={todayDateInput()}
               max={latestAppointmentDate || undefined}
               onChange={(e) => update("appointmentDate", e.target.value)}
               required
@@ -2827,6 +2943,50 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
         emptyText="No public reviews yet."
         renderItem={(review) => <ReviewCard review={review} />}
       />
+    </div>
+  );
+}
+
+function BookingEstimateCard({
+  serviceName,
+  serviceAmount,
+  quantity,
+  measurementMode,
+  travelDistanceKm,
+  travelCharge,
+  gstPlatformEstimate,
+  total,
+  needsLocation,
+}) {
+  return (
+    <div className="booking-estimate-card span-2">
+      <div className="booking-estimate-head">
+        <div>
+          <span>Payment details</span>
+          <strong>{serviceName}</strong>
+        </div>
+        <b>{money(total)}</b>
+      </div>
+      <div className="booking-estimate-row">
+        <span>Service amount x {quantity}</span>
+        <strong>{money(serviceAmount)}</strong>
+      </div>
+      <div className="booking-estimate-row">
+        <span>
+          Home visit travel
+          {measurementMode === "tailor_visits_customer" && !needsLocation ? ` (${travelDistanceKm.toFixed(1)} km x Rs ${TRAVEL_CHARGE_PER_KM})` : ""}
+        </span>
+        <strong>{measurementMode === "tailor_visits_customer" ? needsLocation ? "Pick location" : money(travelCharge) : "Not applicable"}</strong>
+      </div>
+      <div className="booking-estimate-row">
+        <span>GST + platform estimate</span>
+        <strong>{money(gstPlatformEstimate)}</strong>
+      </div>
+      <div className="booking-estimate-row total">
+        <span>Total payable at payment</span>
+        <strong>{money(total)}</strong>
+      </div>
+      <small>Final GST/platform values are confirmed again at Razorpay payment time.</small>
     </div>
   );
 }
@@ -2882,7 +3042,7 @@ function CustomerWalletPanel() {
       <div className="section-head">
         <div>
           <h3>{t("common.wallet", "Wallet")}</h3>
-          <p>{t("customer.walletDescription", "Refunds and future referral credits are held here for your customer account.")}</p>
+          <p>{t("customer.walletDescription", "Refunds and admin-approved credits are held here for your customer account.")}</p>
         </div>
         <button type="button" className="secondary-btn" onClick={load}>{t("common.refresh", "Refresh")}</button>
       </div>
@@ -2901,7 +3061,7 @@ function CustomerWalletPanel() {
         </div>
         <div className="record-card">
           <h3>{t("customer.reservedCredits", "Reserved Credits")}</h3>
-          <p>Admin-approved dispute refunds and future cashback/referral bonuses appear in this balance.</p>
+          <p>Admin-approved dispute refunds and future credits appear in this balance. Referral wallet rewards are paused for now.</p>
           <small>Last updated: {fmtDate(wallet?.updated_at || wallet?.updatedAt)}</small>
         </div>
       </div>
@@ -2914,6 +3074,7 @@ function CustomerReferralPanel() {
   const [referral, setReferral] = useState(null);
   const [count, setCount] = useState(0);
   const [bonus, setBonus] = useState(0);
+  const [rewardsEnabled, setRewardsEnabled] = useState(false);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -2928,6 +3089,7 @@ function CustomerReferralPanel() {
       setReferral(codeData);
       setCount(countData.valid_count ?? countData.validCount ?? 0);
       setBonus(countData.bonus_amount ?? countData.bonusAmount ?? 0);
+      setRewardsEnabled(Boolean(countData.rewards_enabled ?? countData.rewardsEnabled));
     } catch (err) {
       setMessage(err.message);
     } finally {
@@ -2974,7 +3136,7 @@ function CustomerReferralPanel() {
         <div className="referral-card">
           <span>{t("customer.validReferrals", "Valid referrals")}</span>
           <strong>{count}</strong>
-          <small>{money(bonus)} bonus tracked for future use</small>
+          <small>{rewardsEnabled ? `${money(bonus)} bonus tracked for future use` : "Wallet rewards are paused; referrals are tracked only."}</small>
         </div>
       </div>
       <div className="record-card referral-share-card">
@@ -3141,36 +3303,49 @@ function isCustomerManageAllowed(order) {
   return !appointmentDate || todayDateInput() < appointmentDate;
 }
 
-function whatsappPaymentUrl(rawUrl, intent) {
-  const fallbackPhone = intent?.adminWhatsappNumber || intent?.admin_whatsapp_number || "918790901281";
-  const reference = intent?.paymentReference || intent?.payment_reference || "";
-  const total = intent?.payableTotal || intent?.payable_total || "";
-  const fallbackText = [
-    "Hi TailoraHub, I want to pay for my order.",
-    reference ? `Payment reference: ${reference}` : "",
-    total ? `Amount to pay: Rs ${total}` : "",
-  ].filter(Boolean).join("\n");
+let razorpayCheckoutPromise = null;
 
-  try {
-    const parsed = new URL(rawUrl || "", window.location.href);
-    const host = parsed.hostname.toLowerCase();
-    const text = parsed.searchParams.get("text") || fallbackText;
-    let phone = parsed.searchParams.get("phone") || fallbackPhone;
-    if (host === "wa.me") {
-      phone = parsed.pathname.replace(/\D/g, "") || fallbackPhone;
-    }
-    return `https://api.whatsapp.com/send?phone=${String(phone).replace(/\D/g, "")}&text=${encodeURIComponent(text)}`;
-  } catch {
-    return `https://api.whatsapp.com/send?phone=${String(fallbackPhone).replace(/\D/g, "")}&text=${encodeURIComponent(fallbackText)}`;
+function loadRazorpayCheckout() {
+  if (window.Razorpay) return Promise.resolve(window.Razorpay);
+  if (!razorpayCheckoutPromise) {
+    razorpayCheckoutPromise = new Promise((resolve, reject) => {
+      const script = document.createElement("script");
+      script.src = "https://checkout.razorpay.com/v1/checkout.js";
+      script.async = true;
+      script.onload = () => {
+        if (window.Razorpay) resolve(window.Razorpay);
+        else reject(new Error("Razorpay checkout could not be loaded."));
+      };
+      script.onerror = () => reject(new Error("Razorpay checkout could not be loaded. Check your internet connection."));
+      document.body.appendChild(script);
+    });
   }
+  return razorpayCheckoutPromise;
 }
 
-function openWhatsappPayment(rawUrl, intent) {
-  const url = whatsappPaymentUrl(rawUrl, intent);
-  const opened = window.open(url, "_blank", "noopener");
-  if (opened) return true;
-  window.location.assign(url);
-  return true;
+async function openRazorpayCheckout(options) {
+  const Razorpay = await loadRazorpayCheckout();
+  return new Promise((resolve, reject) => {
+    const checkout = new Razorpay({
+      key: options.keyId || options.key_id,
+      amount: options.amountPaise || options.amount_paise || options.amount,
+      currency: options.currency || "INR",
+      name: options.name || "TailoraHub",
+      description: options.description || "TailoraHub order payment",
+      order_id: options.razorpayOrderId || options.razorpay_order_id,
+      prefill: options.prefill || {},
+      notes: options.notes || {},
+      theme: options.theme || { color: "#d4af37" },
+      handler: resolve,
+      modal: {
+        ondismiss: () => reject(new Error("Payment window was closed before completion.")),
+      },
+    });
+    checkout.on("payment.failed", (response) => {
+      reject(new Error(response?.error?.description || "Razorpay payment failed. Please try again."));
+    });
+    checkout.open();
+  });
 }
 
 function CustomerOrderCard({ order, reload }) {
@@ -3178,6 +3353,7 @@ function CustomerOrderCard({ order, reload }) {
   const [breakdown, setBreakdown] = useState(null);
   const [paymentIntent, setPaymentIntent] = useState(order.paymentIntent || order.payment_intent || null);
   const [activeView, setActiveView] = useState("");
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -3229,12 +3405,21 @@ function CustomerOrderCard({ order, reload }) {
     try {
       const currentBreakdown = breakdown || await api.bookingPaymentBreakdown(order.id);
       setBreakdown(currentBreakdown);
-      const res = await api.payBooking(order.id, { method: "manual_whatsapp" });
+      const res = await api.payBooking(order.id, { method: "razorpay" });
       const nextIntent = res.paymentIntent || res.payment_intent || null;
       if (nextIntent) setPaymentIntent(nextIntent);
-      const whatsappUrl = res.whatsappUrl || res.whatsapp_url || nextIntent?.whatsappUrl || nextIntent?.whatsapp_url;
-      if (whatsappUrl) openWhatsappPayment(whatsappUrl, nextIntent);
-      setMessage(res.message || "Payment request opened in WhatsApp. Admin verification is required before delivery OTP unlocks.");
+      const checkoutOptions = res.razorpayCheckout || res.checkout;
+      const gatewayOrderId = checkoutOptions?.razorpayOrderId || checkoutOptions?.razorpay_order_id;
+      if (!gatewayOrderId) throw new Error("Razorpay checkout was not created. Please try again.");
+      const paymentResult = await openRazorpayCheckout(checkoutOptions);
+      const verified = await api.verifyRazorpayBookingPayment(order.id, {
+        razorpay_order_id: paymentResult.razorpay_order_id,
+        razorpay_payment_id: paymentResult.razorpay_payment_id,
+        razorpay_signature: paymentResult.razorpay_signature,
+      });
+      const verifiedIntent = verified.paymentIntent || verified.payment_intent || nextIntent;
+      if (verifiedIntent) setPaymentIntent(verifiedIntent);
+      setMessage(verified.message || "Payment completed securely through Razorpay. Delivery OTP is now enabled.");
       if (res.breakdown) setBreakdown(res.breakdown);
       await loadStatus();
       await reload();
@@ -3322,7 +3507,7 @@ function CustomerOrderCard({ order, reload }) {
   const blockedReason = statusData.customerManageBlockedReason || statusData.customer_manage_blocked_reason || "Manage options close on the measurement appointment date.";
 
   return (
-    <article className={completed ? "compact-order-card completed" : cancelled ? "compact-order-card cancelled" : "compact-order-card"}>
+    <article className={`${completed ? "compact-order-card completed" : cancelled ? "compact-order-card cancelled" : "compact-order-card"}${detailsOpen ? " details-open" : ""}`}>
       <div className="compact-order-summary">
         <div className="compact-order-id">
           <strong>{statusData.code || order.code}</strong>
@@ -3345,27 +3530,41 @@ function CustomerOrderCard({ order, reload }) {
       </div>
 
       <div className="compact-order-actions" role="tablist" aria-label={`Actions for ${statusData.code || order.code}`}>
-        <button type="button" className={activeView === "track" ? "active" : ""} onClick={() => setActiveView((view) => view === "track" ? "" : "track")}>
-          Track order
+        <button
+          type="button"
+          className="view-more-order-btn"
+          onClick={() => {
+            setDetailsOpen((open) => {
+              if (open) setActiveView("");
+              return !open;
+            });
+          }}
+        >
+          {detailsOpen ? "Show less" : "View more"}
         </button>
-        {!completed && !cancelled ? (
-          <button type="button" className={activeView === "manage" ? "active" : ""} onClick={() => setActiveView((view) => view === "manage" ? "" : "manage")} disabled={!manageable}>
-            Manage order
+        {detailsOpen ? (
+          <button type="button" className={activeView === "track" ? "active" : ""} onClick={() => setActiveView((view) => view === "track" ? "" : "track")}>
+            Track order
           </button>
         ) : null}
-        {!completed && !cancelled ? (
-          <button type="button" className={activeView === "instructions" ? "active" : ""} onClick={() => setActiveView((view) => view === "instructions" ? "" : "instructions")} disabled={!manageable}>
-            Update instructions
-          </button>
+        {detailsOpen && !completed && !cancelled ? (
+          <>
+            <button type="button" className={activeView === "manage" ? "active" : ""} onClick={() => setActiveView((view) => view === "manage" ? "" : "manage")} disabled={!manageable}>
+              Manage order
+            </button>
+            <button type="button" className={activeView === "instructions" ? "active" : ""} onClick={() => setActiveView((view) => view === "instructions" ? "" : "instructions")} disabled={!manageable}>
+              Update instructions
+            </button>
+          </>
         ) : null}
-        {!isPaid && !completed && !cancelled ? <button type="button" onClick={pay} disabled={busy}>{busy ? "Opening..." : "Pay on WhatsApp"}</button> : null}
-        {completed ? <button type="button" className={activeView === "feedback" ? "active" : ""} onClick={() => setActiveView((view) => view === "feedback" ? "" : "feedback")}>Feedback</button> : null}
+        {!isPaid && !completed && !cancelled ? <button type="button" onClick={pay} disabled={busy}>{busy ? "Opening..." : "Pay securely"}</button> : null}
+        {detailsOpen && completed ? <button type="button" className={activeView === "feedback" ? "active" : ""} onClick={() => setActiveView((view) => view === "feedback" ? "" : "feedback")}>Feedback</button> : null}
       </div>
 
-      {!manageable && !completed && !cancelled ? <small className="manage-cutoff-note">{blockedReason}</small> : null}
+      {detailsOpen && !manageable && !completed && !cancelled ? <small className="manage-cutoff-note">{blockedReason}</small> : null}
       {cancelled ? <div className="notice">Order cancelled: {statusData.cancelReason || statusData.cancel_reason || "Cancelled before measurement."}</div> : null}
 
-      {activeView === "track" ? (
+      {detailsOpen && activeView === "track" ? (
         <div className="compact-order-panel">
           <OrderTracker steps={statusData.steps} />
           {!isPaid && !cancelled ? <PaymentBreakdownCard breakdown={breakdown} /> : null}
@@ -3374,7 +3573,7 @@ function CustomerOrderCard({ order, reload }) {
         </div>
       ) : null}
 
-      {activeView === "manage" && !completed && !cancelled ? (
+      {detailsOpen && activeView === "manage" && !completed && !cancelled ? (
         <CustomerOrderManagePanel
           order={statusData}
           busy={busy}
@@ -3384,7 +3583,7 @@ function CustomerOrderCard({ order, reload }) {
         />
       ) : null}
 
-      {activeView === "instructions" && !completed && !cancelled ? (
+      {detailsOpen && activeView === "instructions" && !completed && !cancelled ? (
         <CustomerOrderManagePanel
           order={statusData}
           busy={busy}
@@ -3394,8 +3593,8 @@ function CustomerOrderCard({ order, reload }) {
         />
       ) : null}
 
-      {activeView === "feedback" && completed ? <OrderFeedbackCard order={statusData} onSubmit={submitFeedback} busy={busy} /> : null}
-      {message ? <div className={message.includes("raised") || message.includes("completed") || message.includes("submitted") || message.includes("created") || message.includes("opened") || message.includes("updated") || message.includes("cancelled") ? "notice ok" : "error"}>{message}</div> : null}
+      {detailsOpen && activeView === "feedback" && completed ? <OrderFeedbackCard order={statusData} onSubmit={submitFeedback} busy={busy} /> : null}
+      {message ? <div className={message.includes("raised") || message.includes("completed") || message.includes("submitted") || message.includes("created") || message.includes("verified") || message.includes("securely") || message.includes("updated") || message.includes("cancelled") ? "notice ok" : "error"}>{message}</div> : null}
     </article>
   );
 }
@@ -3496,15 +3695,15 @@ function CustomerOrderManagePanel({ order, busy, mode, onUpdate, onCancel }) {
 function PaymentIntentNotice({ intent }) {
   const status = String(intent.status || "").replaceAll("_", " ");
   const reference = intent.paymentReference || intent.payment_reference;
+  const gatewayOrderId = intent.gatewayOrderId || intent.gateway_order_id;
   const expiresIn = Number(intent.expiresInSeconds ?? intent.expires_in_seconds ?? 0);
   const expiresText = expiresIn > 0 ? `${Math.ceil(expiresIn / 60)} min left` : "expired";
-  const url = whatsappPaymentUrl(intent.whatsappUrl || intent.whatsapp_url, intent);
   return (
     <div className={String(intent.status).toLowerCase() === "pending" ? "notice payment-intent-notice" : "notice"}>
-      <strong>WhatsApp payment reference: {reference}</strong>
-      <span>Status: {status || "pending"} · {expiresText}</span>
-      <small>Money is credited to the tailor wallet only after admin confirms the payment in the admin panel.</small>
-      <a className="whatsapp-payment-link" href={url} target="_blank" rel="noreferrer">Open WhatsApp payment chat</a>
+      <strong>Razorpay payment reference: {reference}</strong>
+      <span>Status: {status || "pending"} - {expiresText}</span>
+      {gatewayOrderId ? <small>Gateway order: {gatewayOrderId}</small> : null}
+      <small>Tailor wallet credit happens only after Razorpay signature verification succeeds.</small>
     </div>
   );
 }
@@ -3514,6 +3713,9 @@ function PaymentBreakdownCard({ breakdown }) {
     return <div className="payment-breakdown"><small>Loading payment breakdown...</small></div>;
   }
   const orderAmount = breakdown.orderAmount ?? breakdown.order_amount;
+  const serviceAmount = breakdown.serviceAmount ?? breakdown.service_amount ?? orderAmount;
+  const travelChargeAmount = breakdown.travelChargeAmount ?? breakdown.travel_charge_amount ?? 0;
+  const travelRate = breakdown.travelRatePerKm ?? breakdown.travel_rate_per_km ?? TRAVEL_CHARGE_PER_KM;
   const gstAmount = breakdown.gstAmount ?? breakdown.gst_amount;
   const gstPercentage = breakdown.gstPercentage ?? breakdown.gst_percentage;
   const platformFeeAmount = breakdown.platformFeeAmount ?? breakdown.platform_fee_amount;
@@ -3521,7 +3723,9 @@ function PaymentBreakdownCard({ breakdown }) {
   const payableTotal = breakdown.payableTotal ?? breakdown.payable_total;
   return (
     <div className="payment-breakdown">
-      <div><span>Order amount</span><strong>{money(orderAmount)}</strong></div>
+      <div><span>Service amount</span><strong>{money(serviceAmount)}</strong></div>
+      <div><span>Home visit travel ({money(travelRate)}/km)</span><strong>{Number(travelChargeAmount || 0) > 0 ? money(travelChargeAmount) : "Not applicable"}</strong></div>
+      <div><span>Order subtotal</span><strong>{money(orderAmount)}</strong></div>
       <div><span>GST {Number(gstPercentage || 0)}%</span><strong>{money(gstAmount)}</strong></div>
       <div><span>Platform fee {Number(platformFeePercentage || 0)}%</span><strong>{money(platformFeeAmount)}</strong></div>
       <div className="total"><span>Total to pay</span><strong>{money(payableTotal)}</strong></div>
@@ -3691,7 +3895,10 @@ function OrderFeedbackCard({ order, onSubmit, busy }) {
 
 function SupportPanel({ role, orders = [] }) {
   const isCustomer = role === "customer";
-  const categories = isCustomer ? customerSupportCategories : tailorSupportCategories;
+  const categories = useMemo(
+    () => [...new Set([...(isCustomer ? customerSupportCategories : tailorSupportCategories), "Account deletion request"])],
+    [isCustomer],
+  );
   const [tickets, setTickets] = useState([]);
   const [selected, setSelected] = useState(null);
   const [form, setForm] = useState({ category: categories[0], priority: "NORMAL", subject: "", description: "", orderId: "" });
@@ -3717,6 +3924,17 @@ function SupportPanel({ role, orders = [] }) {
 
   function update(key, value) {
     setForm((old) => ({ ...old, [key]: value }));
+  }
+
+  function prepareDeletionRequest() {
+    setForm((old) => ({
+      ...old,
+      category: "Account deletion request",
+      priority: "HIGH",
+      orderId: "",
+      subject: "Request to delete my TailoraHub account",
+      description: "I want to delete my TailoraHub account. Please verify my identity and process account deletion.",
+    }));
   }
 
   async function createTicket(event) {
@@ -3791,7 +4009,10 @@ function SupportPanel({ role, orders = [] }) {
           <label>Related order<select value={form.orderId} onChange={(e) => update("orderId", e.target.value)}><option value="">No related order</option>{orders.map((o) => <option key={o.id} value={o.id}>{o.code} - {o.service_name}</option>)}</select></label>
           <label>Subject<input value={form.subject} onChange={(e) => update("subject", e.target.value)} placeholder="Short issue summary" /></label>
           <label>Description<textarea value={form.description} onChange={(e) => update("description", e.target.value)} placeholder="Explain what happened and what help you need" /></label>
-          <button className="primary-btn" disabled={busy}>Create Ticket</button>
+          <div className="inline-actions support-form-actions">
+            <button type="button" className="secondary-btn support-delete-request" onClick={prepareDeletionRequest} disabled={busy}>Request account deletion</button>
+            <button className="primary-btn" disabled={busy}>Create Ticket</button>
+          </div>
         </form>
         <div className="support-list">
           <div className="section-head">
@@ -4108,6 +4329,10 @@ function TailorWalletPanel() {
     return <section className="section-block no-top"><div className="loading">{t("wallet.loading", "Loading wallet...")}</div></section>;
   }
 
+  const walletAvailableBalance = wallet?.available_balance ?? wallet?.availableBalance ?? wallet?.balance ?? 0;
+  const walletLedgerBalance = wallet?.ledger_balance ?? wallet?.ledgerBalance ?? wallet?.balance ?? 0;
+  const pendingWithdrawalAmount = wallet?.pending_withdrawal_amount ?? wallet?.pendingWithdrawalAmount ?? 0;
+
   return (
     <section className="section-block no-top">
       <div className="section-head">
@@ -4121,9 +4346,10 @@ function TailorWalletPanel() {
       <div className="wallet-layout">
         <div className="wallet-card">
           <div>
-            <small>Available balance</small>
-            <strong>{money(wallet?.balance)}</strong>
+            <small>Net available after commission</small>
+            <strong>{money(walletAvailableBalance)}</strong>
             <span>Wallet ID {String(wallet?.wallet_id || "").slice(0, 8)}...</span>
+            <small>Ledger {money(walletLedgerBalance)} - Pending withdrawal {money(pendingWithdrawalAmount)}</small>
           </div>
           <div className="wallet-qr-tile">
             {wallet?.qr_code_url ? <img src={assetUrl(wallet.qr_code_url)} alt="Wallet payment QR" /> : <span>No QR yet</span>}
@@ -4148,7 +4374,7 @@ function TailorWalletPanel() {
         </div>
         <div className="form-grid">
           <Field label="Amount">
-            <input type="number" min="1" value={withdraw.amount} onChange={(e) => setWithdraw((old) => ({ ...old, amount: e.target.value }))} />
+            <input type="number" min="1" max={Number(walletAvailableBalance || 0)} value={withdraw.amount} onChange={(e) => setWithdraw((old) => ({ ...old, amount: e.target.value }))} />
           </Field>
           <Field label="Destination">
             <select value={withdraw.destinationType} onChange={(e) => setWithdraw((old) => ({ ...old, destinationType: e.target.value }))}>
@@ -4625,7 +4851,7 @@ function TailorFollowersPanel({ followers }) {
       <div className="section-head">
         <div>
           <h3>Followers</h3>
-          <p>Only customer profile ID and profile picture are shown here.</p>
+          <p>Customer name, profile picture and profile ID are shown for follower context.</p>
         </div>
       </div>
       <PaginatedCards
@@ -4638,8 +4864,9 @@ function TailorFollowersPanel({ followers }) {
             <article className="follower-card">
               <CustomerAvatar customer={customer} size="lg" />
               <div>
-                <small>Customer Profile ID</small>
-                <strong>{customer.customerProfileId}</strong>
+                <strong>{customer.customerName || customer.name || "Customer"}</strong>
+                <small>Profile ID {customer.customerProfileId || customer.id || "-"}</small>
+                {customer.customerPhone ? <small>{customer.customerPhone}</small> : null}
                 <small>Followed {fmtDate(customer.followedAt)}</small>
               </div>
             </article>
@@ -5635,13 +5862,17 @@ function Payments({ rows, intents = [], withdrawals = [], reload = () => {} }) {
   const [message, setMessage] = useState("");
   const [busyId, setBusyId] = useState("");
 
-  const pendingIntents = intents.filter((item) => String(item.status || "").toLowerCase() === "pending");
+  const pendingManualIntents = intents.filter((item) => {
+    const status = String(item.status || "").toLowerCase();
+    const method = String(item.method || "").toLowerCase();
+    return status === "pending" && method !== "razorpay";
+  });
   const pendingWithdrawals = withdrawals.filter((item) => String(item.status || "").toLowerCase() === "pending_admin_review");
 
   async function verifyIntent(item) {
     const proofReference = (proofs[item.id] || "").trim();
     if (!proofReference) {
-      setMessage("Enter the UPI/WhatsApp transaction reference before verifying payment.");
+      setMessage("Enter the manual transaction reference before verifying payment.");
       return;
     }
     setBusyId(item.id);
@@ -5713,12 +5944,12 @@ function Payments({ rows, intents = [], withdrawals = [], reload = () => {} }) {
       <section className="section-block no-top">
         <div className="section-head">
           <div>
-            <h3>WhatsApp Payment Verification</h3>
-            <p>Customer money reaches the business account first. Verify here only after checking WhatsApp/UPI proof.</p>
+            <h3>Manual Payment Verification</h3>
+            <p>Use only for offline fallback payments. Razorpay payments verify automatically through signature verification.</p>
           </div>
-          <StatusPill value={`${pendingIntents.length} pending`} />
+          <StatusPill value={`${pendingManualIntents.length} pending`} />
         </div>
-        {pendingIntents.length ? <Table columns={["Order", "Customer", "Reference", "Payable", "Tailor credit", "Expires", "Action"]} rows={pendingIntents.map((item) => [
+        {pendingManualIntents.length ? <Table columns={["Order", "Customer", "Reference", "Payable", "Tailor credit", "Expires", "Action"]} rows={pendingManualIntents.map((item) => [
           <><strong>{item.orderCode || item.order_code}</strong><small>{item.shop}</small></>,
           <><span>{item.customerName || item.customer_name}</span><small>{item.customerPhone || item.customer_phone || "-"}</small></>,
           item.paymentReference || item.payment_reference,
@@ -5729,12 +5960,12 @@ function Payments({ rows, intents = [], withdrawals = [], reload = () => {} }) {
             <input
               value={proofs[item.id] || ""}
               onChange={(event) => setProofs((old) => ({ ...old, [item.id]: event.target.value }))}
-              placeholder="UPI/WhatsApp txn ref"
+              placeholder="Manual txn ref"
             />
             <button type="button" onClick={() => verifyIntent(item)} disabled={busyId === item.id}>Verify</button>
             <button type="button" className="danger-link" onClick={() => rejectIntent(item)} disabled={busyId === item.id}>Reject</button>
           </div>,
-        ])} /> : <Empty text="No WhatsApp payments waiting for verification." />}
+        ])} /> : <Empty text="No manual fallback payments waiting for verification." />}
       </section>
 
       <section className="section-block">
@@ -5775,7 +6006,7 @@ function Payments({ rows, intents = [], withdrawals = [], reload = () => {} }) {
           r.order_code,
           money(r.amount),
           r.method || "-",
-          r.gateway_verified === false || r.verification_status === "unverified_by_gateway" || r.method === "manual_whatsapp" ? <StatusPill value="MANUAL VERIFICATION" /> : <StatusPill value="GATEWAY VERIFIED" />,
+          r.gateway_verified === false || r.verification_status === "unverified_by_gateway" || String(r.method || "").toLowerCase().includes("manual") ? <StatusPill value="MANUAL VERIFICATION" /> : <StatusPill value="GATEWAY VERIFIED" />,
           <StatusPill value={r.status} />,
           fmtDate(r.updated),
         ])} /> : <Empty text="No payment records yet." />}
@@ -5877,3 +6108,4 @@ function Table({ columns, rows, pageSize = DEFAULT_TABLE_PAGE_SIZE, label = "rec
 }
 
 createRoot(document.getElementById("root")).render(<App />);
+registerPwa();

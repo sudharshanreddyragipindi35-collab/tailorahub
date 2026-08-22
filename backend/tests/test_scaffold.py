@@ -6,6 +6,7 @@ import pytest
 from fastapi import HTTPException
 
 from app.api.v1 import api_router
+from app.api.v1.admin import verify_payment_intent
 from app.api.v1.bookings import (
     MEASUREMENT_APPOINTMENT_ERROR,
     MEASUREMENT_APPOINTMENT_REQUIRED_ERROR,
@@ -20,7 +21,10 @@ from app.schema_models import SchemaBase
 
 
 def test_v1_router_has_health_route():
-    paths = {route.path for route in api_router.routes}
+    paths = {route.path for route in api_router.routes if hasattr(route, "path")}
+    for included_router in [route for route in api_router.routes if hasattr(route, "original_router")]:
+        prefix = getattr(getattr(included_router, "include_context", None), "prefix", "")
+        paths.update(f"{prefix}{route.path}" for route in included_router.original_router.routes)
     assert "/health" in paths
     assert "/otp/send" in paths
     assert "/otp/verify" in paths
@@ -106,10 +110,12 @@ def test_delivery_otp_is_server_gated_by_paid_payment():
 
 def test_finance_engine_hooks_payment_and_completion():
     payment_source = inspect.getsource(pay_booking)
+    admin_verification_source = inspect.getsource(verify_payment_intent)
     completion_source = inspect.getsource(verify_delivery_otp)
     assert "gst_platform_charge" in payment_source
-    assert "credit_admin_wallet" in payment_source
-    assert "ensure_tailor_wallet" in payment_source
+    assert "payment_intents" in payment_source
+    assert "_credit_admin_wallet" in admin_verification_source
+    assert "_ensure_tailor_wallet" in admin_verification_source
     assert "apply_completion_commission" in completion_source
 
 

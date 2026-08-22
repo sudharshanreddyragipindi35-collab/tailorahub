@@ -20,6 +20,7 @@ from app.schemas.wallet import SetUpiIn, WithdrawIn, WalletOut
 router = APIRouter()
 PHONE_RE = re.compile(r"^[6-9]\d{9}$")
 UPI_RE = re.compile(r"^[A-Za-z0-9.\-_]{2,}@[A-Za-z][A-Za-z0-9.\-_]{2,}$")
+MONEY_QUANT = Decimal("0.01")
 
 
 async def fetch_one(db: AsyncSession, sql: str, params: dict | None = None) -> dict | None:
@@ -39,10 +40,41 @@ def mask_target(target: str) -> str:
     return f"******{target[-4:]}"
 
 
-def wallet_payload(row: dict) -> dict:
+def money_decimal(value) -> Decimal:
+    return Decimal(str(value or 0)).quantize(MONEY_QUANT)
+
+
+async def pending_withdrawal_amount(db: AsyncSession, wallet_id) -> Decimal:
+    row = await fetch_one(
+        db,
+        """
+        SELECT COALESCE(SUM(amount), 0) AS pending_amount
+        FROM withdrawal_requests
+        WHERE wallet_id=:wallet_id
+          AND status='pending_admin_review'
+        """,
+        {"wallet_id": wallet_id},
+    )
+    return money_decimal(row["pending_amount"] if row else 0)
+
+
+async def wallet_balance_snapshot(db: AsyncSession, row: dict) -> tuple[Decimal, Decimal, Decimal]:
+    ledger_balance = money_decimal(row.get("balance"))
+    pending_amount = await pending_withdrawal_amount(db, row["wallet_id"])
+    available_balance = ledger_balance - pending_amount
+    if available_balance < 0:
+        available_balance = Decimal("0.00")
+    return ledger_balance, pending_amount, available_balance
+
+
+async def wallet_payload(db: AsyncSession, row: dict) -> dict:
+    ledger_balance, pending_amount, available_balance = await wallet_balance_snapshot(db, row)
     return {
         "wallet_id": row["wallet_id"],
-        "balance": row["balance"],
+        "balance": available_balance,
+        "ledger_balance": ledger_balance,
+        "available_balance": available_balance,
+        "pending_withdrawal_amount": pending_amount,
         "upi_id": row.get("upi_id"),
         "qr_code_url": row.get("qr_code_url"),
         "bank_account_configured": bool(row.get("bank_account_number") and row.get("bank_ifsc")),
@@ -131,7 +163,7 @@ async def wallet_scaffold() -> dict:
 async def my_wallet(tailor: dict = Depends(get_current_tailor), db: AsyncSession = Depends(get_db)) -> dict:
     wallet = await ensure_wallet(db, tailor)
     await db.commit()
-    return wallet_payload(wallet)
+    return await wallet_payload(db, wallet)
 
 
 @router.post("/set-upi", response_model=WalletOut)
@@ -145,7 +177,7 @@ async def set_upi(body: SetUpiIn, tailor: dict = Depends(get_current_tailor), db
         {"upi_id": upi_id, "wallet_id": wallet["wallet_id"]},
     )
     await db.commit()
-    return wallet_payload(dict(result.mappings().first()))
+    return await wallet_payload(db, dict(result.mappings().first()))
 
 
 @router.post("/withdraw/send-otp")
@@ -157,11 +189,15 @@ async def send_withdraw_otp(tailor: dict = Depends(get_current_tailor), db: Asyn
 @router.post("/withdraw")
 async def withdraw(body: WithdrawIn, tailor: dict = Depends(get_current_tailor), db: AsyncSession = Depends(get_db)) -> dict:
     wallet = await ensure_wallet(db, tailor)
-    amount = Decimal(body.amount)
+    amount = money_decimal(body.amount)
     if amount <= 0:
         raise HTTPException(400, "Withdrawal amount must be greater than zero")
-    if Decimal(wallet["balance"]) < amount:
-        raise HTTPException(400, "Insufficient wallet balance")
+    ledger_balance, pending_amount, available_balance = await wallet_balance_snapshot(db, wallet)
+    if available_balance < amount:
+        raise HTTPException(
+            400,
+            f"Insufficient available wallet balance. Available: Rs {available_balance}; pending admin approval: Rs {pending_amount}.",
+        )
     destination_upi_id = None
     destination_bank_account = None
     destination_bank_ifsc = None
@@ -183,6 +219,13 @@ async def withdraw(body: WithdrawIn, tailor: dict = Depends(get_current_tailor),
 
     await verify_withdrawal_otp(db, tailor, body.otp)
     try:
+        wallet = await fetch_one(db, "SELECT * FROM tailor_wallets WHERE wallet_id=:wallet_id FOR UPDATE", {"wallet_id": wallet["wallet_id"]}) or wallet
+        ledger_balance, pending_amount, available_balance = await wallet_balance_snapshot(db, wallet)
+        if available_balance < amount:
+            raise HTTPException(
+                400,
+                f"Insufficient available wallet balance. Available: Rs {available_balance}; pending admin approval: Rs {pending_amount}.",
+            )
         result = await db.execute(
             text(
                 """
@@ -207,6 +250,8 @@ async def withdraw(body: WithdrawIn, tailor: dict = Depends(get_current_tailor),
         )
         request_row = dict(result.mappings().first())
         await db.commit()
+        updated_wallet = await fetch_one(db, "SELECT * FROM tailor_wallets WHERE wallet_id=:wallet_id", {"wallet_id": wallet["wallet_id"]}) or wallet
+        wallet_view = await wallet_payload(db, updated_wallet)
     except Exception:
         await db.rollback()
         raise
@@ -214,6 +259,9 @@ async def withdraw(body: WithdrawIn, tailor: dict = Depends(get_current_tailor),
         "ok": True,
         "status": request_row["status"],
         "txn_ref": str(request_row["id"]),
-        "balance": wallet["balance"],
+        "balance": wallet_view["balance"],
+        "ledger_balance": wallet_view["ledger_balance"],
+        "available_balance": wallet_view["available_balance"],
+        "pending_withdrawal_amount": wallet_view["pending_withdrawal_amount"],
         "message": "Withdrawal request sent to admin. Manual payout will be reviewed within 24 hours.",
     }

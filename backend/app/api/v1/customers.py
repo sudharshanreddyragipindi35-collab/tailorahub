@@ -20,8 +20,9 @@ from app.security import hash_password
 
 router = APIRouter()
 PHONE_RE = re.compile(r"^[6-9]\d{9}$")
-CUSTOMER_REFERRER_BONUS = 100
-CUSTOMER_REFERRED_BONUS = 50
+CUSTOMER_REFERRAL_REWARDS_ENABLED = False
+CUSTOMER_REFERRER_BONUS = 0
+CUSTOMER_REFERRED_BONUS = 0
 
 
 @router.get("/scaffold")
@@ -326,11 +327,14 @@ async def my_customer_referral_count(
         {"customer_id": customer["customer_id"]},
     )
     row = dict(result.mappings().first() or {"valid_count": 0, "bonus_total": 0})
+    bonus_total = row["bonus_total"] if CUSTOMER_REFERRAL_REWARDS_ENABLED else 0
     return {
         "valid_count": row["valid_count"] or 0,
         "validCount": row["valid_count"] or 0,
-        "bonus_amount": row["bonus_total"] or 0,
-        "bonusAmount": row["bonus_total"] or 0,
+        "bonus_amount": bonus_total or 0,
+        "bonusAmount": bonus_total or 0,
+        "rewards_enabled": CUSTOMER_REFERRAL_REWARDS_ENABLED,
+        "rewardsEnabled": CUSTOMER_REFERRAL_REWARDS_ENABLED,
     }
 
 
@@ -405,71 +409,87 @@ async def register_customer(body: CustomerRegisterIn, db: AsyncSession = Depends
     wallet_id = wallet_result.scalar_one()
 
     if referred_by_customer_id:
-        await ensure_customer_wallet_by_customer_id(db, referred_by_customer_id)
         await db.execute(
             text(
                 """
                 INSERT INTO customer_referrals
                   (id,referrer_customer_id,referred_customer_id,referred_phone_number,is_valid,bonus_amount,created_at)
                 VALUES
-                  (gen_random_uuid(),:referrer,:referred,:phone,TRUE,:referrer_bonus,now())
+                  (gen_random_uuid(),:referrer,:referred,:phone,TRUE,:bonus_amount,now())
                 """
             ),
             {
                 "referrer": referred_by_customer_id,
                 "referred": user["customer_id"],
                 "phone": phone,
-                "referrer_bonus": CUSTOMER_REFERRER_BONUS,
+                "bonus_amount": CUSTOMER_REFERRER_BONUS if CUSTOMER_REFERRAL_REWARDS_ENABLED else None,
             },
         )
-        await db.execute(
-            text(
-                """
-                UPDATE customer_wallets
-                SET balance=balance + :amount, updated_at=now()
-                WHERE customer_id=:customer_id
-                """
-            ),
-            {"amount": CUSTOMER_REFERRER_BONUS, "customer_id": referred_by_customer_id},
-        )
-        await db.execute(
-            text(
-                """
-                UPDATE customer_wallets
-                SET balance=balance + :amount, updated_at=now()
-                WHERE customer_id=:customer_id
-                """
-            ),
-            {"amount": CUSTOMER_REFERRED_BONUS, "customer_id": user["customer_id"]},
-        )
-        await db.execute(
-            text(
-                """
-                INSERT INTO notifications (id,to_ref,channel,title,body)
-                VALUES (:id,:to_ref,'in_app',:title,:body)
-                """
-            ),
-            {
-                "id": uid("n"),
-                "to_ref": "user:" + referrer["id"],
-                "title": "Customer referral bonus credited",
-                "body": f"Your referral was successful. Rs {CUSTOMER_REFERRER_BONUS} has been added to your TailoraHub wallet.",
-            },
-        )
-        await db.execute(
-            text(
-                """
-                INSERT INTO notifications (id,to_ref,channel,title,body)
-                VALUES (:id,:to_ref,'in_app',:title,:body)
-                """
-            ),
-            {
-                "id": uid("n"),
-                "to_ref": "user:" + user["id"],
-                "title": "Welcome referral bonus credited",
-                "body": f"Your referral signup bonus is active. Rs {CUSTOMER_REFERRED_BONUS} has been added to your TailoraHub wallet.",
-            },
-        )
+        if CUSTOMER_REFERRAL_REWARDS_ENABLED:
+            await ensure_customer_wallet_by_customer_id(db, referred_by_customer_id)
+            await db.execute(
+                text(
+                    """
+                    UPDATE customer_wallets
+                    SET balance=balance + :amount, updated_at=now()
+                    WHERE customer_id=:customer_id
+                    """
+                ),
+                {"amount": CUSTOMER_REFERRER_BONUS, "customer_id": referred_by_customer_id},
+            )
+            await db.execute(
+                text(
+                    """
+                    UPDATE customer_wallets
+                    SET balance=balance + :amount, updated_at=now()
+                    WHERE customer_id=:customer_id
+                    """
+                ),
+                {"amount": CUSTOMER_REFERRED_BONUS, "customer_id": user["customer_id"]},
+            )
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO notifications (id,to_ref,channel,title,body)
+                    VALUES (:id,:to_ref,'in_app',:title,:body)
+                    """
+                ),
+                {
+                    "id": uid("n"),
+                    "to_ref": "user:" + referrer["id"],
+                    "title": "Customer referral bonus credited",
+                    "body": f"Your referral was successful. Rs {CUSTOMER_REFERRER_BONUS} has been added to your TailoraHub wallet.",
+                },
+            )
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO notifications (id,to_ref,channel,title,body)
+                    VALUES (:id,:to_ref,'in_app',:title,:body)
+                    """
+                ),
+                {
+                    "id": uid("n"),
+                    "to_ref": "user:" + user["id"],
+                    "title": "Welcome referral bonus credited",
+                    "body": f"Your referral signup bonus is active. Rs {CUSTOMER_REFERRED_BONUS} has been added to your TailoraHub wallet.",
+                },
+            )
+        else:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO notifications (id,to_ref,channel,title,body)
+                    VALUES (:id,:to_ref,'in_app',:title,:body)
+                    """
+                ),
+                {
+                    "id": uid("n"),
+                    "to_ref": "user:" + referrer["id"],
+                    "title": "Customer referral recorded",
+                    "body": "A new customer registered with your referral code. Wallet rewards are currently disabled.",
+                },
+            )
 
     tokens = await create_token_pair(db, user["id"], user.get("roles") or ["customer"])
     tokens.pop("_refresh_token_hash", None)

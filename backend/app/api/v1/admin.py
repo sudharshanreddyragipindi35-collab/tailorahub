@@ -188,9 +188,11 @@ async def verify_payment_intent(
     if intent.get("is_expired") and intent.get("status") == "pending":
         await db.execute(text("UPDATE payment_intents SET status='expired', updated_at=now() WHERE id=:id"), {"id": intent_id})
         await db.commit()
-        raise HTTPException(409, "This payment request expired. Ask the customer to create a new WhatsApp payment request.")
+        raise HTTPException(409, "This payment request expired. Ask the customer to start a new payment request.")
     if intent.get("status") != "pending":
         raise HTTPException(409, f"This payment request is already {intent.get('status')}.")
+    if str(intent.get("method") or "").lower() == "razorpay":
+        raise HTTPException(409, "Razorpay payments must be verified by the secure Razorpay signature flow, not manual admin approval.")
 
     order = await _order_for_update(db, intent["booking_id"])
     if not order:
@@ -249,12 +251,12 @@ async def verify_payment_intent(
     payment = await _fetch_one(db, "SELECT * FROM payments WHERE order_id=:id ORDER BY ts DESC LIMIT 1", {"id": order["id"]})
     if payment:
         await db.execute(
-            text("UPDATE payments SET amount=:amount, method='manual_whatsapp', status='paid', txn_ref=:txn, updated=now() WHERE id=:id"),
+            text("UPDATE payments SET amount=:amount, method='manual_admin', status='paid', txn_ref=:txn, updated=now() WHERE id=:id"),
             {"id": payment["id"], "amount": payable_total, "txn": intent["payment_reference"]},
         )
     else:
         await db.execute(
-            text("INSERT INTO payments (id,order_id,amount,method,status,txn_ref) VALUES (:id,:order_id,:amount,'manual_whatsapp','paid',:txn)"),
+            text("INSERT INTO payments (id,order_id,amount,method,status,txn_ref) VALUES (:id,:order_id,:amount,'manual_admin','paid',:txn)"),
             {"id": uid("pay"), "order_id": order["id"], "amount": payable_total, "txn": intent["payment_reference"]},
         )
     await db.execute(
@@ -268,7 +270,7 @@ async def verify_payment_intent(
         ),
         {"id": intent_id, "proof": body.proof_reference, "note": body.admin_note, "admin_id": admin["id"]},
     )
-    await _add_history(db, order["id"], "paid", f"Admin verified WhatsApp payment {intent['payment_reference']}. Tailor wallet credited net amount {tailor_credit}.", "admin")
+    await _add_history(db, order["id"], "paid", f"Admin verified manual payment {intent['payment_reference']}. Tailor wallet credited net amount {tailor_credit}.", "admin")
     await _notify(db, "user:" + order["customer_id"], "Payment verified", f"Payment for order {order['code']} is verified. Delivery OTP is now enabled.", order["id"])
     await _notify(db, "tailor:" + order["tailor_id"], "Payment verified", f"Payment for order {order['code']} is verified. Net wallet credit: Rs {tailor_credit}.", order["id"])
     await db.commit()
@@ -663,8 +665,10 @@ def _payment_intent_admin_payload(row: dict) -> dict:
         "tailorCreditAmount": row.get("tailor_credit_amount"),
         "payable_total": row.get("payable_total"),
         "payableTotal": row.get("payable_total"),
-        "admin_whatsapp_number": row.get("admin_whatsapp_number"),
-        "adminWhatsappNumber": row.get("admin_whatsapp_number"),
+        "gateway_order_id": row.get("gateway_order_id"),
+        "gatewayOrderId": row.get("gateway_order_id"),
+        "gateway_payment_id": row.get("gateway_payment_id"),
+        "gatewayPaymentId": row.get("gateway_payment_id"),
         "proof_reference": row.get("proof_reference"),
         "proofReference": row.get("proof_reference"),
         "admin_note": row.get("admin_note"),

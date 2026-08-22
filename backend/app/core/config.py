@@ -34,8 +34,12 @@ class AppSettings(BaseSettings):
     payment_provider: str = Field(default="mock", alias="PAYMENT_PROVIDER")
     maps_provider: str = Field(default="mock", alias="MAPS_PROVIDER")
 
+    payment_api_key: str = Field(default="", alias="PAYMENT_API_KEY")
+    payment_api_secret: str = Field(default="", alias="PAYMENT_API_SECRET")
     payment_webhook_secret: str = Field(default="", alias="PAYMENT_WEBHOOK_SECRET")
-    admin_whatsapp_number: str = Field(default="918790901281", alias="ADMIN_WHATSAPP_NUMBER")
+    razorpay_key_id: str = Field(default="", alias="RAZORPAY_KEY_ID")
+    razorpay_key_secret: str = Field(default="", alias="RAZORPAY_KEY_SECRET")
+    razorpay_webhook_secret: str = Field(default="", alias="RAZORPAY_WEBHOOK_SECRET")
     admin_payment_upi_id: str = Field(default="", alias="ADMIN_PAYMENT_UPI_ID")
     admin_payment_qr_url: str = Field(default="", alias="ADMIN_PAYMENT_QR_URL")
     manual_payment_expiry_minutes: int = Field(default=5, alias="MANUAL_PAYMENT_EXPIRY_MINUTES")

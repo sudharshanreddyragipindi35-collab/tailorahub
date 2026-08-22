@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import base64
+import hashlib
+import hmac
+import json
+import math
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import re
 import uuid
-from urllib.parse import quote
+from urllib import error as urllib_error, request as urllib_request
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
@@ -26,6 +32,9 @@ router = APIRouter()
 MEASUREMENT_APPOINTMENT_BLOCKED_WINDOW_DAYS = 2
 MEASUREMENT_APPOINTMENT_ERROR = "Measurement appointment must be scheduled at least 3 days before the delivery date."
 MEASUREMENT_APPOINTMENT_REQUIRED_ERROR = "Choose measurement appointment date."
+PAST_DELIVERY_DATE_ERROR = "Expected delivery date cannot be in the past. Choose today or a future date."
+PAST_APPOINTMENT_DATE_ERROR = "Measurement appointment cannot be in the past. Choose today or a future date."
+TRAVEL_CHARGE_PER_KM = Decimal("5.00")
 
 
 class BookingCreateIn(BaseModel):
@@ -50,8 +59,14 @@ class StageUpdateIn(BaseModel):
 
 
 class PaymentIn(BaseModel):
-    method: str = "manual_whatsapp"
+    method: str = "razorpay"
     txn_ref: str | None = Field(default=None, alias="txnRef")
+
+
+class RazorpayVerifyIn(BaseModel):
+    razorpay_order_id: str = Field(min_length=1)
+    razorpay_payment_id: str = Field(min_length=1)
+    razorpay_signature: str = Field(min_length=1)
 
 
 class DeliveryOtpVerifyIn(BaseModel):
@@ -144,9 +159,14 @@ def resolve_booking_dates(
     appointment_date: date | None,
     service_days: int | None,
 ) -> tuple[date, date]:
-    delivery_date = preferred_date or (date.today() + timedelta(days=service_days or 5))
+    today = date.today()
+    delivery_date = preferred_date or (today + timedelta(days=service_days or 5))
+    if delivery_date < today:
+        raise HTTPException(400, PAST_DELIVERY_DATE_ERROR)
     if appointment_date is None:
         raise HTTPException(400, MEASUREMENT_APPOINTMENT_REQUIRED_ERROR)
+    if appointment_date < today:
+        raise HTTPException(400, PAST_APPOINTMENT_DATE_ERROR)
     latest_appointment_date = latest_measurement_appointment_date(delivery_date)
     if appointment_date > latest_appointment_date:
         raise HTTPException(400, MEASUREMENT_APPOINTMENT_ERROR)
@@ -163,6 +183,25 @@ def money_decimal(value) -> Decimal:
 
 def percent_amount(amount, percentage) -> Decimal:
     return (money_decimal(amount) * money_decimal(percentage) / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def distance_km_between(lat1, lng1, lat2, lng2) -> Decimal:
+    try:
+        a_lat, a_lng, b_lat, b_lng = [float(value) for value in (lat1, lng1, lat2, lng2)]
+    except (TypeError, ValueError):
+        return Decimal("0.00")
+    radius_km = 6371.0
+    d_lat = math.radians(b_lat - a_lat)
+    d_lng = math.radians(b_lng - a_lng)
+    start_lat = math.radians(a_lat)
+    end_lat = math.radians(b_lat)
+    haversine = math.sin(d_lat / 2) ** 2 + math.cos(start_lat) * math.cos(end_lat) * math.sin(d_lng / 2) ** 2
+    distance = radius_km * 2 * math.atan2(math.sqrt(haversine), math.sqrt(1 - haversine))
+    return Decimal(str(distance)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def travel_charge_for_distance(distance_km: Decimal) -> Decimal:
+    return (money_decimal(distance_km) * TRAVEL_CHARGE_PER_KM).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 async def fetch_one(db: AsyncSession, sql: str, params: dict | None = None) -> dict | None:
@@ -225,7 +264,9 @@ async def ensure_tailor_wallet(db: AsyncSession, tailor_uuid) -> dict:
 
 async def payment_breakdown_for_order(db: AsyncSession, order: dict) -> dict:
     settings = await platform_settings(db)
-    order_amount = money_decimal(order.get("total") or order.get("base_price") or 0)
+    service_amount = money_decimal(order.get("base_price") or order.get("total") or 0)
+    order_amount = money_decimal(order.get("total") or service_amount)
+    travel_charge_amount = max(order_amount - service_amount, Decimal("0.00"))
     gst_amount = percent_amount(order_amount, settings.get("gst_percentage"))
     platform_fee_amount = percent_amount(order_amount, settings.get("platform_fee_percentage"))
     charge_amount = gst_amount + platform_fee_amount
@@ -233,6 +274,12 @@ async def payment_breakdown_for_order(db: AsyncSession, order: dict) -> dict:
     tailor_credit_amount = max(order_amount - commission_amount, Decimal("0.00"))
     grand_total = order_amount + charge_amount
     return {
+        "service_amount": service_amount,
+        "serviceAmount": service_amount,
+        "travel_charge_amount": travel_charge_amount,
+        "travelChargeAmount": travel_charge_amount,
+        "travel_rate_per_km": TRAVEL_CHARGE_PER_KM,
+        "travelRatePerKm": TRAVEL_CHARGE_PER_KM,
         "order_amount": order_amount,
         "orderAmount": order_amount,
         "commission_percentage": money_decimal(settings.get("commission_percentage")),
@@ -254,13 +301,6 @@ async def payment_breakdown_for_order(db: AsyncSession, order: dict) -> dict:
         "payable_total": grand_total,
         "payableTotal": grand_total,
     }
-
-
-def normalize_whatsapp_number(value: str | None) -> str:
-    digits = re.sub(r"\D", "", value or "")
-    if len(digits) == 10:
-        return "91" + digits
-    return digits or "918790901281"
 
 
 def payment_intent_payload(row: dict | None) -> dict | None:
@@ -291,10 +331,10 @@ def payment_intent_payload(row: dict | None) -> dict | None:
         "tailorCreditAmount": row.get("tailor_credit_amount"),
         "payable_total": row.get("payable_total"),
         "payableTotal": row.get("payable_total"),
-        "whatsapp_url": row.get("whatsapp_url"),
-        "whatsappUrl": row.get("whatsapp_url"),
-        "admin_whatsapp_number": row.get("admin_whatsapp_number"),
-        "adminWhatsappNumber": row.get("admin_whatsapp_number"),
+        "gateway_order_id": row.get("gateway_order_id"),
+        "gatewayOrderId": row.get("gateway_order_id"),
+        "gateway_payment_id": row.get("gateway_payment_id"),
+        "gatewayPaymentId": row.get("gateway_payment_id"),
         "expires_at": row.get("expires_at"),
         "expiresAt": row.get("expires_at"),
         "expires_in_seconds": expires_in,
@@ -330,19 +370,78 @@ async def latest_payment_intent(db: AsyncSession, booking_id: str) -> dict | Non
     )
 
 
-def build_whatsapp_payment_url(order: dict, payment_reference: str, payable_total: Decimal) -> tuple[str, str]:
+def razorpay_credentials() -> tuple[str, str]:
     app_settings = get_settings()
-    phone = normalize_whatsapp_number(app_settings.admin_whatsapp_number)
-    message = "\n".join(
-        [
-            "Hi TailoraHub, I want to pay for my order.",
-            f"Order: {order.get('code') or order.get('id')}",
-            f"Payment reference: {payment_reference}",
-            f"Amount to pay: Rs {payable_total}",
-            "Please send UPI ID or QR. I will complete this within 5 minutes.",
-        ]
+    key_id = (app_settings.razorpay_key_id or app_settings.payment_api_key or "").strip()
+    key_secret = (app_settings.razorpay_key_secret or app_settings.payment_api_secret or "").strip()
+    return key_id, key_secret
+
+
+def amount_to_paise(amount: Decimal) -> int:
+    return int((money_decimal(amount) * Decimal("100")).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def razorpay_public_checkout_payload(order: dict, intent: dict, breakdown: dict, key_id: str) -> dict:
+    payable_total = money_decimal(intent.get("payable_total") or breakdown.get("payable_total"))
+    description = f"TailoraHub order {order.get('code') or order.get('id')}"
+    return {
+        "keyId": key_id,
+        "key_id": key_id,
+        "razorpayOrderId": intent.get("gateway_order_id"),
+        "razorpay_order_id": intent.get("gateway_order_id"),
+        "amountPaise": amount_to_paise(payable_total),
+        "amount_paise": amount_to_paise(payable_total),
+        "amount": amount_to_paise(payable_total),
+        "currency": "INR",
+        "name": "TailoraHub",
+        "description": description,
+        "prefill": {
+            "name": order.get("customer_name") or "",
+            "email": order.get("customer_email") or "",
+            "contact": order.get("customer_phone") or "",
+        },
+        "notes": {
+            "booking_id": order.get("id"),
+            "order_code": order.get("code"),
+            "payment_reference": intent.get("payment_reference"),
+        },
+        "theme": {"color": "#d4af37"},
+    }
+
+
+def create_razorpay_order_sync(key_id: str, key_secret: str, payload: dict) -> dict:
+    auth = base64.b64encode(f"{key_id}:{key_secret}".encode("utf-8")).decode("ascii")
+    req = urllib_request.Request(
+        "https://api.razorpay.com/v1/orders",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Authorization": f"Basic {auth}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
     )
-    return f"https://api.whatsapp.com/send?phone={phone}&text={quote(message)}", phone
+    try:
+        with urllib_request.urlopen(req, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib_error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "ignore")
+        raise HTTPException(502, f"Razorpay order creation failed. {detail[:300]}")
+    except urllib_error.URLError as exc:
+        raise HTTPException(502, f"Could not connect to Razorpay: {exc.reason}")
+
+
+async def create_razorpay_order(key_id: str, key_secret: str, payload: dict) -> dict:
+    return await asyncio.to_thread(create_razorpay_order_sync, key_id, key_secret, payload)
+
+
+def verify_razorpay_signature(order_id: str, payment_id: str, signature: str, key_secret: str) -> bool:
+    expected = hmac.new(
+        key_secret.encode("utf-8"),
+        f"{order_id}|{payment_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature)
 
 
 async def credit_admin_wallet(db: AsyncSession, txn_type: str, amount: Decimal, booking_id: str, source_tailor_id=None, source_customer_id=None) -> None:
@@ -455,6 +554,9 @@ async def add_history(db: AsyncSession, order_id: str, status: str, note: str, b
 
 
 def public_booking(row: dict) -> dict:
+    service_amount = money_decimal(row.get("base_price") or row.get("total") or 0)
+    order_amount = money_decimal(row.get("total") or service_amount)
+    travel_charge_amount = max(order_amount - service_amount, Decimal("0.00"))
     return {
         "id": row["id"],
         "code": row["code"],
@@ -486,13 +588,21 @@ def public_booking(row: dict) -> dict:
         "appointmentDate": row.get("appointment_date"),
         "appointmentSlot": row.get("appointment_slot"),
         "expectedCompletion": row.get("expected_completion"),
-        "total": row.get("total"),
-        "orderAmount": row.get("total"),
+        "basePrice": service_amount,
+        "base_price": service_amount,
+        "serviceAmount": service_amount,
+        "service_amount": service_amount,
+        "travelChargeAmount": travel_charge_amount,
+        "travel_charge_amount": travel_charge_amount,
+        "travelRatePerKm": TRAVEL_CHARGE_PER_KM,
+        "travel_rate_per_km": TRAVEL_CHARGE_PER_KM,
+        "total": order_amount,
+        "orderAmount": order_amount,
         "commissionAmount": row.get("commission_amount") or 0,
         "commission_amount": row.get("commission_amount") or 0,
         "gstPlatformChargeAmount": row.get("gst_platform_charge_amount") or 0,
         "gst_platform_charge_amount": row.get("gst_platform_charge_amount") or 0,
-        "payableTotal": money_decimal(row.get("total")) + money_decimal(row.get("gst_platform_charge_amount")),
+        "payableTotal": order_amount + money_decimal(row.get("gst_platform_charge_amount")),
         "notes": row.get("notes"),
         "cancelReason": row.get("cancel_reason"),
         "cancel_reason": row.get("cancel_reason"),
@@ -680,6 +790,17 @@ async def create_booking(
     base_price = int(service["price"]) * quantity
     expected, appointment_date = resolve_booking_dates(body.preferred_date, body.appointment_date, service.get("days"))
     customer_address = body.customer_location_address if measurement_mode == "tailor_visits_customer" else tailor.get("shop_address")
+    travel_distance_km = Decimal("0.00")
+    travel_charge = Decimal("0.00")
+    if measurement_mode == "tailor_visits_customer":
+        travel_distance_km = distance_km_between(
+            tailor.get("lat"),
+            tailor.get("lng"),
+            body.customer_location_lat,
+            body.customer_location_lng,
+        )
+        travel_charge = travel_charge_for_distance(travel_distance_km)
+    order_total = int((money_decimal(base_price) + travel_charge).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
     result = await db.execute(
         text(
@@ -706,7 +827,7 @@ async def create_booking(
             "quantity": quantity,
             "status": status,
             "base_price": base_price,
-            "total": base_price,
+            "total": order_total,
             "measurement_mode": measurement_mode,
             "appointment_date": appointment_date,
             "appointment_slot": body.appointment_slot,
@@ -724,7 +845,7 @@ async def create_booking(
         await db.execute(text("UPDATE orders SET customer_location_confirmed_at=now() WHERE id=:id"), {"id": order_id})
     await db.execute(
         text("INSERT INTO payments (id,order_id,amount,status) VALUES (:id,:order_id,:amount,'PENDING')"),
-        {"id": uid("pay"), "order_id": order_id, "amount": base_price},
+        {"id": uid("pay"), "order_id": order_id, "amount": order_total},
     )
     await add_history(
         db,
@@ -966,6 +1087,102 @@ async def update_booking_stage(
     return payload
 
 
+async def mark_gateway_payment_paid(
+    db: AsyncSession,
+    order: dict,
+    intent: dict,
+    payment_id: str,
+    signature: str,
+    gateway_response: dict | None = None,
+) -> None:
+    tailor_wallet = await ensure_tailor_wallet(db, order["tailor_uuid"])
+    tailor_credit = money_decimal(intent.get("tailor_credit_amount"))
+    admin_charge = money_decimal(intent.get("gst_platform_charge_amount"))
+    commission = money_decimal(intent.get("commission_amount"))
+    payable_total = money_decimal(intent.get("payable_total"))
+
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+            SET payment_status='paid',
+                payment_method_selected='qr',
+                payment_method_selected_at=now(),
+                gst_platform_charge_amount=:admin_charge,
+                commission_amount=:commission
+            WHERE id=:id
+            """
+        ),
+        {"id": order["id"], "admin_charge": admin_charge, "commission": commission},
+    )
+    if tailor_credit > 0:
+        existing_credit = await fetch_one(
+            db,
+            """
+            SELECT 1
+            FROM wallet_transactions
+            WHERE wallet_id=:wallet_id
+              AND reference_booking_id=:booking_id
+              AND type='credit'
+              AND status='success'
+            LIMIT 1
+            """,
+            {"wallet_id": tailor_wallet["wallet_id"], "booking_id": order["id"]},
+        )
+        if not existing_credit:
+            await db.execute(
+                text(
+                    """
+                    INSERT INTO wallet_transactions (id,wallet_id,type,amount,reference_booking_id,status)
+                    VALUES (gen_random_uuid(),:wallet_id,'credit',:amount,:booking_id,'success')
+                    """
+                ),
+                {"wallet_id": tailor_wallet["wallet_id"], "amount": tailor_credit, "booking_id": order["id"]},
+            )
+            await db.execute(
+                text("UPDATE tailor_wallets SET balance=balance + :amount, updated_at=now() WHERE wallet_id=:wallet_id"),
+                {"amount": tailor_credit, "wallet_id": tailor_wallet["wallet_id"]},
+            )
+    await credit_admin_wallet(db, "gst_platform_charge", admin_charge, order["id"], source_customer_id=order["customer_id"])
+    await credit_admin_wallet(db, "commission", commission, order["id"], source_tailor_id=order["tailor_uuid"])
+    payment = await fetch_one(db, "SELECT * FROM payments WHERE order_id=:id ORDER BY ts DESC LIMIT 1", {"id": order["id"]})
+    if payment:
+        await db.execute(
+            text("UPDATE payments SET amount=:amount, method='razorpay', status='paid', txn_ref=:txn, updated=now() WHERE id=:id"),
+            {"id": payment["id"], "amount": payable_total, "txn": payment_id},
+        )
+    else:
+        await db.execute(
+            text("INSERT INTO payments (id,order_id,amount,method,status,txn_ref) VALUES (:id,:order_id,:amount,'razorpay','paid',:txn)"),
+            {"id": uid("pay"), "order_id": order["id"], "amount": payable_total, "txn": payment_id},
+        )
+    await db.execute(
+        text(
+            """
+            UPDATE payment_intents
+            SET status='verified',
+                gateway_payment_id=:payment_id,
+                gateway_signature=:signature,
+                gateway_response=COALESCE(CAST(:gateway_response AS jsonb), gateway_response),
+                proof_reference=:payment_id,
+                admin_note='Razorpay signature verified automatically',
+                verified_at=now(),
+                updated_at=now()
+            WHERE id=:id
+            """
+        ),
+        {
+            "id": intent["id"],
+            "payment_id": payment_id,
+            "signature": signature,
+            "gateway_response": json.dumps(gateway_response or {"razorpay_payment_id": payment_id}),
+        },
+    )
+    await add_history(db, order["id"], "paid", f"Razorpay payment {payment_id} verified. Tailor wallet credited net amount {tailor_credit}.", "system")
+    await notify(db, "user:" + order["customer_id"], "Payment completed", f"Payment for order {order['code']} is verified. Delivery OTP is now enabled.", order["id"])
+    await notify(db, "tailor:" + order["tailor_id"], "Payment completed", f"Payment for order {order['code']} is verified. Net wallet credit: Rs {tailor_credit}.", order["id"])
+
+
 @router.post("/{booking_id}/pay")
 async def pay_booking(
     booking_id: str,
@@ -975,7 +1192,15 @@ async def pay_booking(
 ) -> dict:
     order = await fetch_one(
         db,
-        "SELECT o.*, t.shop, t.tailor_id AS tailor_uuid FROM orders o JOIN tailors t ON t.id=o.tailor_id WHERE o.id=:id AND o.customer_id=:customer_id FOR UPDATE",
+        """
+        SELECT o.*, t.shop, t.tailor_id AS tailor_uuid,
+               u.name AS customer_name, u.email AS customer_email, u.phone AS customer_phone
+        FROM orders o
+        JOIN tailors t ON t.id=o.tailor_id
+        JOIN users u ON u.id=o.customer_id
+        WHERE o.id=:id AND o.customer_id=:customer_id
+        FOR UPDATE
+        """,
         {"id": booking_id, "customer_id": customer["id"]},
     )
     if not order:
@@ -988,9 +1213,13 @@ async def pay_booking(
             "breakdown": breakdown,
             "message": "Payment was already completed. Delivery OTP is enabled.",
         }
-    method = (body.method or "manual_whatsapp").strip().lower()
-    if method not in {"manual_whatsapp", "whatsapp", "qr", "upi"}:
-        raise HTTPException(400, "Payment is currently accepted through WhatsApp UPI/QR only")
+    method = (body.method or "razorpay").strip().lower()
+    if method != "razorpay":
+        raise HTTPException(400, "Only Razorpay secure checkout is enabled for customer payments.")
+    key_id, key_secret = razorpay_credentials()
+    if not key_id or not key_secret:
+        raise HTTPException(503, "Razorpay keys are not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in the backend environment.")
+
     await latest_payment_intent(db, booking_id)
     active_intent = await fetch_one(
         db,
@@ -1000,6 +1229,8 @@ async def pay_booking(
         WHERE booking_id=:booking_id
           AND status='pending'
           AND expires_at > now()
+          AND method='razorpay'
+          AND gateway_order_id IS NOT NULL
         ORDER BY created_at DESC
         LIMIT 1
         """,
@@ -1007,15 +1238,17 @@ async def pay_booking(
     )
     if active_intent:
         intent = payment_intent_payload(active_intent)
+        checkout = razorpay_public_checkout_payload(order, active_intent, breakdown, key_id)
         return {
             "ok": True,
+            "provider": "razorpay",
             "booking": public_booking(order),
             "breakdown": breakdown,
             "paymentIntent": intent,
             "payment_intent": intent,
-            "whatsappUrl": active_intent.get("whatsapp_url"),
-            "whatsapp_url": active_intent.get("whatsapp_url"),
-            "message": "Payment request already exists. Complete it on WhatsApp before it expires.",
+            "checkout": checkout,
+            "razorpayCheckout": checkout,
+            "message": "Razorpay checkout is ready. Complete payment before the order expires.",
         }
 
     app_settings = get_settings()
@@ -1023,20 +1256,39 @@ async def pay_booking(
     order_amount = money_decimal(breakdown["order_amount"])
     payable_total = money_decimal(breakdown["payable_total"])
     payment_reference = f"THPAY-{str(order.get('code') or booking_id).replace('ORD-', '')}-{uuid.uuid4().hex[:6].upper()}"
-    whatsapp_url, whatsapp_phone = build_whatsapp_payment_url(order, payment_reference, payable_total)
+
+    await db.execute(
+        text("UPDATE payment_intents SET status='cancelled', updated_at=now() WHERE booking_id=:booking_id AND status='pending'"),
+        {"booking_id": booking_id},
+    )
+    razorpay_order = await create_razorpay_order(
+        key_id,
+        key_secret,
+        {
+            "amount": amount_to_paise(payable_total),
+            "currency": "INR",
+            "receipt": payment_reference[:40],
+            "notes": {
+                "booking_id": booking_id,
+                "order_code": order.get("code") or "",
+                "payment_reference": payment_reference,
+            },
+        },
+    )
+    razorpay_order_id = razorpay_order.get("id")
+    if not razorpay_order_id:
+        raise HTTPException(502, "Razorpay did not return an order id. Please try again.")
     intent_result = await db.execute(
         text(
             """
             INSERT INTO payment_intents
               (booking_id,customer_id,tailor_id,payment_reference,method,order_amount,gst_amount,
                platform_fee_amount,gst_platform_charge_amount,commission_amount,tailor_credit_amount,
-               payable_total,status,whatsapp_url,admin_whatsapp_number,admin_upi_id,admin_qr_url,
-               customer_note,expires_at,created_at,updated_at)
+               payable_total,status,gateway_order_id,gateway_response,customer_note,expires_at,created_at,updated_at)
             VALUES
-              (:booking_id,:customer_id,:tailor_id,:payment_reference,'manual_whatsapp',:order_amount,:gst_amount,
+              (:booking_id,:customer_id,:tailor_id,:payment_reference,'razorpay',:order_amount,:gst_amount,
                :platform_fee_amount,:gst_platform_charge_amount,:commission_amount,:tailor_credit_amount,
-               :payable_total,'pending',:whatsapp_url,:admin_whatsapp_number,:admin_upi_id,:admin_qr_url,
-               :customer_note,:expires_at,now(),now())
+               :payable_total,'pending',:gateway_order_id,CAST(:gateway_response AS jsonb),:customer_note,:expires_at,now(),now())
             RETURNING *
             """
         ),
@@ -1052,10 +1304,8 @@ async def pay_booking(
             "commission_amount": money_decimal(breakdown["commission_amount"]),
             "tailor_credit_amount": money_decimal(breakdown["tailor_credit_amount"]),
             "payable_total": payable_total,
-            "whatsapp_url": whatsapp_url,
-            "admin_whatsapp_number": whatsapp_phone,
-            "admin_upi_id": app_settings.admin_payment_upi_id,
-            "admin_qr_url": app_settings.admin_payment_qr_url,
+            "gateway_order_id": razorpay_order_id,
+            "gateway_response": json.dumps(razorpay_order),
             "customer_note": body.txn_ref,
             "expires_at": expires_at,
         },
@@ -1064,16 +1314,16 @@ async def pay_booking(
     payment = await fetch_one(db, "SELECT * FROM payments WHERE order_id=:id ORDER BY ts DESC LIMIT 1", {"id": booking_id})
     if payment:
         await db.execute(
-            text("UPDATE payments SET amount=:amount, method='manual_whatsapp', status='PROCESSING', txn_ref=:txn, updated=now() WHERE id=:id"),
-            {"id": payment["id"], "amount": payable_total, "txn": payment_reference},
+            text("UPDATE payments SET amount=:amount, method='razorpay', status='PROCESSING', txn_ref=:txn, updated=now() WHERE id=:id"),
+            {"id": payment["id"], "amount": payable_total, "txn": razorpay_order_id},
         )
     else:
         await db.execute(
-            text("INSERT INTO payments (id,order_id,amount,method,status,txn_ref) VALUES (:id,:order_id,:amount,'manual_whatsapp','PROCESSING',:txn)"),
-            {"id": uid("pay"), "order_id": booking_id, "amount": payable_total, "txn": payment_reference},
+            text("INSERT INTO payments (id,order_id,amount,method,status,txn_ref) VALUES (:id,:order_id,:amount,'razorpay','PROCESSING',:txn)"),
+            {"id": uid("pay"), "order_id": booking_id, "amount": payable_total, "txn": razorpay_order_id},
         )
-    await add_history(db, booking_id, "payment_pending", f"Customer opened WhatsApp payment request {payment_reference}.", "customer")
-    await notify(db, "user:" + customer["id"], "WhatsApp payment request created", f"Payment reference {payment_reference} expires in {app_settings.manual_payment_expiry_minutes} minutes.", booking_id)
+    await add_history(db, booking_id, "payment_pending", f"Razorpay checkout created for payment reference {payment_reference}.", "customer")
+    await notify(db, "user:" + customer["id"], "Razorpay checkout created", f"Payment reference {payment_reference} expires in {app_settings.manual_payment_expiry_minutes} minutes.", booking_id)
     await db.commit()
     updated = await fetch_one(
         db,
@@ -1083,15 +1333,124 @@ async def pay_booking(
     payload = await tracker_status_payload(db, updated)
     await tracker_connections.broadcast(booking_id, jsonable_encoder(payload))
     intent = payment_intent_payload(active_intent)
+    checkout = razorpay_public_checkout_payload(order, active_intent, breakdown, key_id)
     return {
         "ok": True,
+        "provider": "razorpay",
         "booking": public_booking(updated),
         "breakdown": breakdown,
         "paymentIntent": intent,
         "payment_intent": intent,
-        "whatsappUrl": whatsapp_url,
-        "whatsapp_url": whatsapp_url,
-        "message": "Payment request created. Open WhatsApp and complete payment within 5 minutes. Delivery OTP unlocks only after admin verifies payment.",
+        "checkout": checkout,
+        "razorpayCheckout": checkout,
+        "message": "Razorpay checkout created. Delivery OTP unlocks only after secure payment verification.",
+    }
+
+
+@router.post("/{booking_id}/razorpay/verify")
+async def verify_razorpay_booking_payment(
+    booking_id: str,
+    body: RazorpayVerifyIn,
+    customer: dict = Depends(get_current_customer),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    _, key_secret = razorpay_credentials()
+    if not key_secret:
+        raise HTTPException(503, "Razorpay keys are not configured on the backend.")
+    intent = await fetch_one(
+        db,
+        """
+        SELECT *
+        FROM payment_intents
+        WHERE booking_id=:booking_id
+          AND method='razorpay'
+          AND gateway_order_id=:gateway_order_id
+        ORDER BY created_at DESC
+        LIMIT 1
+        FOR UPDATE
+        """,
+        {"booking_id": booking_id, "gateway_order_id": body.razorpay_order_id},
+    )
+    if not intent:
+        raise HTTPException(404, "Razorpay payment request not found for this booking.")
+    order = await fetch_one(
+        db,
+        """
+        SELECT o.*, t.shop, t.tailor_id AS tailor_uuid,
+               u.name AS customer_name, u.email AS customer_email, u.phone AS customer_phone
+        FROM orders o
+        JOIN tailors t ON t.id=o.tailor_id
+        JOIN users u ON u.id=o.customer_id
+        WHERE o.id=:id AND o.customer_id=:customer_id
+        FOR UPDATE
+        """,
+        {"id": booking_id, "customer_id": customer["id"]},
+    )
+    if not order:
+        raise HTTPException(404, "Booking not found")
+    if intent.get("customer_id") != customer["id"]:
+        raise HTTPException(403, "This payment request belongs to another customer.")
+    if str(order.get("payment_status") or "").lower() == "paid" or intent.get("status") == "verified":
+        return {
+            "ok": True,
+            "booking": public_booking(order),
+            "paymentIntent": payment_intent_payload(intent),
+            "payment_intent": payment_intent_payload(intent),
+            "message": "Payment was already verified. Delivery OTP is enabled.",
+        }
+    if intent.get("status") != "pending":
+        raise HTTPException(409, f"This payment request is already {intent.get('status')}.")
+    expires_at = intent.get("expires_at")
+    if expires_at:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= datetime.now(timezone.utc):
+            await db.execute(text("UPDATE payment_intents SET status='expired', updated_at=now() WHERE id=:id"), {"id": intent["id"]})
+            await db.commit()
+            raise HTTPException(409, "This Razorpay checkout expired. Please start payment again.")
+    if not verify_razorpay_signature(body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature, key_secret):
+        await db.execute(
+            text(
+                """
+                UPDATE payment_intents
+                SET admin_note='Razorpay signature verification failed',
+                    gateway_payment_id=:payment_id,
+                    gateway_signature=:signature,
+                    updated_at=now()
+                WHERE id=:id
+                """
+            ),
+            {"id": intent["id"], "payment_id": body.razorpay_payment_id, "signature": body.razorpay_signature},
+        )
+        await db.commit()
+        raise HTTPException(400, "Razorpay payment signature is invalid. Payment was not applied.")
+
+    await mark_gateway_payment_paid(
+        db,
+        order,
+        intent,
+        body.razorpay_payment_id,
+        body.razorpay_signature,
+        {
+            "razorpay_order_id": body.razorpay_order_id,
+            "razorpay_payment_id": body.razorpay_payment_id,
+            "verification": "signature_valid",
+        },
+    )
+    await db.commit()
+    updated = await fetch_one(
+        db,
+        "SELECT o.*, t.shop, u.name AS customer_name FROM orders o JOIN tailors t ON t.id=o.tailor_id JOIN users u ON u.id=o.customer_id WHERE o.id=:id",
+        {"id": booking_id},
+    )
+    payload = await tracker_status_payload(db, updated)
+    await tracker_connections.broadcast(booking_id, jsonable_encoder(payload))
+    return {
+        "ok": True,
+        "booking": public_booking(updated),
+        "paymentIntent": payload.get("paymentIntent"),
+        "payment_intent": payload.get("paymentIntent"),
+        "message": "Payment completed securely through Razorpay. Delivery OTP is now enabled.",
     }
 
 

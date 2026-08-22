@@ -18,6 +18,7 @@ class TailorRegisterIn(BaseModel):
     full_name: str = Field(min_length=2, max_length=160)
     phone_number: str = Field(pattern=PHONE_PATTERN)
     email: EmailStr
+    gender: str | None = Field(default=None, max_length=30)
     dob: date
     aadhaar_number: str = Field(min_length=12, max_length=12)
     username: str = Field(min_length=4, max_length=80)

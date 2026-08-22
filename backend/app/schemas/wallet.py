@@ -12,6 +12,9 @@ from .common import OrmModel
 class WalletOut(OrmModel):
     wallet_id: UUID
     balance: Decimal
+    ledger_balance: Decimal | None = None
+    available_balance: Decimal | None = None
+    pending_withdrawal_amount: Decimal | None = None
     upi_id: str | None = None
     qr_code_url: str | None = None
     bank_account_configured: bool = False
@@ -46,3 +49,6 @@ class WithdrawOut(BaseModel):
     status: str
     txn_ref: str | None = None
     balance: Decimal
+    ledger_balance: Decimal | None = None
+    available_balance: Decimal | None = None
+    pending_withdrawal_amount: Decimal | None = None

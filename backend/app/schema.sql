@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS tailors (
   bio TEXT,
   portfolio TEXT[] NOT NULL DEFAULT '{}',
   documents JSONB NOT NULL DEFAULT '{}',
+  gender TEXT,
   rating NUMERIC(3,2) NOT NULL DEFAULT 0,
   rating_count INTEGER NOT NULL DEFAULT 0,
   completed INTEGER NOT NULL DEFAULT 0,
@@ -515,6 +516,7 @@ ALTER TABLE tailor_services ALTER COLUMN service_id SET NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS tailor_services_service_id_unique_idx ON tailor_services(service_id);
 ALTER TABLE tailor_services ADD COLUMN IF NOT EXISTS service_name VARCHAR(160);
 ALTER TABLE tailor_services ADD COLUMN IF NOT EXISTS category VARCHAR(80);
+ALTER TABLE tailors ADD COLUMN IF NOT EXISTS gender TEXT;
 ALTER TABLE tailor_services ADD COLUMN IF NOT EXISTS is_combo BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE tailor_services ADD COLUMN IF NOT EXISTS combo_items JSONB;
 ALTER TABLE tailor_services ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
@@ -782,7 +784,7 @@ ALTER TABLE payments ALTER COLUMN amount TYPE NUMERIC(12,2) USING amount::numeri
 -- Keeping this schema non-destructive protects any local data while the
 -- real app continues to use users/orders as the PostgreSQL source of truth.
 
--- Manual WhatsApp/admin-verified payment flow.
+-- Razorpay-first payment flow with an optional admin-verified manual fallback.
 DO $$ BEGIN
   CREATE TYPE payment_intent_status AS ENUM ('pending', 'verified', 'expired', 'rejected', 'cancelled');
 EXCEPTION WHEN duplicate_object THEN NULL;
@@ -799,7 +801,7 @@ CREATE TABLE IF NOT EXISTS payment_intents (
   customer_id TEXT NOT NULL REFERENCES users(id),
   tailor_id TEXT NOT NULL REFERENCES tailors(id),
   payment_reference TEXT UNIQUE NOT NULL,
-  method TEXT NOT NULL DEFAULT 'manual_whatsapp',
+  method TEXT NOT NULL DEFAULT 'razorpay',
   order_amount NUMERIC(12,2) NOT NULL,
   gst_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
   platform_fee_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
@@ -808,10 +810,6 @@ CREATE TABLE IF NOT EXISTS payment_intents (
   tailor_credit_amount NUMERIC(12,2) NOT NULL DEFAULT 0,
   payable_total NUMERIC(12,2) NOT NULL,
   status payment_intent_status NOT NULL DEFAULT 'pending',
-  whatsapp_url TEXT,
-  admin_whatsapp_number TEXT,
-  admin_upi_id TEXT,
-  admin_qr_url TEXT,
   customer_note TEXT,
   admin_note TEXT,
   proof_reference TEXT,
@@ -822,8 +820,13 @@ CREATE TABLE IF NOT EXISTS payment_intents (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS gateway_order_id TEXT;
+ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS gateway_payment_id TEXT;
+ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS gateway_signature TEXT;
+ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS gateway_response JSONB;
 CREATE INDEX IF NOT EXISTS payment_intents_booking_idx ON payment_intents(booking_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS payment_intents_status_idx ON payment_intents(status, expires_at);
+CREATE INDEX IF NOT EXISTS payment_intents_gateway_order_idx ON payment_intents(gateway_order_id);
 
 CREATE TABLE IF NOT EXISTS withdrawal_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

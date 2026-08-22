@@ -477,6 +477,8 @@ def as_tailor(t: dict | None) -> dict | None:
         "ownerName": t["owner_name"],
         "zoneId": t["zone_id"],
         "shopAddress": t.get("shop_address"),
+        "lat": float(t["lat"]) if t.get("lat") is not None else None,
+        "lng": float(t["lng"]) if t.get("lng") is not None else None,
         "email": t.get("email"),
         "phone": t.get("phone"),
         "expertise": t.get("expertise") or [],
@@ -576,8 +578,12 @@ def as_offer(row: dict | None) -> dict | None:
 def as_follower(row: dict | None) -> dict | None:
     if not row:
         return None
+    customer_name = row.get("customer_name") or row.get("name") or "Customer"
     return {
         "customerProfileId": row["customer_profile_id"],
+        "customerName": customer_name,
+        "name": customer_name,
+        "customerPhone": row.get("customer_phone"),
         "profileImage": row.get("profile_image"),
         "followedAt": row.get("followed_at"),
     }
@@ -2245,7 +2251,8 @@ def tailor_dashboard(user: dict = Depends(tailor_user), db: Session = Depends(db
     )
     followers = fetch_all(
         db,
-        """SELECT u.id AS customer_profile_id, u.profile_image, tf.created_at AS followed_at
+        """SELECT u.id AS customer_profile_id, u.name AS customer_name, u.phone AS customer_phone,
+        u.profile_image, tf.created_at AS followed_at
         FROM tailor_followers tf
         JOIN users u ON u.id=tf.customer_id
         WHERE tf.tailor_id=:tid AND u.status='ACTIVE'

@@ -277,15 +277,6 @@ tr:last-child td { border-bottom: 0; }
   display: grid;
   gap: 4px;
 }
-.whatsapp-payment-link {
-  color: var(--gold-light, #f6d66f);
-  font-weight: 900;
-  text-decoration: none;
-  width: fit-content;
-}
-.whatsapp-payment-link:hover {
-  text-decoration: underline;
-}
 .danger-link { color: #a83232; border-color: #e2b4b4; }
 .ok-link { color: #176647; border-color: #a9d4c1; }
 .order-actions {
@@ -5686,4 +5677,249 @@ select option {
 .review-rating svg.filled {
   color: var(--gold-light, #f5ce68);
   fill: currentColor;
+}
+
+.booking-map-collapsed {
+  gap: 0;
+}
+
+.booking-location-picked {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid rgba(74, 222, 128, 0.28);
+  border-radius: 14px;
+  background:
+    linear-gradient(135deg, rgba(34, 197, 94, 0.14), rgba(255, 255, 255, 0.025)),
+    var(--luxury-panel, #17191b);
+}
+
+.booking-location-picked > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.booking-location-picked span {
+  color: #86efac;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.booking-location-picked strong {
+  color: var(--luxury-copy, #f5f2ea);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.booking-location-picked small {
+  color: rgba(245, 242, 234, 0.68);
+}
+
+.booking-estimate-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid rgba(212, 175, 55, 0.24);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at top right, rgba(245, 206, 104, 0.12), transparent 14rem),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.018)),
+    var(--luxury-panel, #17191b);
+  color: var(--luxury-copy, #f5f2ea);
+}
+
+.booking-estimate-head,
+.booking-estimate-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.booking-estimate-head {
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(212, 175, 55, 0.18);
+}
+
+.booking-estimate-head span,
+.booking-estimate-row span {
+  color: var(--luxury-copy-soft, #c8c0b2);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.booking-estimate-head strong,
+.booking-estimate-row strong,
+.booking-estimate-head b {
+  color: var(--luxury-copy, #f5f2ea);
+  text-align: right;
+}
+
+.booking-estimate-head b {
+  color: var(--gold-light, #f5ce68);
+  font-family: var(--font-numeric, "Space Grotesk", ui-monospace, monospace);
+  font-size: 22px;
+}
+
+.booking-estimate-row.total {
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(212, 175, 55, 0.18);
+}
+
+.booking-estimate-card small {
+  color: rgba(245, 242, 234, 0.6);
+}
+
+.profile-panel .stack-form,
+.profile-panel .offer-form,
+.support-create {
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.02)),
+    var(--luxury-panel, #17191b) !important;
+  border-color: rgba(212, 175, 55, 0.24) !important;
+  color: var(--luxury-copy, #f5f2ea) !important;
+}
+
+.profile-panel .stack-form label,
+.profile-panel .offer-form label,
+.support-create label {
+  color: var(--luxury-copy, #f5f2ea) !important;
+}
+
+.profile-panel .stack-form input,
+.profile-panel .stack-form select,
+.profile-panel .stack-form textarea,
+.profile-panel .offer-form input,
+.profile-panel .offer-form select,
+.profile-panel .offer-form textarea,
+.support-create input,
+.support-create select,
+.support-create textarea {
+  background: rgba(255, 255, 255, 0.075) !important;
+  border-color: rgba(255, 255, 255, 0.16) !important;
+  color: var(--luxury-copy, #f5f2ea) !important;
+  -webkit-text-fill-color: var(--luxury-copy, #f5f2ea);
+}
+
+.profile-panel .stack-form input::placeholder,
+.profile-panel .stack-form textarea::placeholder,
+.profile-panel .offer-form input::placeholder,
+.profile-panel .offer-form textarea::placeholder,
+.support-create input::placeholder,
+.support-create textarea::placeholder {
+  color: rgba(245, 242, 234, 0.52) !important;
+  -webkit-text-fill-color: rgba(245, 242, 234, 0.52);
+}
+
+.compact-order-card:not(.details-open) {
+  gap: 10px;
+  padding: 14px;
+}
+
+.compact-order-card:not(.details-open) .compact-order-summary {
+  gap: 8px;
+}
+
+.compact-order-card:not(.details-open) .compact-order-meta {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.view-more-order-btn {
+  border-color: rgba(245, 206, 104, 0.38) !important;
+  color: var(--gold-light, #f5ce68) !important;
+}
+
+.payment-breakdown {
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)) !important;
+  border-color: rgba(212, 175, 55, 0.24) !important;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.02)),
+    var(--luxury-panel, #17191b) !important;
+  color: var(--luxury-copy, #f5f2ea) !important;
+}
+
+.payment-breakdown div {
+  padding: 10px;
+  border: 1px solid rgba(212, 175, 55, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.payment-breakdown span {
+  color: var(--luxury-copy-soft, #c8c0b2) !important;
+}
+
+.payment-breakdown strong {
+  color: var(--luxury-copy, #f5f2ea) !important;
+}
+
+.payment-breakdown .total {
+  border-left: 1px solid rgba(212, 175, 55, 0.14) !important;
+  padding-left: 10px !important;
+  background: rgba(245, 206, 104, 0.1);
+}
+
+.payment-breakdown .total strong {
+  color: var(--gold-light, #f5ce68) !important;
+}
+
+.support-form-actions {
+  grid-column: 1 / -1;
+}
+
+.support-delete-request {
+  width: auto;
+}
+
+.follower-card strong {
+  color: var(--luxury-copy, #f5f2ea);
+}
+
+.follower-card small {
+  color: rgba(245, 242, 234, 0.68);
+}
+
+button,
+.mini-action,
+.support-ticket,
+.record-card,
+.service,
+.compact-order-card,
+.tailor-card {
+  transition:
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+button:hover:not(:disabled),
+.mini-action:hover,
+.support-ticket:hover,
+.record-card:hover,
+.service:hover,
+.compact-order-card:hover,
+.tailor-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.24);
+}
+
+@media (max-width: 720px) {
+  .booking-location-picked,
+  .booking-estimate-head,
+  .booking-estimate-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .compact-order-card:not(.details-open) .compact-order-meta {
+    grid-template-columns: 1fr;
+  }
 }

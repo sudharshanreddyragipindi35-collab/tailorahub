@@ -568,6 +568,7 @@ async def register_tailor(body: TailorRegisterIn, db: AsyncSession = Depends(get
     username = body.username.strip()
     aadhaar = body.aadhaar_number.strip()
     full_name = body.full_name.strip()
+    gender = (body.gender or "").strip() or None
 
     if not PHONE_RE.fullmatch(phone):
         raise HTTPException(400, "Enter a valid 10-digit mobile number")
@@ -674,7 +675,7 @@ async def register_tailor(body: TailorRegisterIn, db: AsyncSession = Depends(get
                 "expertise": expertise,
                 "years": years_int,
                 "bio": body.bio,
-                "documents": json.dumps({"aadhaarVerified": True}),
+                "documents": json.dumps({"aadhaarVerified": True, "gender": gender}),
                 "full_name": full_name,
                 "phone": phone,
                 "email": email,
