@@ -17,7 +17,7 @@ from app.security import hash_otp, verify_otp_hash
 
 router = APIRouter()
 
-VALID_OTP_PURPOSES = {"registration_phone", "registration_email", "login", "forgot_password", "delivery", "withdrawal"}
+VALID_OTP_PURPOSES = {"registration_phone", "registration_email", "login", "forgot_password", "delivery", "withdrawal", "measurement_arrival"}
 PHONE_RE = re.compile(r"^[6-9]\d{9}$")
 OTP_TTL_MINUTES = 5
 MAX_VERIFY_ATTEMPTS = 5

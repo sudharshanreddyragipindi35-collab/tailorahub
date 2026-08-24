@@ -1,4 +1,4 @@
-const CACHE_NAME = "tailorahub-pwa-v1";
+const CACHE_NAME = "tailorahub-pwa-v4";
 const APP_SHELL = [
   "/",
   "/offline.html",
@@ -32,7 +32,10 @@ self.addEventListener("fetch", (event) => {
   if (request.method !== "GET") return;
 
   const url = new URL(request.url);
-  if (url.pathname.startsWith("/api/") || url.origin.includes("googleapis.com") || url.origin.includes("gstatic.com")) {
+  const isHttp = url.protocol === "http:" || url.protocol === "https:";
+  const isApiRequest = url.pathname.startsWith("/api/") || url.hostname.startsWith("api.");
+  const isExternalMapAsset = url.origin.includes("googleapis.com") || url.origin.includes("gstatic.com");
+  if (!isHttp || isApiRequest || isExternalMapAsset) {
     return;
   }
 
@@ -52,8 +55,7 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
 
   event.respondWith(
-    caches.match(request).then((cached) => {
-      const network = fetch(request)
+    fetch(request)
         .then((response) => {
           if (response.ok) {
             const copy = response.clone();
@@ -61,8 +63,6 @@ self.addEventListener("fetch", (event) => {
           }
           return response;
         })
-        .catch(() => cached);
-      return cached || network;
-    })
+      .catch(() => caches.match(request))
   );
 });

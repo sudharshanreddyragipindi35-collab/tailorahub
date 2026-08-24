@@ -163,6 +163,23 @@ function formatApiError(data, fallback) {
   return String(detail || fallback);
 }
 
+function isPaymentPath(path) {
+  return /\/pay$|\/razorpay\/verify$|\/payment-breakdown$|create-order|verify-payment/.test(path);
+}
+
+function formatRequestError(path, status, data) {
+  const fallback = `Request failed (${status})`;
+  const message = formatApiError(data, fallback);
+  if (!isPaymentPath(path)) return message;
+  if (!data) {
+    return `Payment setup failed. Backend returned ${status}. Check Razorpay keys on the backend and restart the backend server.`;
+  }
+  if (/authentication failed/i.test(message)) {
+    return `Payment setup failed. ${message}`;
+  }
+  return message;
+}
+
 async function request(path, options = {}, retried = false) {
   if (!path.includes("/auth/refresh")) {
     if (isSessionExpired()) {
@@ -172,7 +189,13 @@ async function request(path, options = {}, retried = false) {
   }
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(API_BASE + path, { ...options, headers });
+  let res;
+  try {
+    res = await fetch(API_BASE + path, { ...options, headers });
+  } catch (error) {
+    const offlineHint = navigator.onLine === false ? " Your browser is currently offline." : "";
+    throw new Error(`Cannot reach TailoraHub API at ${API_BASE}.${offlineHint} Please check that the backend is running and try again.`);
+  }
   const data = await res.json().catch(() => null);
   if (res.status === 401 && refreshToken && !retried && !path.includes("/auth/refresh")) {
     const refreshed = await refreshAccessToken();
@@ -180,7 +203,7 @@ async function request(path, options = {}, retried = false) {
     clearSession();
   }
   if (res.status === 401 && token) clearSession();
-  if (!res.ok) throw new Error(formatApiError(data, `Request failed (${res.status})`));
+  if (!res.ok) throw new Error(formatRequestError(path, res.status, data));
   return data;
 }
 
@@ -193,7 +216,13 @@ async function requestText(path, options = {}, retried = false) {
   }
   const headers = { ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const res = await fetch(API_BASE + path, { ...options, headers });
+  let res;
+  try {
+    res = await fetch(API_BASE + path, { ...options, headers });
+  } catch (error) {
+    const offlineHint = navigator.onLine === false ? " Your browser is currently offline." : "";
+    throw new Error(`Cannot reach TailoraHub API at ${API_BASE}.${offlineHint} Please check that the backend is running and try again.`);
+  }
   const text = await res.text();
   if (res.status === 401 && refreshToken && !retried && !path.includes("/auth/refresh")) {
     const refreshed = await refreshAccessToken();
@@ -332,6 +361,11 @@ export const api = {
   reviewOrder: (id, payload) => request(`/customer/orders/${id}/review`, { method: "POST", body: JSON.stringify(payload) }),
   orderTimeline: (id) => request(`/customer/orders/${id}/timeline`),
   bookingStatus: (id) => request(`/v1/bookings/${encodeURIComponent(id)}/status`),
+  measurementTrip: (id) => request(`/v1/bookings/${encodeURIComponent(id)}/measurement-trip`),
+  startMeasurementTrip: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/measurement-trip/start`, { method: "POST", body: JSON.stringify(payload || {}) }),
+  updateMeasurementTripLocation: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/measurement-trip/location`, { method: "POST", body: JSON.stringify(payload || {}) }),
+  arriveMeasurementTrip: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/measurement-trip/arrive`, { method: "POST", body: JSON.stringify(payload || {}) }),
+  verifyMeasurementTripOtp: (id, otp) => request(`/v1/bookings/${encodeURIComponent(id)}/measurement-trip/verify-otp`, { method: "POST", body: JSON.stringify({ otp }) }),
   updateCustomerBooking: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/customer-update`, { method: "PATCH", body: JSON.stringify(payload) }),
   cancelCustomerBooking: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/customer-cancel`, { method: "POST", body: JSON.stringify(payload || {}) }),
   raiseDispute: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/raise-dispute`, { method: "POST", body: JSON.stringify(payload) }),

@@ -19,8 +19,14 @@ class TrackerConnectionManager:
             self._rooms.pop(booking_id, None)
 
     async def broadcast(self, booking_id: str, payload: dict) -> None:
+        stale: list[WebSocket] = []
         for websocket in list(self._rooms.get(booking_id, ())):
-            await websocket.send_json(payload)
+            try:
+                await websocket.send_json(payload)
+            except Exception:
+                stale.append(websocket)
+        for websocket in stale:
+            self.disconnect(booking_id, websocket)
 
 
 tracker_connections = TrackerConnectionManager()

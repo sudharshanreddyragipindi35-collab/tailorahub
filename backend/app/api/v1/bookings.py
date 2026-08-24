@@ -5,12 +5,14 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import math
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import re
 import uuid
 from urllib import error as urllib_error, request as urllib_request
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
@@ -28,6 +30,7 @@ from app.services.tracker_service import tracker_connections
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 MEASUREMENT_APPOINTMENT_BLOCKED_WINDOW_DAYS = 2
 MEASUREMENT_APPOINTMENT_ERROR = "Measurement appointment must be scheduled at least 3 days before the delivery date."
@@ -35,6 +38,11 @@ MEASUREMENT_APPOINTMENT_REQUIRED_ERROR = "Choose measurement appointment date."
 PAST_DELIVERY_DATE_ERROR = "Expected delivery date cannot be in the past. Choose today or a future date."
 PAST_APPOINTMENT_DATE_ERROR = "Measurement appointment cannot be in the past. Choose today or a future date."
 TRAVEL_CHARGE_PER_KM = Decimal("5.00")
+DEFAULT_PLATFORM_SETTINGS = {
+    "commission_percentage": Decimal("20.00"),
+    "gst_percentage": Decimal("18.00"),
+    "platform_fee_percentage": Decimal("2.00"),
+}
 
 
 class BookingCreateIn(BaseModel):
@@ -70,6 +78,16 @@ class RazorpayVerifyIn(BaseModel):
 
 
 class DeliveryOtpVerifyIn(BaseModel):
+    otp: str = Field(min_length=4, max_length=8)
+
+
+class MeasurementTripLocationIn(BaseModel):
+    latitude: float | None = Field(default=None, ge=-90, le=90)
+    longitude: float | None = Field(default=None, ge=-180, le=180)
+    announce: bool = False
+
+
+class MeasurementOtpVerifyIn(BaseModel):
     otp: str = Field(min_length=4, max_length=8)
 
 
@@ -210,6 +228,11 @@ async def fetch_one(db: AsyncSession, sql: str, params: dict | None = None) -> d
     return dict(row) if row else None
 
 
+async def fetch_all(db: AsyncSession, sql: str, params: dict | None = None) -> list[dict]:
+    result = await db.execute(text(sql), params or {})
+    return [dict(row) for row in result.mappings().all()]
+
+
 async def platform_settings(db: AsyncSession) -> dict:
     row = await fetch_one(db, "SELECT * FROM platform_settings WHERE id=1")
     if row:
@@ -263,7 +286,13 @@ async def ensure_tailor_wallet(db: AsyncSession, tailor_uuid) -> dict:
 
 
 async def payment_breakdown_for_order(db: AsyncSession, order: dict) -> dict:
-    settings = await platform_settings(db)
+    try:
+        settings = await platform_settings(db)
+    except Exception:
+        await db.rollback()
+        logger.exception("Platform settings unavailable; using default payment settings")
+        settings = DEFAULT_PLATFORM_SETTINGS.copy()
+    settings = {**DEFAULT_PLATFORM_SETTINGS, **(settings or {})}
     service_amount = money_decimal(order.get("base_price") or order.get("total") or 0)
     order_amount = money_decimal(order.get("total") or service_amount)
     travel_charge_amount = max(order_amount - service_amount, Decimal("0.00"))
@@ -370,10 +399,52 @@ async def latest_payment_intent(db: AsyncSession, booking_id: str) -> dict | Non
     )
 
 
+def clean_payment_credential(value: str | None) -> str:
+    cleaned = str(value or "").strip().strip('"').strip("'").strip("`")
+    return cleaned.replace("\\_", "_").replace(" ", "")
+
+
+def is_placeholder_credential(value: str) -> bool:
+    normalized = value.strip().lower()
+    return (
+        not normalized
+        or normalized.startswith("your_")
+        or "paste_" in normalized
+        or "change_me" in normalized
+        or normalized in {"test_key", "test_secret", "none", "null"}
+    )
+
+
 def razorpay_credentials() -> tuple[str, str]:
     app_settings = get_settings()
-    key_id = (app_settings.razorpay_key_id or app_settings.payment_api_key or "").strip()
-    key_secret = (app_settings.razorpay_key_secret or app_settings.payment_api_secret or "").strip()
+    razorpay_key_id = clean_payment_credential(app_settings.razorpay_key_id)
+    razorpay_key_secret = clean_payment_credential(app_settings.razorpay_key_secret)
+    fallback_key_id = clean_payment_credential(app_settings.payment_api_key)
+    fallback_key_secret = clean_payment_credential(app_settings.payment_api_secret)
+    key_id = razorpay_key_id if not is_placeholder_credential(razorpay_key_id) else fallback_key_id
+    key_secret = razorpay_key_secret if not is_placeholder_credential(razorpay_key_secret) else fallback_key_secret
+    if is_placeholder_credential(key_id) or is_placeholder_credential(key_secret):
+        return "", ""
+    return key_id, key_secret
+
+
+def require_razorpay_credentials() -> tuple[str, str]:
+    key_id, key_secret = razorpay_credentials()
+    if not key_id or not key_secret:
+        raise HTTPException(
+            503,
+            "Razorpay keys are not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in the backend environment, then restart the backend.",
+        )
+    if not key_id.startswith("rzp_"):
+        raise HTTPException(
+            503,
+            "Razorpay key id is invalid. It must start with rzp_test_ or rzp_live_. Update RAZORPAY_KEY_ID on the backend.",
+        )
+    if key_secret.startswith("rzp_") or key_secret == key_id:
+        raise HTTPException(
+            503,
+            "Razorpay key secret is invalid. Do not paste the key id into RAZORPAY_KEY_SECRET. Regenerate the secret and restart the backend.",
+        )
     return key_id, key_secret
 
 
@@ -426,9 +497,25 @@ def create_razorpay_order_sync(key_id: str, key_secret: str, payload: dict) -> d
             return json.loads(response.read().decode("utf-8"))
     except urllib_error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
-        raise HTTPException(502, f"Razorpay order creation failed. {detail[:300]}")
+        message = detail[:300] or "No details returned."
+        try:
+            parsed = json.loads(detail)
+            razorpay_message = parsed.get("error", {}).get("description")
+            if razorpay_message:
+                message = razorpay_message
+        except Exception:
+            pass
+        if exc.code in {401, 403} or "authentication failed" in message.lower():
+            raise HTTPException(
+                401,
+                "Razorpay authentication failed. The backend is still using an old or mismatched Razorpay key/secret pair. "
+                "Update RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in backend .env or the server container environment, then restart the backend.",
+            )
+        if exc.code == 400:
+            raise HTTPException(400, f"Razorpay rejected the order request. {message}")
+        raise HTTPException(500, f"Razorpay order creation failed. {message}")
     except urllib_error.URLError as exc:
-        raise HTTPException(502, f"Could not connect to Razorpay: {exc.reason}")
+        raise HTTPException(500, f"Could not connect to Razorpay: {exc.reason}")
 
 
 async def create_razorpay_order(key_id: str, key_secret: str, payload: dict) -> dict:
@@ -553,17 +640,190 @@ async def add_history(db: AsyncSession, order_id: str, status: str, note: str, b
     )
 
 
+async def ensure_measurement_visit_schema(db: AsyncSession) -> None:
+    await db.execute(
+        text(
+            """
+            DO $$ BEGIN
+              CREATE TYPE otp_purpose AS ENUM (
+                'registration_phone',
+                'registration_email',
+                'login',
+                'forgot_password',
+                'delivery',
+                'withdrawal',
+                'measurement_arrival'
+              );
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$;
+            """
+        )
+    )
+    await db.execute(text("ALTER TYPE otp_purpose ADD VALUE IF NOT EXISTS 'delivery'"))
+    await db.execute(text("ALTER TYPE otp_purpose ADD VALUE IF NOT EXISTS 'withdrawal'"))
+    await db.execute(text("ALTER TYPE otp_purpose ADD VALUE IF NOT EXISTS 'measurement_arrival'"))
+    await db.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS otp_verifications (
+              id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+              target VARCHAR(255) NOT NULL,
+              otp_hash VARCHAR(255) NOT NULL,
+              purpose otp_purpose NOT NULL,
+              expires_at TIMESTAMPTZ NOT NULL,
+              verified BOOLEAN NOT NULL DEFAULT FALSE,
+              attempt_count INTEGER NOT NULL DEFAULT 0,
+              created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+            """
+        )
+    )
+    await db.execute(text("ALTER TABLE otp_verifications ADD COLUMN IF NOT EXISTS attempt_count INTEGER NOT NULL DEFAULT 0"))
+    await db.execute(text("ALTER TABLE otp_verifications ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now()"))
+    await db.execute(text("CREATE INDEX IF NOT EXISTS otp_verifications_target_idx ON otp_verifications(target, purpose, expires_at DESC)"))
+    await db.commit()
+
+    await db.execute(text("ALTER TABLE tailors ADD COLUMN IF NOT EXISTS owner_name TEXT"))
+    await db.execute(text("ALTER TABLE tailors ADD COLUMN IF NOT EXISTS shop_address TEXT"))
+    await db.execute(text("ALTER TABLE tailors ADD COLUMN IF NOT EXISTS lat NUMERIC(10,7)"))
+    await db.execute(text("ALTER TABLE tailors ADD COLUMN IF NOT EXISTS lng NUMERIC(10,7)"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS measurement_mode TEXT"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_location_address TEXT"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_location_lat NUMERIC(10,7)"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_location_lng NUMERIC(10,7)"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_location_confirmed_at TIMESTAMPTZ"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS measurement_trip_status TEXT NOT NULL DEFAULT 'not_started'"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tailor_trip_lat NUMERIC(10,7)"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tailor_trip_lng NUMERIC(10,7)"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tailor_trip_updated_at TIMESTAMPTZ"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tailor_started_at TIMESTAMPTZ"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS tailor_arrived_at TIMESTAMPTZ"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS measurement_otp_sent_at TIMESTAMPTZ"))
+    await db.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS measurement_otp_verified_at TIMESTAMPTZ"))
+    await db.commit()
+
+
+_uncached_ensure_measurement_visit_schema = ensure_measurement_visit_schema
+_measurement_visit_schema_ready = False
+_measurement_visit_schema_lock = asyncio.Lock()
+
+
+async def ensure_measurement_visit_schema(db: AsyncSession) -> None:
+    global _measurement_visit_schema_ready
+    if _measurement_visit_schema_ready:
+        return
+    async with _measurement_visit_schema_lock:
+        if _measurement_visit_schema_ready:
+            return
+        try:
+            await _uncached_ensure_measurement_visit_schema(db)
+            _measurement_visit_schema_ready = True
+        except Exception:
+            await db.rollback()
+            logger.exception("Measurement visit schema setup failed")
+            raise
+
+
+BOOKING_DETAIL_SELECT = """
+    SELECT o.*,
+           t.shop,
+           t.owner_name AS tailor_owner_name,
+           t.shop_address AS tailor_location_address,
+           t.lat AS tailor_lat,
+           t.lng AS tailor_lng,
+           t.user_id AS tailor_user_id,
+           cu.name AS customer_name,
+           cu.phone AS customer_phone,
+           cu.email AS customer_email,
+           tu.name AS tailor_user_name,
+           tu.phone AS tailor_phone,
+           tu.email AS tailor_email
+    FROM orders o
+    JOIN tailors t ON t.id=o.tailor_id
+    JOIN users cu ON cu.id=o.customer_id
+    LEFT JOIN users tu ON tu.id=t.user_id
+"""
+
+
+async def fetch_booking_detail(
+    db: AsyncSession,
+    booking_id: str,
+    extra_where: str = "",
+    params: dict | None = None,
+    for_update: bool = False,
+) -> dict | None:
+    sql = BOOKING_DETAIL_SELECT + " WHERE o.id=:id " + extra_where
+    if for_update:
+        sql += " FOR UPDATE OF o"
+    return await fetch_one(db, sql, {"id": booking_id, **(params or {})})
+
+
+def google_maps_search_url(lat, lng, address: str | None = None) -> str | None:
+    if lat is not None and lng is not None:
+        return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(f"{float(lat):.7f},{float(lng):.7f}")
+    if address:
+        return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(address)
+    return None
+
+
+def google_maps_directions_url(destination_lat, destination_lng, destination_address: str | None = None, origin_lat=None, origin_lng=None) -> str | None:
+    destination = None
+    if destination_lat is not None and destination_lng is not None:
+        destination = f"{float(destination_lat):.7f},{float(destination_lng):.7f}"
+    elif destination_address:
+        destination = destination_address
+    if not destination:
+        return None
+    url = "https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=" + quote_plus(destination)
+    if origin_lat is not None and origin_lng is not None:
+        url += "&origin=" + quote_plus(f"{float(origin_lat):.7f},{float(origin_lng):.7f}")
+    return url
+
+
+def is_home_measurement_visit(order: dict) -> bool:
+    try:
+        return normalize_measurement_mode(order.get("measurement_mode")) == "tailor_visits_customer"
+    except HTTPException:
+        return False
+
+
+def measurement_visit_needs_otp(order: dict) -> bool:
+    return is_home_measurement_visit(order) and not bool(order.get("measurement_otp_verified_at"))
+
+
+def clean_trip_coordinates(body: MeasurementTripLocationIn) -> dict:
+    if (body.latitude is None) != (body.longitude is None):
+        raise HTTPException(400, "Send both latitude and longitude when sharing live location.")
+    return {"lat": body.latitude, "lng": body.longitude}
+
+
 def public_booking(row: dict) -> dict:
     service_amount = money_decimal(row.get("base_price") or row.get("total") or 0)
     order_amount = money_decimal(row.get("total") or service_amount)
     travel_charge_amount = max(order_amount - service_amount, Decimal("0.00"))
+    customer_location_lat = row.get("customer_location_lat")
+    customer_location_lng = row.get("customer_location_lng")
+    tailor_trip_lat = row.get("tailor_trip_lat")
+    tailor_trip_lng = row.get("tailor_trip_lng")
+    tailor_lat = row.get("tailor_lat")
+    tailor_lng = row.get("tailor_lng")
+    route_origin_lat = tailor_trip_lat if tailor_trip_lat is not None else tailor_lat
+    route_origin_lng = tailor_trip_lng if tailor_trip_lng is not None else tailor_lng
     return {
         "id": row["id"],
         "code": row["code"],
         "tailorId": row.get("tailor_id"),
         "tailorName": row.get("shop"),
+        "tailorOwnerName": row.get("tailor_owner_name") or row.get("tailor_user_name"),
+        "tailorPhone": row.get("tailor_phone"),
+        "tailorEmail": row.get("tailor_email"),
+        "tailorLocationAddress": row.get("tailor_location_address"),
+        "tailorLat": float(tailor_lat) if tailor_lat is not None else None,
+        "tailorLng": float(tailor_lng) if tailor_lng is not None else None,
         "customerId": row.get("customer_id"),
         "customerName": row.get("customer_name"),
+        "customerPhone": row.get("customer_phone"),
+        "customerEmail": row.get("customer_email"),
         "serviceId": row.get("service_id"),
         "serviceName": row.get("service_name"),
         "quantity": row.get("quantity"),
@@ -581,9 +841,22 @@ def public_booking(row: dict) -> dict:
         "completedAt": row.get("completed_at"),
         "measurementMode": row.get("measurement_mode"),
         "customerLocationAddress": row.get("customer_location_address"),
-        "customerLocationLat": float(row["customer_location_lat"]) if row.get("customer_location_lat") is not None else None,
-        "customerLocationLng": float(row["customer_location_lng"]) if row.get("customer_location_lng") is not None else None,
+        "customerLocationLat": float(customer_location_lat) if customer_location_lat is not None else None,
+        "customerLocationLng": float(customer_location_lng) if customer_location_lng is not None else None,
         "customerLocationConfirmedAt": row.get("customer_location_confirmed_at"),
+        "measurementTripStatus": row.get("measurement_trip_status") or "not_started",
+        "tailorTripLat": float(tailor_trip_lat) if tailor_trip_lat is not None else None,
+        "tailorTripLng": float(tailor_trip_lng) if tailor_trip_lng is not None else None,
+        "tailorTripUpdatedAt": row.get("tailor_trip_updated_at"),
+        "tailorStartedAt": row.get("tailor_started_at"),
+        "tailorArrivedAt": row.get("tailor_arrived_at"),
+        "measurementOtpSentAt": row.get("measurement_otp_sent_at"),
+        "measurementOtpVerifiedAt": row.get("measurement_otp_verified_at"),
+        "measurementOtpRequired": measurement_visit_needs_otp(row),
+        "customerMapUrl": google_maps_search_url(customer_location_lat, customer_location_lng, row.get("customer_location_address") or row.get("address")),
+        "customerDirectionsUrl": google_maps_directions_url(customer_location_lat, customer_location_lng, row.get("customer_location_address") or row.get("address"), route_origin_lat, route_origin_lng),
+        "tailorMapUrl": google_maps_search_url(route_origin_lat, route_origin_lng, row.get("tailor_location_address")),
+        "tailorDirectionsUrl": google_maps_directions_url(customer_location_lat, customer_location_lng, row.get("customer_location_address") or row.get("address"), route_origin_lat, route_origin_lng),
         "address": row.get("address"),
         "appointmentDate": row.get("appointment_date"),
         "appointmentSlot": row.get("appointment_slot"),
@@ -613,31 +886,22 @@ def public_booking(row: dict) -> dict:
 
 
 async def get_accessible_order(db: AsyncSession, booking_id: str, user: dict) -> dict:
+    await ensure_measurement_visit_schema(db)
     roles = user.get("roles") or []
     if "tailor" in roles:
-        order = await fetch_one(
+        order = await fetch_booking_detail(
             db,
-            """
-            SELECT o.*, t.shop, u.name AS customer_name
-            FROM orders o
-            JOIN tailors t ON t.id=o.tailor_id
-            JOIN users u ON u.id=o.customer_id
-            WHERE o.id=:id AND t.user_id=:user_id
-            """,
+            booking_id,
+            "AND t.user_id=:user_id",
             {"id": booking_id, "user_id": user["id"]},
         )
         if order:
             return order
     if "customer" in roles:
-        order = await fetch_one(
+        order = await fetch_booking_detail(
             db,
-            """
-            SELECT o.*, t.shop, u.name AS customer_name
-            FROM orders o
-            JOIN tailors t ON t.id=o.tailor_id
-            JOIN users u ON u.id=o.customer_id
-            WHERE o.id=:id AND o.customer_id=:user_id
-            """,
+            booking_id,
+            "AND o.customer_id=:user_id",
             {"id": booking_id, "user_id": user["id"]},
         )
         if order:
@@ -722,11 +986,7 @@ def dispute_payload(row: dict) -> dict:
 
 
 async def broadcast_status(db: AsyncSession, booking_id: str) -> None:
-    order = await fetch_one(
-        db,
-        "SELECT o.*, t.shop, u.name AS customer_name FROM orders o JOIN tailors t ON t.id=o.tailor_id JOIN users u ON u.id=o.customer_id WHERE o.id=:id",
-        {"id": booking_id},
-    )
+    order = await fetch_booking_detail(db, booking_id)
     if order:
         await tracker_connections.broadcast(booking_id, jsonable_encoder(await tracker_status_payload(db, order)))
 
@@ -742,6 +1002,7 @@ async def create_booking(
     customer: dict = Depends(get_current_customer),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    await ensure_measurement_visit_schema(db)
     measurement_mode = normalize_measurement_mode(body.measurement_mode)
     if measurement_mode == "tailor_visits_customer":
         if not body.customer_location_address or body.customer_location_lat is None or body.customer_location_lng is None:
@@ -870,17 +1131,237 @@ async def create_booking(
         order_id,
     )
     await db.commit()
-    final = await fetch_one(
-        db,
-        "SELECT o.*, t.shop, u.name AS customer_name FROM orders o JOIN tailors t ON t.id=o.tailor_id JOIN users u ON u.id=o.customer_id WHERE o.id=:id",
-        {"id": order_id},
-    )
+    final = await fetch_booking_detail(db, order_id)
     return {
         "booking": public_booking(final),
         "code": code,
         "status": status,
         "message": "Booking auto-approved." if status == "auto_approved" else "Tailor is currently busy — you're on the waiting list.",
     }
+
+
+@router.get("/{booking_id}/measurement-trip")
+async def get_measurement_trip(
+    booking_id: str,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await ensure_measurement_visit_schema(db)
+    order = await get_accessible_order(db, booking_id, user)
+    return jsonable_encoder({"booking": public_booking(order)})
+
+
+async def broadcast_measurement_trip(db: AsyncSession, booking_id: str, order: dict) -> None:
+    payload = await tracker_status_payload(db, order)
+    payload = {**payload, "type": "measurement_trip", "bookingId": booking_id}
+    await tracker_connections.broadcast(booking_id, jsonable_encoder(payload))
+
+
+@router.post("/{booking_id}/measurement-trip/start")
+async def start_measurement_trip(
+    booking_id: str,
+    body: MeasurementTripLocationIn,
+    tailor: dict = Depends(get_current_tailor),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await ensure_measurement_visit_schema(db)
+    coords = clean_trip_coordinates(body)
+    order = await fetch_booking_detail(db, booking_id, "AND o.tailor_id=:tailor_id", {"tailor_id": tailor["id"]}, True)
+    if not order:
+        raise HTTPException(404, "Booking not found")
+    if is_completed_order(order) or str(order.get("status") or "").lower() == "cancelled":
+        raise HTTPException(409, "This order is closed. Visit tracking is unavailable.")
+    if not is_home_measurement_visit(order):
+        raise HTTPException(409, "Trip tracking is only for bookings where the tailor visits the customer.")
+    if order.get("customer_location_lat") is None or order.get("customer_location_lng") is None:
+        raise HTTPException(400, "Customer location is not confirmed for this booking.")
+    if str(order.get("measurement_trip_status") or "not_started").lower() != "not_started":
+        raise HTTPException(409, "This measurement visit is already started. Use live location updates instead.")
+
+    try:
+        code, _ = await issue_otp(db, booking_id, "measurement_arrival")
+    except OtpFlowError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+            SET measurement_trip_status='en_route',
+                tailor_started_at=COALESCE(tailor_started_at, now()),
+                tailor_trip_lat=COALESCE(:lat, tailor_trip_lat),
+                tailor_trip_lng=COALESCE(:lng, tailor_trip_lng),
+                tailor_trip_updated_at=CASE WHEN :lat IS NULL OR :lng IS NULL THEN tailor_trip_updated_at ELSE now() END,
+                measurement_otp_sent_at=now(),
+                status=CASE WHEN status IN ('auto_approved','tailor_confirmed') THEN 'measurement_pending' ELSE status END,
+                tracker_stage=CASE WHEN tracker_stage='Order Placed' THEN 'Measurement Scheduled' ELSE tracker_stage END
+            WHERE id=:id
+            """
+        ),
+        {"id": booking_id, "lat": coords["lat"], "lng": coords["lng"]},
+    )
+    await add_history(db, booking_id, "Measurement Scheduled", "Tailor started towards customer location", "tailor")
+    customer_message = (
+        f"TRHB: {tailor['shop']} started for order {order['code']}. "
+        f"Share OTP {code} only after the tailor reaches your address. It is valid for {OTP_TTL_MINUTES} minutes."
+    )
+    await notify(db, "user:" + order["customer_id"], "TRHB measurement arrival OTP", customer_message, booking_id)
+    if order.get("customer_email"):
+        send_email(order["customer_email"], "TRHB measurement arrival OTP", customer_message)
+    await db.commit()
+    updated = await fetch_booking_detail(db, booking_id)
+    await broadcast_measurement_trip(db, booking_id, updated)
+    return jsonable_encoder({"booking": public_booking(updated), "message": "Visit started. Customer arrival OTP was sent."})
+
+
+@router.post("/{booking_id}/measurement-trip/location")
+async def update_measurement_trip_location(
+    booking_id: str,
+    body: MeasurementTripLocationIn,
+    tailor: dict = Depends(get_current_tailor),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await ensure_measurement_visit_schema(db)
+    coords = clean_trip_coordinates(body)
+    if coords["lat"] is None or coords["lng"] is None:
+        raise HTTPException(400, "Share your current latitude and longitude.")
+    order = await fetch_booking_detail(db, booking_id, "AND o.tailor_id=:tailor_id", {"tailor_id": tailor["id"]}, True)
+    if not order:
+        raise HTTPException(404, "Booking not found")
+    if is_completed_order(order) or str(order.get("status") or "").lower() == "cancelled":
+        raise HTTPException(409, "This order is closed. Location updates are unavailable.")
+    if not is_home_measurement_visit(order):
+        raise HTTPException(409, "Live location is only for tailor-visits-customer bookings.")
+    if (order.get("measurement_trip_status") or "not_started") == "not_started":
+        raise HTTPException(409, "Start the visit before sharing live location.")
+
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+            SET tailor_trip_lat=:lat,
+                tailor_trip_lng=:lng,
+                tailor_trip_updated_at=now()
+            WHERE id=:id
+            """
+        ),
+        {"id": booking_id, "lat": coords["lat"], "lng": coords["lng"]},
+    )
+    if body.announce:
+        await notify(
+            db,
+            "user:" + order["customer_id"],
+            "TRHB live location update",
+            f"TRHB: {tailor['shop']} shared live location for order {order['code']}.",
+            booking_id,
+        )
+    await db.commit()
+    updated = await fetch_booking_detail(db, booking_id)
+    await broadcast_measurement_trip(db, booking_id, updated)
+    return jsonable_encoder({"booking": public_booking(updated), "message": "Live location shared with the customer."})
+
+
+@router.post("/{booking_id}/measurement-trip/arrive")
+async def arrive_measurement_trip(
+    booking_id: str,
+    body: MeasurementTripLocationIn,
+    tailor: dict = Depends(get_current_tailor),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await ensure_measurement_visit_schema(db)
+    coords = clean_trip_coordinates(body)
+    order = await fetch_booking_detail(db, booking_id, "AND o.tailor_id=:tailor_id", {"tailor_id": tailor["id"]}, True)
+    if not order:
+        raise HTTPException(404, "Booking not found")
+    if is_completed_order(order) or str(order.get("status") or "").lower() == "cancelled":
+        raise HTTPException(409, "This order is closed. Arrival updates are unavailable.")
+    if not is_home_measurement_visit(order):
+        raise HTTPException(409, "Arrival tracking is only for tailor-visits-customer bookings.")
+    if (order.get("measurement_trip_status") or "not_started") == "not_started":
+        raise HTTPException(409, "Start the visit before marking arrival.")
+
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+            SET measurement_trip_status='arrived',
+                tailor_arrived_at=COALESCE(tailor_arrived_at, now()),
+                tailor_trip_lat=COALESCE(:lat, tailor_trip_lat),
+                tailor_trip_lng=COALESCE(:lng, tailor_trip_lng),
+                tailor_trip_updated_at=CASE WHEN :lat IS NULL OR :lng IS NULL THEN tailor_trip_updated_at ELSE now() END
+            WHERE id=:id
+            """
+        ),
+        {"id": booking_id, "lat": coords["lat"], "lng": coords["lng"]},
+    )
+    await add_history(db, booking_id, "Tailor Arrived", "Tailor reached the customer address for measurement", "tailor")
+    await notify(
+        db,
+        "user:" + order["customer_id"],
+        "TRHB tailor reached your address",
+        f"TRHB: {tailor['shop']} reached your address for order {order['code']}. Verify the arrival OTP before measurement.",
+        booking_id,
+    )
+    await db.commit()
+    updated = await fetch_booking_detail(db, booking_id)
+    await broadcast_measurement_trip(db, booking_id, updated)
+    return jsonable_encoder({"booking": public_booking(updated), "message": "Arrival marked. Verify the customer OTP before measurement."})
+
+
+@router.post("/{booking_id}/measurement-trip/verify-otp")
+async def verify_measurement_trip_otp(
+    booking_id: str,
+    body: MeasurementOtpVerifyIn,
+    tailor: dict = Depends(get_current_tailor),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await ensure_measurement_visit_schema(db)
+    order = await fetch_booking_detail(db, booking_id, "AND o.tailor_id=:tailor_id", {"tailor_id": tailor["id"]}, True)
+    if not order:
+        raise HTTPException(404, "Booking not found")
+    if is_completed_order(order) or str(order.get("status") or "").lower() == "cancelled":
+        raise HTTPException(409, "This order is closed. Measurement OTP verification is unavailable.")
+    if not is_home_measurement_visit(order):
+        raise HTTPException(409, "Measurement arrival OTP is only for tailor-visits-customer bookings.")
+    if (order.get("measurement_trip_status") or "not_started") == "not_started":
+        raise HTTPException(409, "Start the visit before verifying the customer OTP.")
+
+    try:
+        matched = await verify_otp(db, booking_id, "measurement_arrival", body.otp)
+    except OtpFlowError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
+    if not matched:
+        raise HTTPException(401, "Invalid or expired measurement arrival OTP.")
+
+    await db.execute(
+        text(
+            """
+            UPDATE orders
+            SET measurement_trip_status='otp_verified',
+                measurement_otp_verified_at=now()
+            WHERE id=:id
+            """
+        ),
+        {"id": booking_id},
+    )
+    await add_history(db, booking_id, "Measurement OTP Verified", "Customer verified tailor arrival before measurement", "tailor")
+    await notify(
+        db,
+        "user:" + order["customer_id"],
+        "TRHB measurement arrival verified",
+        f"TRHB: Arrival OTP verified for order {order['code']}. Measurement can now begin.",
+        booking_id,
+    )
+    await notify(
+        db,
+        "tailor:" + tailor["id"],
+        "TRHB measurement OTP verified",
+        f"TRHB: Customer verified arrival for order {order['code']}. You can take measurements now.",
+        booking_id,
+    )
+    await db.commit()
+    updated = await fetch_booking_detail(db, booking_id)
+    await broadcast_measurement_trip(db, booking_id, updated)
+    return jsonable_encoder({"booking": public_booking(updated), "message": "Measurement arrival OTP verified. Measurement can begin."})
 
 
 @router.get("/{booking_id}/status")
@@ -906,7 +1387,12 @@ async def booking_payment_breakdown(
     )
     if not order:
         raise HTTPException(404, "Booking not found")
-    return await payment_breakdown_for_order(db, order)
+    try:
+        return jsonable_encoder(await payment_breakdown_for_order(db, order))
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("Payment breakdown failed for booking %s", booking_id)
+        raise HTTPException(500, "Payment details could not be loaded. Please refresh and try again.") from exc
 
 
 @router.patch("/{booking_id}/customer-update")
@@ -1055,20 +1541,19 @@ async def update_booking_stage(
     tailor: dict = Depends(get_current_tailor),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    await ensure_measurement_visit_schema(db)
     stage = body.tracker_stage.strip()
     if stage not in TRACKER_STAGES:
         raise HTTPException(400, "Invalid tracker stage")
     if stage == "Delivered":
         raise HTTPException(409, "Delivery stage is completed only after payment and handover OTP verification")
-    order = await fetch_one(
-        db,
-        "SELECT * FROM orders WHERE id=:id AND tailor_id=:tailor_id FOR UPDATE",
-        {"id": booking_id, "tailor_id": tailor["id"]},
-    )
+    order = await fetch_booking_detail(db, booking_id, "AND o.tailor_id=:tailor_id", {"tailor_id": tailor["id"]}, True)
     if not order:
         raise HTTPException(404, "Booking not found")
     if is_completed_order(order):
         raise HTTPException(409, "This order is already completed. Status updates are disabled after handover OTP verification.")
+    if stage == "Measurement Done" and measurement_visit_needs_otp(order):
+        raise HTTPException(409, "Verify the customer's measurement arrival OTP before marking measurement done.")
     next_status = STAGE_TO_STATUS.get(stage, order.get("status"))
     update_sql = "UPDATE orders SET tracker_stage=:stage, status=:status WHERE id=:id"
     if stage == "Measurement Done":
@@ -1077,11 +1562,7 @@ async def update_booking_stage(
     await add_history(db, booking_id, stage, body.note or f"Tracker moved to {stage}", "tailor")
     await notify(db, "user:" + order["customer_id"], "TailoraHub order tracker update", f"Order {order['code']} status: {stage}.", booking_id)
     await db.commit()
-    updated = await fetch_one(
-        db,
-        "SELECT o.*, t.shop, u.name AS customer_name FROM orders o JOIN tailors t ON t.id=o.tailor_id JOIN users u ON u.id=o.customer_id WHERE o.id=:id",
-        {"id": booking_id},
-    )
+    updated = await fetch_booking_detail(db, booking_id)
     payload = await tracker_status_payload(db, updated)
     await tracker_connections.broadcast(booking_id, jsonable_encoder(payload))
     return payload
@@ -1216,40 +1697,9 @@ async def pay_booking(
     method = (body.method or "razorpay").strip().lower()
     if method != "razorpay":
         raise HTTPException(400, "Only Razorpay secure checkout is enabled for customer payments.")
-    key_id, key_secret = razorpay_credentials()
-    if not key_id or not key_secret:
-        raise HTTPException(503, "Razorpay keys are not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in the backend environment.")
+    key_id, key_secret = require_razorpay_credentials()
 
     await latest_payment_intent(db, booking_id)
-    active_intent = await fetch_one(
-        db,
-        """
-        SELECT *
-        FROM payment_intents
-        WHERE booking_id=:booking_id
-          AND status='pending'
-          AND expires_at > now()
-          AND method='razorpay'
-          AND gateway_order_id IS NOT NULL
-        ORDER BY created_at DESC
-        LIMIT 1
-        """,
-        {"booking_id": booking_id},
-    )
-    if active_intent:
-        intent = payment_intent_payload(active_intent)
-        checkout = razorpay_public_checkout_payload(order, active_intent, breakdown, key_id)
-        return {
-            "ok": True,
-            "provider": "razorpay",
-            "booking": public_booking(order),
-            "breakdown": breakdown,
-            "paymentIntent": intent,
-            "payment_intent": intent,
-            "checkout": checkout,
-            "razorpayCheckout": checkout,
-            "message": "Razorpay checkout is ready. Complete payment before the order expires.",
-        }
 
     app_settings = get_settings()
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=max(1, app_settings.manual_payment_expiry_minutes))
@@ -1257,8 +1707,19 @@ async def pay_booking(
     payable_total = money_decimal(breakdown["payable_total"])
     payment_reference = f"THPAY-{str(order.get('code') or booking_id).replace('ORD-', '')}-{uuid.uuid4().hex[:6].upper()}"
 
+    # Test keys can be rotated often. Reusing an old pending Razorpay order after
+    # a key change causes checkout authentication failures, so every Pay click
+    # creates a fresh gateway order and cancels stale pending intents.
     await db.execute(
-        text("UPDATE payment_intents SET status='cancelled', updated_at=now() WHERE booking_id=:booking_id AND status='pending'"),
+        text(
+            """
+            UPDATE payment_intents
+            SET status='cancelled', updated_at=now()
+            WHERE booking_id=:booking_id
+              AND status='pending'
+              AND method='razorpay'
+            """
+        ),
         {"booking_id": booking_id},
     )
     razorpay_order = await create_razorpay_order(
@@ -1268,6 +1729,7 @@ async def pay_booking(
             "amount": amount_to_paise(payable_total),
             "currency": "INR",
             "receipt": payment_reference[:40],
+            "payment_capture": 1,
             "notes": {
                 "booking_id": booking_id,
                 "order_code": order.get("code") or "",
@@ -1354,9 +1816,7 @@ async def verify_razorpay_booking_payment(
     customer: dict = Depends(get_current_customer),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    _, key_secret = razorpay_credentials()
-    if not key_secret:
-        raise HTTPException(503, "Razorpay keys are not configured on the backend.")
+    _, key_secret = require_razorpay_credentials()
     intent = await fetch_one(
         db,
         """
@@ -1651,17 +2111,16 @@ async def measurement_done(
     tailor: dict = Depends(get_current_tailor),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    order = await fetch_one(
-        db,
-        "SELECT * FROM orders WHERE id=:id AND tailor_id=:tailor_id FOR UPDATE",
-        {"id": booking_id, "tailor_id": tailor["id"]},
-    )
+    await ensure_measurement_visit_schema(db)
+    order = await fetch_booking_detail(db, booking_id, "AND o.tailor_id=:tailor_id", {"tailor_id": tailor["id"]}, True)
     if not order:
         raise HTTPException(404, "Booking not found")
     if is_completed_order(order):
         raise HTTPException(409, "This order is already completed. Measurement updates are disabled.")
     if order["status"] not in {"auto_approved", "tailor_confirmed", "measurement_pending"}:
         raise HTTPException(409, "Measurement can be marked done only after booking approval")
+    if measurement_visit_needs_otp(order):
+        raise HTTPException(409, "Verify the customer's measurement arrival OTP before marking measurement done.")
     await db.execute(
         text("UPDATE orders SET status='measurement_done', measurement_done_at=now(), tracker_stage='Measurement Done' WHERE id=:id"),
         {"id": booking_id},
@@ -1669,11 +2128,7 @@ async def measurement_done(
     await add_history(db, booking_id, "Measurement Done", "Measurements completed", "tailor")
     await notify(db, "user:" + order["customer_id"], "Measurement completed", f"Measurements for order {order['code']} are completed. Tracker will begin now.", booking_id)
     await db.commit()
-    updated = await fetch_one(
-        db,
-        "SELECT o.*, t.shop, u.name AS customer_name FROM orders o JOIN tailors t ON t.id=o.tailor_id JOIN users u ON u.id=o.customer_id WHERE o.id=:id",
-        {"id": booking_id},
-    )
+    updated = await fetch_booking_detail(db, booking_id)
     await tracker_connections.broadcast(booking_id, jsonable_encoder(await tracker_status_payload(db, updated)))
     return {"booking": public_booking(updated), "message": "Measurement marked done."}
 

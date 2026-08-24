@@ -1,0 +1,1 @@
+﻿Initial release of TailoraHub for customers, tailors and admins. Includes tailor discovery, service pricing, booking flow, map-assisted location selection, order tracking, Razorpay payments, delivery OTP confirmation, wallet tracking, feedback, support and admin operations.

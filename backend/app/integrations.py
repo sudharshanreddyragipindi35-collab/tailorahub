@@ -114,7 +114,7 @@ class LiveSmsService(SmsService):
             sid = settings.sms_api_secret
             token = settings.sms_api_key
             url = f"https://api.twilio.com/2010-04-01/Accounts/{parse.quote(sid)}/Messages.json"
-            payload = parse.urlencode({"To": "+91" + phone_number[-10:], "From": settings.sms_sender_id, "Body": f"Your TailoraHub OTP is {code}."}).encode("utf-8")
+            payload = parse.urlencode({"To": "+91" + phone_number[-10:], "From": settings.sms_sender_id, "Body": f"TRHB: Your TailoraHub OTP is {code}."}).encode("utf-8")
             auth = base64.b64encode(f"{sid}:{token}".encode("utf-8")).decode("ascii")
             req = request.Request(url, data=payload, headers={"Authorization": f"Basic {auth}"}, method="POST")
             try:

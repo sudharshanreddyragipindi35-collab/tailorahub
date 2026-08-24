@@ -340,7 +340,15 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 DO $$ BEGIN
-  CREATE TYPE otp_purpose AS ENUM ('registration_phone', 'registration_email', 'login', 'forgot_password');
+  CREATE TYPE otp_purpose AS ENUM (
+    'registration_phone',
+    'registration_email',
+    'login',
+    'forgot_password',
+    'delivery',
+    'withdrawal',
+    'measurement_arrival'
+  );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
@@ -669,6 +677,7 @@ INSERT INTO platform_settings (id) VALUES (1) ON CONFLICT (id) DO NOTHING;
 
 ALTER TYPE otp_purpose ADD VALUE IF NOT EXISTS 'delivery';
 ALTER TYPE otp_purpose ADD VALUE IF NOT EXISTS 'withdrawal';
+ALTER TYPE otp_purpose ADD VALUE IF NOT EXISTS 'measurement_arrival';
 
 -- users: give every user a stable UUID "customer identity", mirroring
 -- tailors.tailor_id, plus the customer-side referral/terms fields.

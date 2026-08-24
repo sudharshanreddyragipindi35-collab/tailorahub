@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from . import otp
 from .api.v1 import api_router
+from .api.v1.bookings import create_razorpay_order, require_razorpay_credentials, verify_razorpay_signature
 from .db import db_session, fetch_all, fetch_one, run_schema
 from .emailer import send_email
 from .integrations import aadhaar_kyc_service, maps_service, payment_service, sms_service
@@ -77,7 +78,7 @@ PAYMENT_STATUSES = ["PENDING", "PROCESSING", "PAID", "FAILED", "REFUNDED"]
 AVAILABILITY_STATUSES = ["AVAILABLE", "FEW_SLOTS_AVAILABLE", "BUSY", "NOT_AVAILABLE"]
 SUPPORT_STATUSES = ["OPEN", "PENDING", "WAITING_ON_CUSTOMER", "RESOLVED", "CLOSED"]
 SUPPORT_PRIORITIES = ["LOW", "NORMAL", "HIGH", "URGENT"]
-VALID_OTP_PURPOSES = {"registration_phone", "registration_email", "login", "forgot_password", "delivery"}
+VALID_OTP_PURPOSES = {"registration_phone", "registration_email", "login", "forgot_password", "delivery", "withdrawal", "measurement_arrival"}
 PHONE_RE = re.compile(r"^[6-9]\d{9}$")
 ORDER_STATUSES = [
     "REQUESTED",
@@ -199,6 +200,64 @@ class BookingCreate(BaseModel):
     visitDate: date | None = None
     visitSlot: str | None = None
     visitNotes: str | None = None
+
+
+class RazorpayCreateOrderIn(BaseModel):
+    amount: int
+    currency: str = Field(default="INR", min_length=3, max_length=3)
+    receipt: str | None = Field(default=None, max_length=40)
+
+
+class RazorpayVerifyPaymentIn(BaseModel):
+    razorpay_order_id: str | None = None
+    order_id: str | None = None
+    razorpay_payment_id: str | None = None
+    payment_id: str | None = None
+    razorpay_signature: str | None = None
+
+
+@app.post("/api/create-order")
+async def create_standard_razorpay_order(body: RazorpayCreateOrderIn):
+    if body.amount < 100:
+        raise HTTPException(400, "Amount must be at least 100 paise.")
+    currency = body.currency.strip().upper()
+    if currency != "INR":
+        raise HTTPException(400, "Only INR payments are supported.")
+    key_id, key_secret = require_razorpay_credentials()
+    receipt = (body.receipt or f"TH-{uuid.uuid4().hex[:20]}").strip()[:40]
+    order = await create_razorpay_order(
+        key_id,
+        key_secret,
+        {
+            "amount": body.amount,
+            "currency": currency,
+            "receipt": receipt,
+            "payment_capture": 1,
+        },
+    )
+    order_id = order.get("id")
+    if not order_id:
+        raise HTTPException(500, "Razorpay did not return an order id.")
+    return {
+        "order_id": order_id,
+        "razorpay_order_id": order_id,
+        "amount": int(order.get("amount") or body.amount),
+        "currency": order.get("currency") or currency,
+        "key_id": key_id,
+    }
+
+
+@app.post("/api/verify-payment")
+async def verify_standard_razorpay_payment(body: RazorpayVerifyPaymentIn):
+    order_id = (body.razorpay_order_id or body.order_id or "").strip()
+    payment_id = (body.razorpay_payment_id or body.payment_id or "").strip()
+    signature = (body.razorpay_signature or "").strip()
+    if not order_id or not payment_id or not signature:
+        raise HTTPException(400, "Missing Razorpay order id, payment id, or signature.")
+    _, key_secret = require_razorpay_credentials()
+    if not verify_razorpay_signature(order_id, payment_id, signature, key_secret):
+        raise HTTPException(400, "Razorpay payment signature is invalid.")
+    return {"ok": True, "verified": True, "order_id": order_id, "payment_id": payment_id}
 
 
 class AvailabilityPatch(BaseModel):

@@ -3304,6 +3304,7 @@ function isCustomerManageAllowed(order) {
 }
 
 let razorpayCheckoutPromise = null;
+const razorpayKeyId = import.meta.env.VITE_RAZORPAY_KEY_ID || "";
 
 function loadRazorpayCheckout() {
   if (window.Razorpay) return Promise.resolve(window.Razorpay);
@@ -3327,7 +3328,7 @@ async function openRazorpayCheckout(options) {
   const Razorpay = await loadRazorpayCheckout();
   return new Promise((resolve, reject) => {
     const checkout = new Razorpay({
-      key: options.keyId || options.key_id,
+      key: options.keyId || options.key_id || razorpayKeyId,
       amount: options.amountPaise || options.amount_paise || options.amount,
       currency: options.currency || "INR",
       name: options.name || "TailoraHub",
@@ -3346,6 +3347,320 @@ async function openRazorpayCheckout(options) {
     });
     checkout.open();
   });
+}
+
+function normalizeMeasurementModeValue(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
+
+function isTailorVisitOrder(order) {
+  return normalizeMeasurementModeValue(order?.measurementMode || order?.measurement_mode) === "tailor_visits_customer";
+}
+
+function isMeasurementArrivalVerified(order) {
+  const status = String(order?.measurementTripStatus || order?.measurement_trip_status || "").toLowerCase();
+  return Boolean(order?.measurementOtpVerifiedAt || order?.measurement_otp_verified_at || status === "otp_verified");
+}
+
+function tripStatusLabel(status) {
+  const value = String(status || "not_started").toLowerCase();
+  if (value === "en_route") return "Tailor is on the way";
+  if (value === "arrived") return "Tailor reached customer location";
+  if (value === "otp_verified") return "Arrival OTP verified";
+  return "Tailor not started yet";
+}
+
+function mapLinkFor(lat, lng, address) {
+  if (lat !== undefined && lat !== null && lng !== undefined && lng !== null) {
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`;
+  }
+  if (address) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+  return "https://www.google.com/maps";
+}
+
+function getBrowserCoordinates({ required = false } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) {
+      if (required) {
+        reject(new Error("Location permission is required to share your live location."));
+        return;
+      }
+      resolve({});
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
+      () => {
+        if (required) {
+          reject(new Error("Allow location permission in the browser before sharing live location."));
+          return;
+        }
+        resolve({});
+      },
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 15000 }
+    );
+  });
+}
+
+function notifyBookingPanels(bookingId) {
+  if (!bookingId || typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("tailorahub:booking-trip-refresh", { detail: { bookingId } }));
+  window.dispatchEvent(new CustomEvent("tailorahub:orders-refresh", { detail: { bookingId } }));
+}
+
+function CustomerMeasurementVisitPanel({ order }) {
+  const [trip, setTrip] = useState(order);
+  const [error, setError] = useState("");
+
+  async function loadTrip() {
+    if (!order?.id) return;
+    try {
+      const res = await api.measurementTrip(order.id);
+      setTrip(res.booking || order);
+      setError("");
+    } catch (err) {
+      setError(err.message || "Visit tracking could not be loaded.");
+    }
+  }
+
+  useEffect(() => {
+    setTrip(order);
+    loadTrip();
+    const timer = setInterval(loadTrip, 5000);
+    return () => clearInterval(timer);
+  }, [order?.id]);
+
+  useEffect(() => {
+    function refreshTrip(event) {
+      if (!event.detail?.bookingId || event.detail.bookingId === order?.id) loadTrip();
+    }
+    window.addEventListener("tailorahub:booking-trip-refresh", refreshTrip);
+    return () => window.removeEventListener("tailorahub:booking-trip-refresh", refreshTrip);
+  }, [order?.id]);
+
+  if (!order?.id) return null;
+  if (!isTailorVisitOrder(trip)) return null;
+
+  const customerAddress = trip.customerLocationAddress || trip.customer_location_address || "Customer location not confirmed yet.";
+  const customerLat = trip.customerLocationLat ?? trip.customer_location_lat;
+  const customerLng = trip.customerLocationLng ?? trip.customer_location_lng;
+  const tailorLat = trip.tailorTripLat ?? trip.tailor_trip_lat;
+  const tailorLng = trip.tailorTripLng ?? trip.tailor_trip_lng;
+  const tripStatus = trip.measurementTripStatus || trip.measurement_trip_status || "not_started";
+  const tripStatusValue = String(tripStatus).toLowerCase();
+  const verified = Boolean(trip.measurementOtpVerifiedAt || trip.measurement_otp_verified_at || tripStatusValue === "otp_verified");
+  const hasTailorLiveLocation = tailorLat !== null && tailorLat !== undefined && tailorLng !== null && tailorLng !== undefined;
+  const tailorLocationUrl = hasTailorLiveLocation ? mapLinkFor(tailorLat, tailorLng) : "";
+  const tailorLocationTitle = hasTailorLiveLocation
+    ? `${Number(tailorLat).toFixed(5)}, ${Number(tailorLng).toFixed(5)}`
+    : tripStatusValue === "not_started"
+      ? "Waiting for tailor to start"
+      : tripStatusValue === "en_route"
+        ? "Tailor started for measurement"
+        : tripStatusValue === "arrived"
+          ? "Tailor reached your address"
+          : verified
+            ? "Arrival OTP verified"
+            : "Measurement visit updated";
+  const tailorLocationHint = hasTailorLiveLocation
+    ? ""
+    : tripStatusValue === "not_started"
+      ? "Live location appears after the tailor starts."
+      : "Trip status updated. Live location appears after browser location permission is allowed.";
+  const routeUrl = trip.tailorDirectionsUrl || trip.tailor_directions_url || mapLinkFor(customerLat, customerLng, customerAddress);
+
+  return (
+    <div className="measurement-trip-panel">
+      <div className="trip-panel-head">
+        <div>
+          <h3>Measurement visit</h3>
+          <p>Track the tailor visit and open the address in Google Maps after booking.</p>
+        </div>
+        <span className="trip-status-pill">{tripStatusLabel(tripStatus)}</span>
+      </div>
+      <div className="trip-grid">
+        <div className="trip-info-card">
+          <small>Your pinned address</small>
+          <strong>{customerAddress}</strong>
+          <a className="trip-map-link" href={routeUrl} target="_blank" rel="noreferrer">Open in Google Maps</a>
+        </div>
+        <div className="trip-info-card">
+          <small>Tailor live location</small>
+          <strong>{tailorLocationTitle}</strong>
+          {tailorLocationUrl ? <a className="trip-map-link" href={tailorLocationUrl} target="_blank" rel="noreferrer">Track on map</a> : <span>{tailorLocationHint}</span>}
+        </div>
+        <div className="trip-info-card">
+          <small>Arrival security</small>
+          <strong>{verified ? "OTP verified" : "OTP required before measurement"}</strong>
+          <span>Share the OTP only after the tailor reaches your address.</span>
+        </div>
+      </div>
+      <div className="trip-info-card trip-wide-card">
+        <small>Visit updates</small>
+        <strong>{tripStatusValue === "not_started" ? "Tailor has not started yet" : tripStatusLabel(tripStatus)}</strong>
+        <span>
+          {tripStatusValue === "not_started"
+            ? "You will get an in-app update when the tailor starts for measurement."
+            : tripStatusValue === "en_route"
+              ? "Tailor started for measurement. Please be ready at your pinned address."
+              : tripStatusValue === "arrived"
+                ? "Tailor reached your address. Share the arrival OTP only after confirming."
+                : verified
+                  ? "Arrival OTP is verified. Measurement can begin."
+                  : "Your measurement visit status was updated."}
+        </span>
+      </div>
+      {error ? <small className="field-error">{error}</small> : null}
+    </div>
+  );
+}
+
+function TailorMeasurementVisitPanel({ order, reload, onReadyChange }) {
+  const [trip, setTrip] = useState(order);
+  const [otp, setOtp] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function loadTrip() {
+    if (!order?.id) return;
+    try {
+      const res = await api.measurementTrip(order.id);
+      setTrip(res.booking || order);
+    } catch {}
+  }
+
+  useEffect(() => {
+    setTrip(order);
+    loadTrip();
+    const timer = setInterval(loadTrip, 5000);
+    return () => clearInterval(timer);
+  }, [order?.id]);
+
+  useEffect(() => {
+    function refreshTrip(event) {
+      if (!event.detail?.bookingId || event.detail.bookingId === order?.id) loadTrip();
+    }
+    window.addEventListener("tailorahub:booking-trip-refresh", refreshTrip);
+    return () => window.removeEventListener("tailorahub:booking-trip-refresh", refreshTrip);
+  }, [order?.id]);
+
+  const needsVisit = isTailorVisitOrder(trip);
+  const tripStatus = trip.measurementTripStatus || trip.measurement_trip_status || "not_started";
+  const tripStatusValue = String(tripStatus).toLowerCase();
+  const verified = !needsVisit || Boolean(trip.measurementOtpVerifiedAt || trip.measurement_otp_verified_at || tripStatusValue === "otp_verified");
+
+  useEffect(() => {
+    onReadyChange?.(verified);
+  }, [verified, onReadyChange]);
+
+  useEffect(() => {
+    const canAutoShare = needsVisit && ["en_route", "arrived"].includes(tripStatusValue) && !verified;
+    if (!canAutoShare || !navigator.geolocation || !order?.id) return undefined;
+    let lastSentAt = 0;
+    const watcher = navigator.geolocation.watchPosition(
+      async (position) => {
+        const now = Date.now();
+        if (now - lastSentAt < 15000) return;
+        lastSentAt = now;
+        try {
+          const res = await api.updateMeasurementTripLocation(order.id, {
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+          });
+          if (res.booking) setTrip(res.booking);
+        } catch {}
+      },
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 10000, timeout: 12000 }
+    );
+    return () => navigator.geolocation.clearWatch(watcher);
+  }, [order?.id, needsVisit, tripStatusValue, verified]);
+
+  if (!order?.id) return null;
+  if (!needsVisit) return null;
+
+  const customerAddress = trip.customerLocationAddress || trip.customer_location_address || "Customer location not confirmed.";
+  const customerLat = trip.customerLocationLat ?? trip.customer_location_lat;
+  const customerLng = trip.customerLocationLng ?? trip.customer_location_lng;
+  const customerMapUrl = trip.customerMapUrl || trip.customer_map_url || mapLinkFor(customerLat, customerLng, customerAddress);
+  const routeUrl = trip.tailorDirectionsUrl || trip.tailor_directions_url || customerMapUrl;
+  const canMarkArrived = ["en_route", "arrived"].includes(tripStatusValue);
+  const canVerifyOtp = ["arrived", "otp_verified"].includes(tripStatusValue) && !verified;
+
+  async function runAction(action, { requireLocation = false } = {}) {
+    setBusy(true);
+    setMessage("");
+    try {
+      const coords = await getBrowserCoordinates({ required: requireLocation });
+      const res = await action(coords);
+      setTrip(res.booking || trip);
+      setMessage(res.message || "Visit updated.");
+      notifyBookingPanels(order.id);
+      reload?.();
+    } catch (err) {
+      setMessage(err.message || "Visit update failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verifyArrivalOtp() {
+    if (!/^\d{6}$/.test(otp)) {
+      setMessage("Enter the 6 digit OTP shared by the customer.");
+      return;
+    }
+    setBusy(true);
+    setMessage("");
+    try {
+      const res = await api.verifyMeasurementTripOtp(order.id, otp);
+      setTrip(res.booking || trip);
+      setOtp("");
+      setMessage(res.message || "Customer arrival OTP verified. Measurement is unlocked.");
+      notifyBookingPanels(order.id);
+      reload?.();
+    } catch (err) {
+      setMessage(err.message || "OTP verification failed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="measurement-trip-panel">
+      <div className="trip-panel-head">
+        <div>
+          <h3>Customer visit tracking</h3>
+          <p>Start the trip, notify the customer, verify arrival OTP, then mark measurement done.</p>
+        </div>
+        <span className="trip-status-pill">{tripStatusLabel(tripStatus)}</span>
+      </div>
+      <div className="trip-grid">
+        <div className="trip-info-card">
+          <small>Customer</small>
+          <strong>{trip.customerName || trip.customer_name || order.customer_name}</strong>
+          <span>{trip.customerPhone || trip.customer_phone || order.customer_phone || "Phone available after booking"}</span>
+        </div>
+        <div className="trip-info-card">
+          <small>Pinned customer address</small>
+          <strong>{customerAddress}</strong>
+          <a className="trip-map-link" href={customerMapUrl} target="_blank" rel="noreferrer">See in Google Maps</a>
+        </div>
+        <div className="trip-info-card">
+          <small>Secure measurement gate</small>
+          <strong>{verified ? "Measurement unlocked" : "OTP verification pending"}</strong>
+          <span>{verified ? "You can mark measurement done." : "Do not take measurements before OTP verification."}</span>
+        </div>
+      </div>
+      <div className="trip-actions">
+        <button type="button" onClick={() => runAction((coords) => api.startMeasurementTrip(order.id, coords), { requireLocation: true })} disabled={busy || tripStatusValue !== "not_started"}>I started from here</button>
+        <button type="button" onClick={() => runAction((coords) => api.arriveMeasurementTrip(order.id, coords), { requireLocation: true })} disabled={busy || !canMarkArrived || verified}>I reached customer</button>
+        <a className="trip-map-link" href={routeUrl} target="_blank" rel="noreferrer">Open route</a>
+        <input value={otp} onChange={(event) => setOtp(cleanDigits(event.target.value))} inputMode="numeric" maxLength={6} placeholder="Customer OTP" disabled={busy || !canVerifyOtp} />
+        <button type="button" onClick={verifyArrivalOtp} disabled={busy || !canVerifyOtp || otp.length !== 6}>Verify arrival OTP</button>
+      </div>
+      {message ? <small className={["verified", "sent", "updated", "unlocked", "shared", "marked", "started", "reached"].some((word) => message.toLowerCase().includes(word)) ? "field-success" : "field-error"}>{message}</small> : null}
+    </div>
+  );
 }
 
 function CustomerOrderCard({ order, reload }) {
@@ -3567,6 +3882,7 @@ function CustomerOrderCard({ order, reload }) {
       {detailsOpen && activeView === "track" ? (
         <div className="compact-order-panel">
           <OrderTracker steps={statusData.steps} />
+          <CustomerMeasurementVisitPanel order={statusData} />
           {!isPaid && !cancelled ? <PaymentBreakdownCard breakdown={breakdown} /> : null}
           {!isPaid && paymentIntent && !cancelled ? <PaymentIntentNotice intent={paymentIntent} /> : null}
           {completed ? <QualityCheckPrompt onDispute={raiseDispute} busy={busy} /> : null}
@@ -5075,13 +5391,20 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
   const [otp, setOtp] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [visitOpen, setVisitOpen] = useState(false);
+  const [measurementReady, setMeasurementReady] = useState(!isTailorVisitOrder(order) || isMeasurementArrivalVerified(order));
   const paid = String(order.payment_status || order.paymentStatus || "").toLowerCase() === "paid";
   const completed = isCompletedOrder(order);
+  const tailorVisit = isTailorVisitOrder(order);
 
   useEffect(() => {
     setStage(order.tracker_stage || order.trackerStage || "Order Placed");
-  }, [order.tracker_stage, order.trackerStage, order.id]);
+    setMeasurementReady(!isTailorVisitOrder(order) || isMeasurementArrivalVerified(order));
+    setVisitOpen(false);
+  }, [order.tracker_stage, order.trackerStage, order.id, order.measurementMode, order.measurement_mode, order.measurementOtpVerifiedAt, order.measurement_otp_verified_at]);
   const stageOptions = bookingTrackerStages.filter((value) => value !== "Delivered");
+  const statusValue = String(order.status || "").toLowerCase();
+  const canMarkMeasurementDone = ["auto_approved", "measurement_pending", "tailor_confirmed"].includes(statusValue);
 
   async function update() {
     if (completed) return;
@@ -5145,15 +5468,20 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
       </select>
       <input value={note} onChange={(e) => setNote(e.target.value)} placeholder="Status note" disabled={busy} />
       <button onClick={update} disabled={busy}>Send Update</button>
-      {!completed && ["auto_approved", "measurement_pending", "tailor_confirmed"].includes(order.status) ? <button onClick={onMeasurementDone} disabled={busy}>Measurement Done</button> : null}
+      {!completed && canMarkMeasurementDone ? <button onClick={onMeasurementDone} disabled={busy || !measurementReady}>Measurement Done</button> : null}
       <button onClick={onCharge} disabled={busy}>Charge</button>
+      <button type="button" className={visitOpen ? "active" : ""} onClick={() => setVisitOpen((open) => !open)} disabled={busy}>
+        {tailorVisit ? "Visit tracking" : "Visit details"}
+      </button>
       <div className={paid ? "delivery-otp-box unlocked" : "delivery-otp-box locked"}>
         <small>{paid ? "Delivery OTP enabled." : "Complete payment to enable delivery OTP."}</small>
         <button type="button" onClick={sendOtp} disabled={!paid || busy}>Send OTP</button>
         <input value={otp} onChange={(e) => setOtp(cleanDigits(e.target.value))} inputMode="numeric" maxLength={6} placeholder="Handover OTP" disabled={!paid || busy} />
         <button type="button" onClick={verifyOtp} disabled={!paid || busy || !otp}>Verify OTP</button>
       </div>
-      {message ? <small className={message.includes("sent") || message.includes("verified") ? "field-success" : "field-error"}>{message}</small> : null}
+      {visitOpen ? <TailorMeasurementVisitPanel order={order} reload={reload} onReadyChange={setMeasurementReady} /> : null}
+      {canMarkMeasurementDone && !measurementReady ? <small className="field-error">Verify the customer's arrival OTP before marking measurement done.</small> : null}
+      {message ? <small className={message.includes("sent") || message.includes("verified") || message.includes("updated") || message.includes("unlocked") || message.includes("shared") || message.includes("marked") ? "field-success" : "field-error"}>{message}</small> : null}
     </div>
   );
 }
