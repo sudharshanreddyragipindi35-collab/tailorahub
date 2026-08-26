@@ -4574,6 +4574,9 @@ function TailorApp({ onLogout }) {
   const t = useT();
   const [data, setData] = useState(null);
   const [availability, setAvailability] = useState({});
+  const [savedAvailability, setSavedAvailability] = useState({});
+  const [availabilityFeedback, setAvailabilityFeedback] = useState("");
+  const [savingAvailability, setSavingAvailability] = useState(false);
   const [activePanel, setActivePanel] = useAppHistoryState("tailorPanel", "overview");
   const [error, setError] = useState("");
 
@@ -4582,7 +4585,7 @@ function TailorApp({ onLogout }) {
     try {
       const next = await api.tailorDashboard();
       setData(next);
-      setAvailability({
+      const nextAvailability = {
         availability: next.tailor.availability || "AVAILABLE",
         availableSlots: next.tailor.availableSlots || 0,
         maxNewOrders: next.tailor.maxNewOrders || 0,
@@ -4590,7 +4593,9 @@ function TailorApp({ onLogout }) {
         availabilityNote: next.tailor.availabilityNote || "",
         acceptingRequests: next.tailor.acceptingRequests,
         approvalMode: next.tailor.approvalMode || "AUTOMATIC",
-      });
+      };
+      setAvailability(nextAvailability);
+      setSavedAvailability(nextAvailability);
     } catch (err) {
       setError(err.message);
     }
@@ -4601,8 +4606,23 @@ function TailorApp({ onLogout }) {
 
   async function saveAvailability(event) {
     event.preventDefault();
-    await api.updateAvailability({ ...availability, nextAvailable: availability.nextAvailable || null });
-    load();
+    const payload = { ...availability, nextAvailable: availability.nextAvailable || null };
+    const savedPayload = { ...savedAvailability, nextAvailable: savedAvailability.nextAvailable || null };
+    if (JSON.stringify(payload) === JSON.stringify(savedPayload)) {
+      setAvailabilityFeedback("No changes to save.");
+      return;
+    }
+    setSavingAvailability(true);
+    setAvailabilityFeedback("");
+    try {
+      await api.updateAvailability(payload);
+      await load();
+      setAvailabilityFeedback("Availability changes saved successfully.");
+    } catch (err) {
+      setAvailabilityFeedback(err.message || "Unable to save availability changes.");
+    } finally {
+      setSavingAvailability(false);
+    }
   }
 
   const unreadUpdates = unreadCount(data?.notifications || []);
@@ -4695,7 +4715,7 @@ function TailorApp({ onLogout }) {
               </div>
             </>
           ) : null}
-          {activePanel === "availability" ? <TailorAvailabilityPanel availability={availability} setAvailability={setAvailability} saveAvailability={saveAvailability} /> : null}
+          {activePanel === "availability" ? <TailorAvailabilityPanel availability={availability} setAvailability={(next) => { setAvailability(next); setAvailabilityFeedback(""); }} saveAvailability={saveAvailability} feedback={availabilityFeedback} saving={savingAvailability} /> : null}
           {activePanel === "wallet" ? <TailorWalletPanel /> : null}
           {activePanel === "referrals" ? <TailorReferralPanel /> : null}
           {activePanel === "media" ? <TailorMediaPanel tailor={data.tailor} reload={load} /> : null}
@@ -4713,7 +4733,7 @@ function TailorApp({ onLogout }) {
   );
 }
 
-function TailorAvailabilityPanel({ availability, setAvailability, saveAvailability }) {
+function TailorAvailabilityPanel({ availability, setAvailability, saveAvailability, feedback, saving }) {
   const t = useT();
   const [slotDate, setSlotDate] = useState(todayDateInput());
   const [slots, setSlots] = useState(() => APPOINTMENT_TIME_SLOTS.map((slot) => ({ slot: slot.value, enabled: true, capacity: 1, bookedCount: 0 })));
@@ -4749,7 +4769,8 @@ function TailorAvailabilityPanel({ availability, setAvailability, saveAvailabili
         <label>{t("tailor.nextAvailableDate", "Next available date")}<input type="date" value={availability.nextAvailable || ""} onChange={(e) => setAvailability({ ...availability, nextAvailable: e.target.value })} /></label>
         <label className="check-row"><input type="checkbox" checked={Boolean(availability.acceptingRequests)} onChange={(e) => setAvailability({ ...availability, acceptingRequests: e.target.checked })} /> {t("tailor.acceptingRequests", "Accepting new requests")}</label>
         <label className="span-2">{t("tailor.availabilityNote", "Availability note")}<textarea value={availability.availabilityNote} onChange={(e) => setAvailability({ ...availability, availabilityNote: e.target.value })} /></label>
-        <button className="primary-btn">{t("tailor.saveAvailability", "Save Availability")}</button>
+        <button className="primary-btn" disabled={saving}>{saving ? "Saving..." : t("tailor.saveAvailability", "Save Availability")}</button>
+        {feedback ? <div className={feedback.includes("successfully") ? "notice ok span-2" : feedback === "No changes to save." ? "notice span-2" : "error span-2"} role="status" aria-live="polite">{feedback}</div> : null}
       </form>
       {availability.approvalMode === "AUTOMATIC" ? <div className="slot-capacity-panel"><h3>Slot capacity</h3><label>Date<input type="date" min={todayDateInput()} value={slotDate} onChange={(e) => setSlotDate(e.target.value)} /></label>{slots.map((row, index) => <div className="slot-capacity-row" key={row.slot}><label className="check-row"><input type="checkbox" checked={row.enabled} onChange={(e) => setSlots((old) => old.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: e.target.checked } : item))} /> {APPOINTMENT_TIME_SLOTS.find((slot) => slot.value === row.slot)?.label}</label><label>Capacity<input type="number" min={row.bookedCount} max="100" value={row.capacity} disabled={!row.enabled} onChange={(e) => setSlots((old) => old.map((item, itemIndex) => itemIndex === index ? { ...item, capacity: Number(e.target.value) } : item))} /></label><small>{row.bookedCount} booked</small></div>)}<button type="button" className="primary-btn" onClick={saveSlots}>Save slot capacity</button>{slotMessage ? <div className={slotMessage.includes("saved") ? "notice ok" : "error"}>{slotMessage}</div> : null}</div> : null}
     </section>
