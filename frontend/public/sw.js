@@ -1,4 +1,4 @@
-const CACHE_NAME = "tailorahub-pwa-v4";
+const CACHE_NAME = "tailorahub-pwa-v5";
 const APP_SHELL = [
   "/",
   "/offline.html",
@@ -13,7 +13,7 @@ self.addEventListener("install", (event) => {
   event.waitUntil(
     caches
       .open(CACHE_NAME)
-      .then((cache) => cache.addAll(APP_SHELL))
+      .then((cache) => Promise.allSettled(APP_SHELL.map((path) => cache.add(path))))
       .then(() => self.skipWaiting())
   );
 });
@@ -47,7 +47,11 @@ self.addEventListener("fetch", (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put("/", copy));
           return response;
         })
-        .catch(() => caches.match("/") || caches.match("/offline.html"))
+        .catch(async () => (
+          (await caches.match("/"))
+          || (await caches.match("/offline.html"))
+          || new Response("You are offline.", { status: 503, headers: { "Content-Type": "text/plain" } })
+        ))
     );
     return;
   }
@@ -63,6 +67,9 @@ self.addEventListener("fetch", (event) => {
           }
           return response;
         })
-      .catch(() => caches.match(request))
+      .catch(async () => (
+        (await caches.match(request))
+        || new Response("Resource unavailable.", { status: 503, headers: { "Content-Type": "text/plain" } })
+      ))
   );
 });

@@ -2366,20 +2366,6 @@ function CustomerApp({ onLogout }) {
     }
   }
 
-  async function acceptWaitlistedBooking() {
-    setBusy(true);
-    setMessage("");
-    try {
-      const res = await api.tailorConfirmBooking(order.id);
-      setMessage(res.message || "Booking confirmed.");
-      await reload();
-    } catch (err) {
-      setMessage(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   useAutoRefresh(() => load(geo, radiusKm, true));
 
   useEffect(() => {
@@ -5637,6 +5623,20 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
   const stageOptions = bookingTrackerStages.filter((value) => value !== "Delivered");
   const statusValue = String(order.status || "").toLowerCase();
   const canMarkMeasurementDone = ["auto_approved", "measurement_pending", "tailor_confirmed"].includes(statusValue);
+
+  async function acceptWaitlistedBooking() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const res = await api.tailorConfirmBooking(order.id);
+      setMessage(res.message || "Booking confirmed.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function update() {
     if (completed) return;
