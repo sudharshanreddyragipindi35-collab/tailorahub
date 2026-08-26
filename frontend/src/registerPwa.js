@@ -5,6 +5,12 @@ export function registerPwa() {
   if (!("serviceWorker" in navigator)) return;
   if (!window.isSecureContext) return;
 
+  if (window.__TAILORAHUB_SINGLE_FILE__) {
+    navigator.serviceWorker.getRegistrations().then((registrations) => Promise.all(registrations.map((registration) => registration.unregister())));
+    if ("caches" in window) caches.keys().then((keys) => Promise.all(keys.map((key) => caches.delete(key))));
+    return;
+  }
+
   window.addEventListener("load", () => {
     navigator.serviceWorker
       .register(SW_URL)
