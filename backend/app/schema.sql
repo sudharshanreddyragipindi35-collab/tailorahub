@@ -320,6 +320,8 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_deadline TIMESTAMPTZ;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS measurement_cutoff TIMESTAMPTZ;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS measurement_appointment_at TIMESTAMPTZ;
 ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_request_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_orders_customer_client_request ON orders(customer_id, client_request_id) WHERE client_request_id IS NOT NULL;
 UPDATE orders SET base_amount=COALESCE(base_amount, base_price), final_amount=COALESCE(final_amount, total), total_garment_quantity=GREATEST(COALESCE(total_garment_quantity, quantity, 1), 1);
 CREATE INDEX IF NOT EXISTS orders_request_group_idx ON orders(request_group_id, status, ts);
 CREATE INDEX IF NOT EXISTS orders_expiry_idx ON orders(expires_at) WHERE status='PENDING_APPROVAL';

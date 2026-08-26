@@ -6120,3 +6120,41 @@ button:hover:not(:disabled),
 }
 .update-action.unread { border-left: 3px solid var(--gold, #d4af37); }
 .update-action.read { opacity: .78; }
+
+.booking-preview {
+  display: grid;
+  gap: 18px;
+}
+
+.booking-preview .two-col {
+  align-items: stretch;
+}
+
+.booking-preview .record-card p {
+  margin: 7px 0;
+}
+
+.booking-preview-total {
+  border-color: rgba(212, 175, 55, 0.55);
+}
+
+.booking-preview-total > p,
+.booking-preview-total > h2 {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.booking-confirmation {
+  display: flex;
+  min-height: 420px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.booking-confirmation > svg {
+  color: var(--gold, #d4af37);
+}

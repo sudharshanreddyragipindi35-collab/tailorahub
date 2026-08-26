@@ -71,6 +71,7 @@ class BookingCreateIn(BaseModel):
     customer_location_address: str | None = Field(default=None, alias="customerLocationAddress")
     customer_location_lat: float | None = Field(default=None, alias="customerLocationLat", ge=-90, le=90)
     customer_location_lng: float | None = Field(default=None, alias="customerLocationLng", ge=-180, le=180)
+    idempotency_key: str | None = Field(default=None, alias="idempotencyKey", min_length=8, max_length=100)
 
 
 class StageUpdateIn(BaseModel):
@@ -1149,6 +1150,92 @@ async def booking_slot_availability(
     return {"tailorId": tailor["id"], "slotDate": slotDate, "timezone": "Asia/Kolkata", "slots": slots}
 
 
+@router.post("/preview")
+async def preview_booking(
+    body: BookingCreateIn,
+    customer: dict = Depends(get_current_customer),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Validate a booking and return an authoritative, non-mutating summary."""
+    measurement_mode = normalize_measurement_mode(body.measurement_mode)
+    if measurement_mode == "tailor_visits_customer" and (
+        not body.customer_location_address
+        or body.customer_location_lat is None
+        or body.customer_location_lng is None
+    ):
+        raise HTTPException(400, "Confirm your home location before booking")
+
+    tailor = await fetch_one(db, """
+        SELECT t.*, u.email AS tailor_email
+        FROM tailors t JOIN users u ON u.id=t.user_id
+        WHERE (t.id=:tailor_id OR t.tailor_id::text=:tailor_id)
+          AND t.deleted_at IS NULL AND t.account_status='ACTIVE'
+          AND t.status='active' AND t.approval_status='APPROVED' AND t.aadhaar_verified=TRUE
+        LIMIT 1
+    """, {"tailor_id": body.tailor_id})
+    if not tailor:
+        raise HTTPException(404, "Tailor is not available for booking")
+
+    service = await fetch_one(db, """
+        SELECT * FROM tailor_services
+        WHERE tailor_id=:tailor_pk AND (id=:service_id OR service_id::text=:service_id)
+          AND COALESCE(is_active, active)=TRUE LIMIT 1
+    """, {"tailor_pk": tailor["id"], "service_id": body.service_id})
+    if not service:
+        raise HTTPException(404, "Selected service is not available")
+
+    expected, appointment_date = resolve_booking_dates(body.preferred_date, body.appointment_date, service.get("days"))
+    appointment_slot = validate_appointment_slot(appointment_date, body.appointment_slot)
+    try:
+        calculation = calculate_booking(
+            unit_price=service["price"], service_quantity=body.quantity or 1,
+            is_combo=bool(service.get("is_combo")), combo_items=service.get("combo_items"),
+            urgent_days=body.urgent_days, delivery_date=expected,
+            appointment_date=appointment_date, appointment_slot=appointment_slot,
+        )
+    except BookingRuleError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    slot = await fetch_one(db, """SELECT enabled,capacity,booked_count FROM tailor_slot_capacities
+        WHERE tailor_id=:tailor_id AND slot_date=:slot_date AND slot_value=:slot_value""",
+        {"tailor_id": tailor["id"], "slot_date": appointment_date, "slot_value": appointment_slot})
+    if slot and not slot.get("enabled"):
+        raise HTTPException(409, "The selected measurement slot is unavailable.")
+    approval_mode = str(tailor.get("approval_mode") or "AUTOMATIC").upper()
+    available = bool(tailor.get("is_available")) and tailor.get("availability") not in {"BUSY", "NOT_AVAILABLE"}
+    slot_available = available and (not slot or int(slot.get("booked_count") or 0) < int(slot.get("capacity") or 0))
+    if approval_mode == "MANUAL":
+        conflict = await fetch_one(db, """SELECT id FROM orders WHERE tailor_id=:tailor_id
+            AND appointment_date=:slot_date AND appointment_slot=:slot_value
+            AND upper(status) IN ('AUTO_APPROVED','CONFIRMED','ASSIGNED','MEASUREMENT_PENDING','MEASUREMENT_DONE','IN_PROGRESS') LIMIT 1""",
+            {"tailor_id": tailor["id"], "slot_date": appointment_date, "slot_value": appointment_slot})
+        if conflict:
+            raise HTTPException(409, "The selected measurement slot is already assigned.")
+        slot_available = True
+
+    address = body.customer_location_address if measurement_mode == "tailor_visits_customer" else tailor.get("shop_address")
+    return {
+        "valid": True,
+        "tailor": {"id": tailor["id"], "shop": tailor.get("shop"), "ownerName": tailor.get("owner_name"), "phone": tailor.get("phone"), "address": tailor.get("shop_address")},
+        "service": {"id": service["id"], "name": service.get("service_name") or service.get("name"), "unitPrice": str(calculation.unit_price), "isCombo": bool(service.get("is_combo")), "comboItems": service.get("combo_items") or []},
+        "customer": {"id": customer.get("id"), "name": customer.get("name") or customer.get("full_name"), "email": customer.get("email"), "phone": customer.get("phone")},
+        "quantity": body.quantity or 1,
+        "requirements": body.requirements,
+        "instructions": body.instructions,
+        "measurementMode": measurement_mode,
+        "appointmentDate": appointment_date,
+        "appointmentSlot": appointment_slot,
+        "expectedDeliveryDate": expected,
+        "address": address,
+        "location": {"latitude": body.customer_location_lat, "longitude": body.customer_location_lng} if measurement_mode == "tailor_visits_customer" else None,
+        "urgentDays": calculation.urgent_days,
+        "price": {"baseAmount": str(calculation.base_amount), "urgentCharge": str(calculation.urgent_charge), "totalGarments": calculation.total_garment_quantity, "finalAmount": str(calculation.final_amount)},
+        "slotAvailable": slot_available,
+        "expectedStatus": "PENDING_APPROVAL" if approval_mode == "MANUAL" else "AUTO_APPROVED" if slot_available else "WAITLISTED",
+        "validatedAt": datetime.now(APP_TIMEZONE).isoformat(),
+    }
+
+
 @router.post("")
 async def create_booking(
     body: BookingCreateIn,
@@ -1156,6 +1243,12 @@ async def create_booking(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     await ensure_measurement_visit_schema(db)
+    if body.idempotency_key:
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"{customer['id']}:{body.idempotency_key}"})
+        existing = await fetch_one(db, "SELECT id,code,status FROM orders WHERE customer_id=:customer_id AND client_request_id=:key LIMIT 1", {"customer_id": customer["id"], "key": body.idempotency_key})
+        if existing:
+            detail = await fetch_booking_detail(db, existing["id"])
+            return {"booking": public_booking(detail, {"id": customer["id"], "roles": ["customer"]}), "code": existing["code"], "status": existing["status"], "message": f"Booking {existing['code']} was already submitted.", "duplicate": True}
     measurement_mode = normalize_measurement_mode(body.measurement_mode)
     if measurement_mode == "tailor_visits_customer":
         if not body.customer_location_address or body.customer_location_lat is None or body.customer_location_lng is None:
@@ -1287,13 +1380,13 @@ async def create_booking(
                base_price,total,base_amount,urgent_days,urgent_charge,final_amount,total_garment_quantity,price_snapshot,
                delivery_deadline,measurement_cutoff,measurement_appointment_at,assigned_at,
                measurement_mode,appointment_date,appointment_slot,address,expected_completion,notes,
-               customer_location_address,customer_location_lat,customer_location_lng,customer_location_confirmed_at,tracker_stage)
+               customer_location_address,customer_location_lat,customer_location_lng,customer_location_confirmed_at,tracker_stage,client_request_id)
             VALUES
               (:id,:code,:customer_id,:tailor_id,:service_id,:service_name,:garment_id,:quantity,:status,:status_reason,:request_group_id,:expires_at,
                :base_price,:total,:base_amount,:urgent_days,:urgent_charge,:final_amount,:total_garment_quantity,CAST(:price_snapshot AS jsonb),
                :delivery_deadline,:measurement_cutoff,:measurement_appointment_at,:assigned_at,
                :measurement_mode,:appointment_date,:appointment_slot,:address,:expected_completion,:notes,
-               :customer_location_address,:customer_location_lat,:customer_location_lng,:customer_location_confirmed_at,'Order Placed')
+               :customer_location_address,:customer_location_lat,:customer_location_lng,:customer_location_confirmed_at,'Order Placed',:client_request_id)
             RETURNING *
             """
         ),
@@ -1339,6 +1432,7 @@ async def create_booking(
             "customer_location_lat": body.customer_location_lat if measurement_mode == "tailor_visits_customer" else None,
             "customer_location_lng": body.customer_location_lng if measurement_mode == "tailor_visits_customer" else None,
             "customer_location_confirmed_at": None,
+            "client_request_id": body.idempotency_key,
         },
     )
     order = dict(result.mappings().first())

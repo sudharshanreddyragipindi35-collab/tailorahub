@@ -2819,6 +2819,10 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
   const serviceRows = useMemo(() => (services || []).map(normalizeService), [services]);
   const [serviceId, setServiceId] = useState("");
   const [form, setForm] = useState({ quantity: 1, requirements: "", preferredDate: "", urgentDays: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
+  const [previewData, setPreviewData] = useState(null);
+  const [confirmation, setConfirmation] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [bookingStep, setBookingStep] = useState(() => new URLSearchParams(window.location.search).get("bookingStep") || "details");
   const [showHomeMap, setShowHomeMap] = useState(false);
   const [message, setMessage] = useState("");
   const [clockMinute, setClockMinute] = useState(() => Math.floor(Date.now() / 60000));
@@ -2874,8 +2878,36 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
     }
   }, [availableAppointmentSlots, form.appointmentSlot]);
 
+  const draftKey = `tailorahub:booking-draft:${tailor.id}`;
+  const confirmationKey = `tailorahub:booking-confirmation:${tailor.id}`;
+  function changeBookingStep(step) {
+    const url = new URL(window.location.href);
+    if (step === "details") url.searchParams.delete("bookingStep");
+    else url.searchParams.set("bookingStep", step);
+    window.history.pushState(currentHistoryState(), "", `${url.pathname}${url.search}${url.hash}`);
+    setBookingStep(step);
+  }
+
   useEffect(() => {
-    setServiceId("");
+    const restoreStep = () => setBookingStep(new URLSearchParams(window.location.search).get("bookingStep") || "details");
+    window.addEventListener("popstate", restoreStep);
+    return () => window.removeEventListener("popstate", restoreStep);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(draftKey) || "null");
+      if (saved?.tailorId === tailor.id) {
+        setServiceId(saved.serviceId || "");
+        setForm((old) => ({ ...old, ...(saved.form || {}) }));
+      } else {
+        setServiceId("");
+      }
+      setConfirmation(JSON.parse(sessionStorage.getItem(confirmationKey) || "null"));
+    } catch {
+      sessionStorage.removeItem(draftKey);
+      sessionStorage.removeItem(confirmationKey);
+    }
   }, [tailor.id]);
 
   function update(key, value) {
@@ -2903,7 +2935,28 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
     }));
   }
 
-  async function submit(event) {
+  function bookingPayload(idempotencyKey) {
+    const service = selectedService || serviceRows.find((s) => s.id === serviceId);
+    return {
+      tailorId: tailor.tailorId || tailor.id,
+      serviceId,
+      serviceName: service?.name,
+      quantity: Number(form.quantity || 1),
+      requirements: form.requirements,
+      preferredDate: form.preferredDate || null,
+      instructions: form.instructions,
+      measurementMode: form.measurementMode,
+      appointmentDate: form.appointmentDate || null,
+      appointmentSlot: form.appointmentSlot,
+      urgentDays: form.urgentDays ? Number(form.urgentDays) : null,
+      customerLocationAddress: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.address_text : undefined,
+      customerLocationLat: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.latitude : undefined,
+      customerLocationLng: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.longitude : undefined,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    };
+  }
+
+  async function previewBooking(event) {
     event.preventDefault();
     setMessage("");
     const service = selectedService || serviceRows.find((s) => s.id === serviceId);
@@ -2941,33 +2994,69 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
       return;
     }
     try {
-      const res = await api.createBooking({
-        tailorId: tailor.tailorId || tailor.id,
-        serviceId,
-        serviceName: service?.name,
-        quantity: Number(form.quantity || 1),
-        requirements: form.requirements,
-        preferredDate: form.preferredDate || null,
-        instructions: form.instructions,
-        measurementMode: form.measurementMode,
-        appointmentDate: form.appointmentDate || null,
-        appointmentSlot: form.appointmentSlot,
-        urgentDays: form.urgentDays ? Number(form.urgentDays) : null,
-        customerLocationAddress: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.address_text : undefined,
-        customerLocationLat: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.latitude : undefined,
-        customerLocationLng: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.longitude : undefined,
-      });
-      setMessage(res.message || `Booking ${res.code} created with ${tailor.shop}.`);
-      setForm({ quantity: 1, requirements: "", preferredDate: "", urgentDays: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
-      setShowHomeMap(false);
-      if (onBookingCreated) {
-        await onBookingCreated(res.booking || res);
-      } else {
-        await reload();
-      }
+      const existing = JSON.parse(sessionStorage.getItem(draftKey) || "null");
+      const idempotencyKey = existing?.idempotencyKey || crypto.randomUUID();
+      const draft = { tailorId: tailor.id, serviceId, form, idempotencyKey };
+      const result = await api.previewBooking(bookingPayload());
+      sessionStorage.setItem(draftKey, JSON.stringify(draft));
+      setPreviewData(result);
+      changeBookingStep("preview");
     } catch (err) {
       setMessage(err.message);
     }
+  }
+
+  async function submitBooking() {
+    if (submitting) return;
+    setSubmitting(true);
+    setMessage("");
+    try {
+      const draft = JSON.parse(sessionStorage.getItem(draftKey) || "null");
+      if (!draft?.idempotencyKey) throw new Error("Booking draft expired. Return to Edit and preview again.");
+      await api.previewBooking(bookingPayload());
+      const res = await api.createBooking(bookingPayload(draft.idempotencyKey));
+      const savedConfirmation = { ...res, tailorShop: tailor.shop };
+      sessionStorage.setItem(confirmationKey, JSON.stringify(savedConfirmation));
+      sessionStorage.removeItem(draftKey);
+      setConfirmation(savedConfirmation);
+      changeBookingStep("confirmation");
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  useEffect(() => {
+    if (bookingStep !== "preview" || previewData) return;
+    let cancelled = false;
+    api.previewBooking(bookingPayload()).then((result) => {
+      if (!cancelled) {
+        setMessage("");
+        setPreviewData(result);
+      }
+    }).catch((err) => {
+      if (!cancelled) setMessage(err.message);
+    });
+    return () => { cancelled = true; };
+  }, [bookingStep, serviceId]);
+
+  async function finishConfirmation() {
+    sessionStorage.removeItem(confirmationKey);
+    setConfirmation(null);
+    setPreviewData(null);
+    setForm({ quantity: 1, requirements: "", preferredDate: "", urgentDays: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
+    setShowHomeMap(false);
+    changeBookingStep("details");
+    if (onBookingCreated) await onBookingCreated(confirmation?.booking || confirmation);
+    else await reload();
+  }
+
+  if (bookingStep === "confirmation" && confirmation) {
+    return <BookingConfirmation confirmation={confirmation} onDone={finishConfirmation} />;
+  }
+  if (bookingStep === "preview") {
+    return <BookingPreview preview={previewData} message={message} submitting={submitting} onEdit={() => changeBookingStep("details")} onSubmit={submitBooking} />;
   }
 
   return (
@@ -3000,7 +3089,7 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
       <MediaGallery portfolio={tailor.portfolio} />
       <h3>Send Booking Request</h3>
       {disabled ? <div className="notice">Currently Not Accepting New Orders</div> : (
-        <form className="stack-form" onSubmit={submit}>
+        <form className="stack-form" onSubmit={previewBooking}>
           <label className="span-2">
             Service
             <select value={serviceId} onChange={(e) => setServiceId(e.target.value)} required>
@@ -3095,7 +3184,7 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
             </select>
           </label>
           <label>Special instructions<textarea value={form.instructions} onChange={(e) => update("instructions", e.target.value)} /></label>
-          <button className="primary-btn">Send Request</button>
+          <button className="primary-btn">Preview Booking</button>
         </form>
       )}
       {message ? <div className={message.includes("waiting list") ? "notice waiting-notice" : message.includes("Booking") || message.includes("approved") ? "notice ok" : "error"}>{message.includes("waiting list") ? <><span className="live-dot" /> {message}</> : message}</div> : null}
@@ -3501,6 +3590,45 @@ async function openRazorpayCheckout(options) {
     });
     checkout.open();
   });
+}
+
+function BookingPreview({ preview, message, submitting, onEdit, onSubmit }) {
+  if (!preview) {
+    return <section className="section-block booking-preview"><h2>Booking Preview</h2>{message ? <div className="error">{message}</div> : <div className="loading">Validating booking details...</div>}<button type="button" className="secondary-btn" onClick={onEdit}>Edit</button></section>;
+  }
+  const slotLabel = APPOINTMENT_TIME_SLOTS.find((slot) => slot.value === preview.appointmentSlot)?.label || preview.appointmentSlot;
+  const modeLabel = preview.measurementMode === "tailor_visits_customer" ? "Tailor visits customer" : "Customer visits tailor";
+  return (
+    <section className="section-block booking-preview">
+      <div className="section-head"><div><small>Review all information before final submission</small><h2>Booking Preview</h2></div><StatusPill value={preview.expectedStatus} /></div>
+      <div className="record-card"><h3>Tailor</h3><strong>{preview.tailor?.shop || "-"}</strong><p>{preview.tailor?.ownerName || ""}</p><small>{preview.tailor?.address || ""}</small></div>
+      <div className="two-col">
+        <div className="record-card"><h3>Service details</h3><p><strong>{preview.service?.name}</strong></p><p>Quantity: {preview.quantity}</p><p>Total garments: {preview.price?.totalGarments}</p><p>Expected delivery: {fmtDay(preview.expectedDeliveryDate)}</p>{preview.urgentDays ? <p>Completion speed: Within {preview.urgentDays} day{preview.urgentDays > 1 ? "s" : ""}</p> : <p>Completion speed: Regular</p>}</div>
+        <div className="record-card"><h3>Measurement appointment</h3><p>{fmtDay(preview.appointmentDate)}</p><p>{slotLabel}</p><p>{modeLabel}</p><small>{preview.address || ""}</small></div>
+        <div className="record-card"><h3>Customer details</h3><p>{preview.customer?.name || "-"}</p><p>{preview.customer?.phone || ""}</p><p>{preview.customer?.email || ""}</p></div>
+        <div className="record-card"><h3>Requirements and instructions</h3><p>{preview.requirements || "No stitching requirements provided."}</p><p>{preview.instructions || "No special instructions provided."}</p></div>
+      </div>
+      <div className="record-card booking-preview-total"><h3>Price confirmation</h3><p>Service amount <strong>{money(preview.price?.baseAmount)}</strong></p><p>Urgent charge <strong>{money(preview.price?.urgentCharge)}</strong></p><h2>Total <strong>{money(preview.price?.finalAmount)}</strong></h2><small>Price and slot were validated by TailoraHub at {fmtDate(preview.validatedAt)} and will be checked again on submission.</small></div>
+      {!preview.slotAvailable && preview.expectedStatus === "WAITLISTED" ? <div className="notice waiting-notice">The selected slot is full. Submitting will place this booking on the waiting list.</div> : null}
+      {message ? <div className="error">{message}</div> : null}
+      <div className="inline-actions"><button type="button" className="secondary-btn" onClick={onEdit} disabled={submitting}>Edit</button><button type="button" className="primary-btn" onClick={onSubmit} disabled={submitting}>{submitting ? "Submitting..." : "Submit Booking"}</button></div>
+    </section>
+  );
+}
+
+function BookingConfirmation({ confirmation, onDone }) {
+  const booking = confirmation.booking || {};
+  return (
+    <section className="section-block booking-confirmation">
+      <CheckCircle2 size={52} />
+      <small>Booking submitted successfully</small>
+      <h2>{confirmation.code || booking.code}</h2>
+      <p>Your booking with {confirmation.tailorShop || "the selected tailor"} has been created.</p>
+      <StatusPill value={confirmation.status || booking.status} />
+      {confirmation.duplicate ? <div className="notice">This booking was already submitted earlier; no duplicate was created.</div> : null}
+      <button type="button" className="primary-btn" onClick={onDone}>Return to Tailor Profile</button>
+    </section>
+  );
 }
 
 function PasswordInput({ ariaLabel = "Password", ...props }) {

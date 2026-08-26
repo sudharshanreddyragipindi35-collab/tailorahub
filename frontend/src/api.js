@@ -352,6 +352,7 @@ export const api = {
   followTailor: (id) => request(`/customer/tailors/${id}/follow`, { method: "POST" }),
   unfollowTailor: (id) => request(`/customer/tailors/${id}/follow`, { method: "DELETE" }),
   createBooking: (payload) => request("/v1/bookings", { method: "POST", body: JSON.stringify(payload) }),
+  previewBooking: (payload) => request("/v1/bookings/preview", { method: "POST", body: JSON.stringify(payload) }),
   bookingAvailability: (tailorId, slotDate) => request(`/v1/bookings/availability?tailorId=${encodeURIComponent(tailorId)}&slotDate=${encodeURIComponent(slotDate)}`),
   createLegacyBooking: (payload) => request("/customer/booking-requests", { method: "POST", body: JSON.stringify(payload) }),
   customerBookings: () => request("/customer/bookings"),
