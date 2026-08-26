@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import time
+import hashlib
+import hmac
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
-from app.api.v1 import otp as otp_module
+from app.api.v1 import bookings as bookings_module, otp as otp_module
 from app.main import app
 from app.settings import settings
 
@@ -36,7 +39,7 @@ def _delete_in(conn, table: str, column: str, values: list[str]) -> None:
 def _cleanup_flow_data(engine, phone: str, email: str, username: str) -> None:
     with engine.begin() as conn:
         user_rows = conn.execute(
-            text("SELECT id, customer_id::text AS customer_id FROM users WHERE phone=:phone OR lower(email)=:email"),
+            text("SELECT id, customer_id::text AS customer_id FROM users WHERE phone=:phone OR lower(email)=:email OR name IN ('Flow Smoke Customer','Flow Smoke Tailor')"),
             {"phone": phone, "email": email},
         ).mappings().all()
         user_ids = [row["id"] for row in user_rows]
@@ -49,6 +52,7 @@ def _cleanup_flow_data(engine, phone: str, email: str, username: str) -> None:
                 WHERE phone_number=:phone
                    OR lower(email)=:email
                    OR lower(username)=:username
+                   OR owner_name='Flow Smoke Tailor'
                    OR user_id IN (
                      SELECT id FROM users WHERE phone=:phone OR lower(email)=:email
                    )
@@ -145,6 +149,7 @@ def _cleanup_flow_data(engine, phone: str, email: str, username: str) -> None:
         _delete_in(conn, "support_messages", "ticket_id", ticket_ids)
         _delete_in(conn, "support_tickets", "id", ticket_ids)
         _delete_in(conn, "orders", "id", order_ids)
+        _delete_in(conn, "booking_request_groups", "customer_id", user_ids)
         _delete_in(conn, "booking_requests", "id", booking_request_ids)
         _delete_in(conn, "booking_requirements", "id", requirement_ids)
 
@@ -175,6 +180,9 @@ def _cleanup_flow_data(engine, phone: str, email: str, username: str) -> None:
 def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(monkeypatch):
     engine = _engine_or_skip()
     monkeypatch.setattr(otp_module.secrets, "randbelow", lambda upper_bound: 123456)
+    gateway_secret = "integration-secret"
+    monkeypatch.setattr(bookings_module, "razorpay_credentials", lambda: ("rzp_test_integration", gateway_secret))
+    monkeypatch.setattr(bookings_module, "create_razorpay_order_sync", lambda key, secret, payload: {"id": "order_integration_123", "status": "created"})
     suffix = str(time.time_ns())[-9:]
     phone = "9" + suffix
     email = f"flow.{suffix}@example.com"
@@ -305,8 +313,9 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
                     "serviceId": service_id,
                     "quantity": 1,
                     "measurementMode": "customer_visits_tailor",
-                    "preferredDate": "2026-08-25",
-                    "appointmentDate": "2026-08-20",
+                        "preferredDate": (date.today() + timedelta(days=5)).isoformat(),
+                        "appointmentDate": (date.today() + timedelta(days=1)).isoformat(),
+                        "appointmentSlot": "08:00-10:00",
                 },
                 headers=customer_headers,
             )
@@ -320,7 +329,7 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
             gated_otp = client.post(f"/api/v1/bookings/{booking_id}/send-delivery-otp", headers=tailor_headers)
             assert gated_otp.status_code == 403
 
-            pay_request = client.post(f"/api/v1/bookings/{booking_id}/pay", json={"method": "manual_whatsapp"}, headers=customer_headers)
+            pay_request = client.post(f"/api/v1/bookings/{booking_id}/pay", json={"method": "razorpay"}, headers=customer_headers)
             assert pay_request.status_code == 200, pay_request.text
             payment_json = pay_request.json()
             assert payment_json["paymentIntent"]["status"] == "pending"
@@ -333,11 +342,13 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
             still_gated_otp = client.post(f"/api/v1/bookings/{booking_id}/send-delivery-otp", headers=tailor_headers)
             assert still_gated_otp.status_code == 403
 
-            verified_payment = client.post(
-                f"/api/v1/admin/payment-intents/{payment_json['paymentIntent']['id']}/verify",
-                json={"proofReference": "TEST-UPI-PAID"},
-                headers={"Authorization": f"Bearer {admin_token}"},
-            )
+            gateway_payment_id = "pay_integration_123"
+            signature = hmac.new(gateway_secret.encode(), f"order_integration_123|{gateway_payment_id}".encode(), hashlib.sha256).hexdigest()
+            verified_payment = client.post(f"/api/v1/bookings/{booking_id}/razorpay/verify", json={
+                "razorpay_order_id": "order_integration_123",
+                "razorpay_payment_id": gateway_payment_id,
+                "razorpay_signature": signature,
+            }, headers=customer_headers)
             assert verified_payment.status_code == 200, verified_payment.text
 
             wallet_after_payment = client.get("/api/v1/wallet/me", headers=tailor_headers)

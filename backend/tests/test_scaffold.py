@@ -1,5 +1,5 @@
 import inspect
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -137,36 +137,21 @@ def test_access_tokens_support_full_work_sessions():
     assert settings.jwt_secret != settings.jwt_refresh_secret
 
 
-def test_measurement_appointment_must_be_before_final_two_day_window():
-    delivery_date = date(2026, 8, 15)
+def test_booking_dates_no_longer_apply_old_fixed_three_day_rule():
+    delivery_date = date.today() + timedelta(days=2)
+    appointment_date = date.today() + timedelta(days=1)
 
-    assert latest_measurement_appointment_date(delivery_date) == date(2026, 8, 12)
-    assert latest_measurement_appointment_date(date(2026, 8, 2)) == date(2026, 7, 30)
-    assert resolve_booking_dates(delivery_date, date(2026, 8, 12), 5) == (
-        delivery_date,
-        date(2026, 8, 12),
-    )
-    assert resolve_booking_dates(delivery_date, date(2026, 8, 1), 5) == (
-        delivery_date,
-        date(2026, 8, 1),
-    )
+    assert resolve_booking_dates(delivery_date, appointment_date, 5) == (delivery_date, appointment_date)
 
 
-def test_measurement_appointment_rejects_missing_same_day_after_or_blocked_window():
+def test_measurement_appointment_rejects_missing_or_past_dates():
+    delivery_date = date.today() + timedelta(days=5)
     with pytest.raises(HTTPException) as missing_exc:
-        resolve_booking_dates(date(2026, 8, 15), None, 5)
+        resolve_booking_dates(delivery_date, None, 5)
 
     assert missing_exc.value.status_code == 400
     assert missing_exc.value.detail == MEASUREMENT_APPOINTMENT_REQUIRED_ERROR
 
-    for appointment_date in [
-        date(2026, 8, 13),
-        date(2026, 8, 14),
-        date(2026, 8, 15),
-        date(2026, 8, 16),
-    ]:
-        with pytest.raises(HTTPException) as exc_info:
-            resolve_booking_dates(date(2026, 8, 15), appointment_date, 5)
-
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.detail == MEASUREMENT_APPOINTMENT_ERROR
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_booking_dates(delivery_date, date.today() - timedelta(days=1), 5)
+    assert exc_info.value.status_code == 400

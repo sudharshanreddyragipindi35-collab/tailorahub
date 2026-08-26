@@ -6,8 +6,8 @@ from alembic import op
 from app.utils.sql_script import execute_postgresql_script
 
 
-revision = "20260809_0001"
-down_revision = None
+revision = "20260826_0003"
+down_revision = "20260809_0002"
 branch_labels = None
 depends_on = None
 
@@ -18,6 +18,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # This first migration is intentionally additive for an existing app.
-    # Do not drop production tables automatically.
+    # This migration is additive and preserves production booking data.
     pass

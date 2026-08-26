@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from alembic import op
+from app.utils.sql_script import execute_postgresql_script
 
 
 revision = "20260809_0002"
@@ -18,7 +19,7 @@ def upgrade() -> None:
     # appended after revision 0001 without disturbing anything already
     # applied. Same approach as 0001.
     schema_path = Path(__file__).resolve().parents[2] / "app" / "schema.sql"
-    op.execute(schema_path.read_text(encoding="utf-8"))
+    execute_postgresql_script(op, schema_path.read_text(encoding="utf-8"))
 
 
 def downgrade() -> None:

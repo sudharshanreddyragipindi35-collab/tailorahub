@@ -1,7 +1,7 @@
 const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:9000/api").replace(/\/+$/, "");
 const API_ORIGIN = API_BASE.replace(/\/api$/, "");
 const SESSION_STORAGE_VERSION = "2026-08-12-session-referral-v2";
-export const SESSION_TIMEOUT_MS = 5 * 60 * 1000;
+export const SESSION_TIMEOUT_MS = 0;
 const LAST_ACTIVE_KEY = "tl_last_active_at";
 const AUTH_STORAGE_KEYS = ["tl_token", "tl_admin_token", "tl_role", "tl_refresh_token", LAST_ACTIVE_KEY];
 
@@ -71,16 +71,19 @@ export function getSessionLastActive() {
 
 export function isSessionExpired(now = Date.now()) {
   if (!token) return false;
-  const lastActive = getSessionLastActive();
-  if (!lastActive) {
-    return true;
+  try {
+    const encoded = token.split(".")[1];
+    if (!encoded) return false;
+    const payload = JSON.parse(atob(encoded.replace(/-/g, "+").replace(/_/g, "/")));
+    return Number(payload.exp || 0) > 0 && now >= Number(payload.exp) * 1000;
+  } catch {
+    return false;
   }
-  return now - lastActive > SESSION_TIMEOUT_MS;
 }
 
 export function hasValidStoredSession() {
   if (!token || !role) return false;
-  if (isSessionExpired()) {
+  if (isSessionExpired() && !refreshToken) {
     clearSession();
     return false;
   }
@@ -182,7 +185,7 @@ function formatRequestError(path, status, data) {
 
 async function request(path, options = {}, retried = false) {
   if (!path.includes("/auth/refresh")) {
-    if (isSessionExpired()) {
+    if (isSessionExpired() && !refreshToken) {
       clearSession();
       throw new Error("Session expired. Please log in again.");
     }
@@ -204,12 +207,18 @@ async function request(path, options = {}, retried = false) {
   }
   if (res.status === 401 && token) clearSession();
   if (!res.ok) throw new Error(formatRequestError(path, res.status, data));
+  const method = String(options.method || "GET").toUpperCase();
+  const isMutation = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+  const isBackgroundMutation = /\/auth\/|\/otp\/|check-availability|notifications\/read|\/refresh$|measurement-trip\/location/.test(path);
+  if (isMutation && !isBackgroundMutation) {
+    window.dispatchEvent(new CustomEvent("tailorahub:data-changed", { detail: { path, method } }));
+  }
   return data;
 }
 
 async function requestText(path, options = {}, retried = false) {
   if (!path.includes("/auth/refresh")) {
-    if (isSessionExpired()) {
+    if (isSessionExpired() && !refreshToken) {
       clearSession();
       throw new Error("Session expired. Please log in again.");
     }
@@ -343,9 +352,11 @@ export const api = {
   followTailor: (id) => request(`/customer/tailors/${id}/follow`, { method: "POST" }),
   unfollowTailor: (id) => request(`/customer/tailors/${id}/follow`, { method: "DELETE" }),
   createBooking: (payload) => request("/v1/bookings", { method: "POST", body: JSON.stringify(payload) }),
+  bookingAvailability: (tailorId, slotDate) => request(`/v1/bookings/availability?tailorId=${encodeURIComponent(tailorId)}&slotDate=${encodeURIComponent(slotDate)}`),
   createLegacyBooking: (payload) => request("/customer/booking-requests", { method: "POST", body: JSON.stringify(payload) }),
   customerBookings: () => request("/customer/bookings"),
   markCustomerNotificationsRead: () => request("/customer/notifications/read", { method: "POST" }),
+  markCustomerNotificationRead: (id) => request(`/customer/notifications/${encodeURIComponent(id)}/read`, { method: "POST" }),
   customerWallet: () => request("/v1/customers/me/wallet"),
   customerReferralCode: () => request("/v1/customers/me/referral-code"),
   customerReferralCount: () => request("/v1/customers/me/referral-count"),
@@ -373,6 +384,7 @@ export const api = {
   tailorDashboard: () => request("/tailor/dashboard"),
   tailorWaitingList: () => request("/v1/tailors/me/waiting-list"),
   tailorConfirmBooking: (id) => request(`/v1/bookings/${encodeURIComponent(id)}/tailor-confirm`, { method: "POST" }),
+  tailorRejectBooking: (id, reason) => request(`/v1/bookings/${encodeURIComponent(id)}/tailor-reject`, { method: "POST", body: JSON.stringify({ reason }) }),
   measurementDone: (id) => request(`/v1/bookings/${encodeURIComponent(id)}/measurement-done`, { method: "POST" }),
   updateBookingStage: (id, payload) => request(`/v1/bookings/${encodeURIComponent(id)}/stage`, { method: "PATCH", body: JSON.stringify(payload) }),
   tailorSupportTickets: () => request("/tailor/support/tickets"),
@@ -381,6 +393,8 @@ export const api = {
   replyTailorSupportTicket: (id, body) => request(`/tailor/support/tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ body }) }),
   closeTailorSupportTicket: (id) => request(`/tailor/support/tickets/${id}/close`, { method: "POST" }),
   updateAvailability: (payload) => request("/tailor/availability", { method: "PATCH", body: JSON.stringify(payload) }),
+  tailorSlotCapacities: (date) => request(`/tailor/slot-capacities?slot_date=${encodeURIComponent(date)}`),
+  saveTailorSlotCapacities: (payload) => request("/tailor/slot-capacities", { method: "PUT", body: JSON.stringify(payload) }),
   uploadTailorProfileImage: (payload) => request("/tailor/profile-image", { method: "POST", body: JSON.stringify(payload) }),
   deleteTailorProfileImage: () => request("/tailor/profile-image", { method: "DELETE" }),
   uploadTailorMedia: (payload) => request("/tailor/media", { method: "POST", body: JSON.stringify(payload) }),
@@ -388,6 +402,7 @@ export const api = {
   createTailorOffer: (payload) => request("/tailor/offers", { method: "POST", body: JSON.stringify(payload) }),
   deleteTailorOffer: (id) => request(`/tailor/offers/${id}`, { method: "DELETE" }),
   markTailorNotificationsRead: () => request("/tailor/notifications/read", { method: "POST" }),
+  markTailorNotificationRead: (id) => request(`/tailor/notifications/${encodeURIComponent(id)}/read`, { method: "POST" }),
   acceptRequest: (id) => request(`/tailor/requests/${id}/accept`, { method: "POST" }),
   rejectRequest: (id, reason) => request(`/tailor/requests/${id}/reject`, { method: "POST", body: JSON.stringify({ reason }) }),
   updateTailorOrder: (id, payload) => request(`/tailor/orders/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),

@@ -287,6 +287,72 @@ CREATE TABLE IF NOT EXISTS notifications (
   ts TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Build step 03: transactional booking workflow, deadlines, notification links,
+-- and temporary contact-sharing support. All changes are additive.
+ALTER TABLE tailors ADD COLUMN IF NOT EXISTS approval_mode TEXT NOT NULL DEFAULT 'AUTOMATIC';
+
+CREATE TABLE IF NOT EXISTS booking_request_groups (
+  id TEXT PRIMARY KEY,
+  customer_id TEXT NOT NULL REFERENCES users(id),
+  status TEXT NOT NULL DEFAULT 'UNASSIGNED',
+  assigned_tailor_id TEXT REFERENCES tailors(id),
+  assigned_order_id TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  assigned_at TIMESTAMPTZ,
+  closed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS booking_request_groups_customer_idx ON booking_request_groups(customer_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS booking_request_groups_one_assignment_idx
+  ON booking_request_groups(id) WHERE assigned_tailor_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS booking_request_groups_assigned_order_idx
+  ON booking_request_groups(assigned_order_id) WHERE assigned_order_id IS NOT NULL;
+
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS request_group_id TEXT REFERENCES booking_request_groups(id);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS status_reason TEXT;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS urgent_days INTEGER;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_garment_quantity INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS base_amount NUMERIC(12,2);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS urgent_charge NUMERIC(12,2) NOT NULL DEFAULT 0;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS final_amount NUMERIC(12,2);
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS price_snapshot JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_deadline TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS measurement_cutoff TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS measurement_appointment_at TIMESTAMPTZ;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
+UPDATE orders SET base_amount=COALESCE(base_amount, base_price), final_amount=COALESCE(final_amount, total), total_garment_quantity=GREATEST(COALESCE(total_garment_quantity, quantity, 1), 1);
+CREATE INDEX IF NOT EXISTS orders_request_group_idx ON orders(request_group_id, status, ts);
+CREATE INDEX IF NOT EXISTS orders_expiry_idx ON orders(expires_at) WHERE status='PENDING_APPROVAL';
+CREATE INDEX IF NOT EXISTS orders_slot_idx ON orders(tailor_id, appointment_date, appointment_slot, status);
+
+CREATE TABLE IF NOT EXISTS tailor_slot_capacities (
+  id BIGSERIAL PRIMARY KEY,
+  tailor_id TEXT NOT NULL REFERENCES tailors(id) ON DELETE CASCADE,
+  slot_date DATE NOT NULL,
+  slot_value TEXT NOT NULL,
+  enabled BOOLEAN NOT NULL DEFAULT TRUE,
+  capacity INTEGER NOT NULL DEFAULT 1 CHECK (capacity >= 0),
+  booked_count INTEGER NOT NULL DEFAULT 0 CHECK (booked_count >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (tailor_id, slot_date, slot_value),
+  CHECK (slot_value IN ('08:00-10:00','10:00-12:00','12:00-14:00','14:00-16:00','16:00-18:00','18:00-20:00','20:00-22:00'))
+);
+CREATE INDEX IF NOT EXISTS tailor_slot_capacity_lookup_idx ON tailor_slot_capacities(tailor_id, slot_date, enabled);
+
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS recipient_user_id TEXT REFERENCES users(id);
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS notification_type TEXT;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS entity_type TEXT;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS entity_id TEXT;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS request_group_id TEXT REFERENCES booking_request_groups(id);
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS booking_request_id TEXT;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS measurement_id TEXT;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS payment_id TEXT;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS read_at TIMESTAMPTZ;
+ALTER TABLE notifications ADD COLUMN IF NOT EXISTS dedupe_key TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS notifications_dedupe_idx ON notifications(to_ref, dedupe_key) WHERE dedupe_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS notifications_recipient_idx ON notifications(to_ref, read, ts DESC);
+
 CREATE TABLE IF NOT EXISTS audit_logs (
   id BIGSERIAL PRIMARY KEY,
   admin_id TEXT REFERENCES users(id),

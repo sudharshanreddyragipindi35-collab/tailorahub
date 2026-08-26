@@ -4849,6 +4849,71 @@ textarea::placeholder {
   opacity: 1;
 }
 
+input[type="tel"],
+input[inputmode="numeric"] {
+  background: var(--luxury-field) !important;
+  color: var(--luxury-copy) !important;
+  -webkit-text-fill-color: var(--luxury-copy);
+}
+
+:root[data-theme="light"] input[type="tel"],
+:root[data-theme="light"] input[inputmode="numeric"] {
+  background: #ffffff !important;
+  color: #171717 !important;
+  -webkit-text-fill-color: #171717;
+}
+
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: var(--luxury-copy) !important;
+  box-shadow: 0 0 0 1000px var(--luxury-field) inset !important;
+  caret-color: var(--luxury-copy);
+  transition: background-color 9999s ease-out 0s;
+}
+
+:root[data-theme="light"] input:-webkit-autofill,
+:root[data-theme="light"] input:-webkit-autofill:hover,
+:root[data-theme="light"] input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #171717 !important;
+  box-shadow: 0 0 0 1000px #ffffff inset !important;
+  caret-color: #171717;
+}
+
+.password-input-wrap {
+  position: relative;
+  display: grid;
+}
+
+.password-input-wrap input {
+  width: 100%;
+  padding-right: 48px;
+}
+
+.password-visibility-btn {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  width: 36px;
+  min-height: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--luxury-copy-muted);
+  box-shadow: none;
+}
+
+.password-visibility-btn:hover,
+.password-visibility-btn:focus-visible {
+  background: rgba(212, 175, 55, 0.12);
+  color: var(--gold-light);
+  box-shadow: none;
+}
+
 .offer-form,
 .quality-check-card,
 .stack-form,
@@ -6046,3 +6111,12 @@ button:hover:not(:disabled),
     max-width: none;
   }
 }
+.update-action {
+  width: 100%;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.update-action.unread { border-left: 3px solid var(--gold, #d4af37); }
+.update-action.read { opacity: .78; }

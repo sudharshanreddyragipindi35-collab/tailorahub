@@ -402,7 +402,8 @@ async def my_waiting_list(
               o.ts
             FROM orders o
             JOIN users u ON u.id=o.customer_id
-            WHERE o.tailor_id=:tailor_id AND o.status='waiting_list'
+            WHERE o.tailor_id=:tailor_id
+              AND upper(o.status) IN ('WAITING_LIST','WAITLISTED','PENDING_APPROVAL')
             ORDER BY o.ts ASC
             """
         ),

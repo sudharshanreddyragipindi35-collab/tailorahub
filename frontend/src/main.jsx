@@ -13,6 +13,8 @@ import CreditCard from "lucide-react/dist/esm/icons/credit-card.js";
 import FileClock from "lucide-react/dist/esm/icons/file-clock.js";
 import Globe2 from "lucide-react/dist/esm/icons/globe-2.js";
 import Heart from "lucide-react/dist/esm/icons/heart.js";
+import Eye from "lucide-react/dist/esm/icons/eye.js";
+import EyeOff from "lucide-react/dist/esm/icons/eye-off.js";
 import ImageIcon from "lucide-react/dist/esm/icons/image.js";
 import LayoutDashboard from "lucide-react/dist/esm/icons/layout-dashboard.js";
 import LogOut from "lucide-react/dist/esm/icons/log-out.js";
@@ -31,7 +33,7 @@ import UploadCloud from "lucide-react/dist/esm/icons/upload-cloud.js";
 import UsersRound from "lucide-react/dist/esm/icons/users-round.js";
 import Video from "lucide-react/dist/esm/icons/video.js";
 import XCircle from "lucide-react/dist/esm/icons/x-circle.js";
-import { api, assetUrl, clearSession, getRole, getToken, hasValidStoredSession, isSessionExpired, markSessionActive, setSession } from "./api";
+import { api, assetUrl, clearSession, getRefreshToken, getRole, getToken, hasValidStoredSession, isSessionExpired, markSessionActive, setSession } from "./api";
 import MapPicker from "./components/MapPicker";
 import { registerPwa } from "./registerPwa";
 import "./styles.css";
@@ -378,7 +380,6 @@ function money(value) {
 }
 
 const TRAVEL_CHARGE_PER_KM = 5;
-const BOOKING_TAX_ESTIMATE_PERCENTAGE = 20;
 
 function finiteNumber(value) {
   const next = Number(value);
@@ -400,16 +401,6 @@ function distanceKm(lat1, lng1, lat2, lng2) {
   return Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)) * 10) / 10;
 }
 
-function estimateTravelDistanceKm(tailor, location) {
-  const tailorLat = tailor?.lat ?? tailor?.latitude ?? tailor?.shopLat;
-  const tailorLng = tailor?.lng ?? tailor?.longitude ?? tailor?.shopLng;
-  const pickedLat = location?.latitude ?? location?.lat;
-  const pickedLng = location?.longitude ?? location?.lng;
-  const exactDistance = distanceKm(tailorLat, tailorLng, pickedLat, pickedLng);
-  if (exactDistance > 0) return exactDistance;
-  return finiteNumber(tailor?.distanceKm ?? tailor?.distance_km) || 0;
-}
-
 function fmtDate(value) {
   if (!value) return "-";
   return new Date(value).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" });
@@ -425,8 +416,23 @@ function unreadCount(rows = []) {
 }
 
 const APP_HISTORY_KEY = "tailorahub";
-const MEASUREMENT_APPOINTMENT_BLOCKED_WINDOW_DAYS = 2;
-const MEASUREMENT_APPOINTMENT_ERROR = "Measurement appointment must be scheduled at least 3 days before the delivery date.";
+const ROUTE_QUERY_KEYS = {
+  authStage: "auth",
+  customerPanel: "view",
+  customerTailorId: "tailorId",
+  tailorPanel: "view",
+  adminSection: "view",
+};
+const MEASUREMENT_APPOINTMENT_ERROR = "Measurement appointment must be on or before the delivery date.";
+const APPOINTMENT_TIME_SLOTS = [
+  { value: "08:00-10:00", label: "8:00 AM-10:00 AM", startMinutes: 480 },
+  { value: "10:00-12:00", label: "10:00 AM-12:00 PM", startMinutes: 600 },
+  { value: "12:00-14:00", label: "12:00 PM-2:00 PM", startMinutes: 720 },
+  { value: "14:00-16:00", label: "2:00 PM-4:00 PM", startMinutes: 840 },
+  { value: "16:00-18:00", label: "4:00 PM-6:00 PM", startMinutes: 960 },
+  { value: "18:00-20:00", label: "6:00 PM-8:00 PM", startMinutes: 1080 },
+  { value: "20:00-22:00", label: "8:00 PM-10:00 PM", startMinutes: 1200 },
+];
 
 function currentHistoryState() {
   const state = window.history.state;
@@ -434,8 +440,33 @@ function currentHistoryState() {
 }
 
 function readAppHistoryValue(scope, fallback) {
+  const queryKey = ROUTE_QUERY_KEYS[scope];
+  if (queryKey) {
+    const routeValue = new URLSearchParams(window.location.search).get(queryKey);
+    if (routeValue !== null) return routeValue;
+  }
   const appState = currentHistoryState()[APP_HISTORY_KEY];
-  return appState && Object.prototype.hasOwnProperty.call(appState, scope) ? appState[scope] : fallback;
+  if (appState && Object.prototype.hasOwnProperty.call(appState, scope)) return appState[scope];
+  try {
+    const stored = window.sessionStorage.getItem(`${APP_HISTORY_KEY}:view:${scope}`);
+    return stored === null ? fallback : JSON.parse(stored);
+  } catch {
+    return fallback;
+  }
+}
+
+function ExpiryCountdown({ expiresAt }) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!expiresAt) return undefined;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [expiresAt]);
+  if (!expiresAt) return null;
+  const remaining = Math.max(0, new Date(expiresAt).getTime() - now);
+  const minutes = Math.floor(remaining / 60000);
+  const seconds = Math.floor((remaining % 60000) / 1000);
+  return <small className={remaining ? "countdown" : "field-error"}>{remaining ? `Tailor response time: ${minutes}:${String(seconds).padStart(2, "0")}` : "Tailor response time expired"}</small>;
 }
 
 function writeAppHistoryValue(scope, value, replace = false) {
@@ -448,7 +479,18 @@ function writeAppHistoryValue(scope, value, replace = false) {
     },
   };
   const method = replace ? "replaceState" : "pushState";
-  window.history[method](next, "", window.location.href);
+  const url = new URL(window.location.href);
+  const queryKey = ROUTE_QUERY_KEYS[scope];
+  if (queryKey) {
+    if (value === "" || value === null || value === undefined) url.searchParams.delete(queryKey);
+    else url.searchParams.set(queryKey, String(value));
+  }
+  window.history[method](next, "", `${url.pathname}${url.search}${url.hash}`);
+  try {
+    window.sessionStorage.setItem(`${APP_HISTORY_KEY}:view:${scope}`, JSON.stringify(value));
+  } catch {
+    // History state still works when browser storage is unavailable.
+  }
 }
 
 function useAppHistoryState(scope, initialValue) {
@@ -468,6 +510,11 @@ function useAppHistoryState(scope, initialValue) {
       const next = appState && Object.prototype.hasOwnProperty.call(appState, scope) ? appState[scope] : initialValue;
       valueRef.current = next;
       setValue(next);
+      try {
+        window.sessionStorage.setItem(`${APP_HISTORY_KEY}:view:${scope}`, JSON.stringify(next));
+      } catch {
+        // Ignore unavailable browser storage.
+      }
     }
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -482,6 +529,36 @@ function useAppHistoryState(scope, initialValue) {
   }, [scope]);
 
   return [value, navigate];
+}
+
+function useAutoRefresh(refresh, intervalMs = 15000) {
+  const refreshRef = useRef(refresh);
+  const runningRef = useRef(false);
+  useEffect(() => { refreshRef.current = refresh; }, [refresh]);
+  useEffect(() => {
+    async function run() {
+      if (runningRef.current || document.visibilityState === "hidden") return;
+      runningRef.current = true;
+      try {
+        await refreshRef.current();
+      } finally {
+        runningRef.current = false;
+      }
+    }
+    function handleVisible() {
+      if (document.visibilityState === "visible") run();
+    }
+    const timer = window.setInterval(run, intervalMs);
+    window.addEventListener("focus", run);
+    window.addEventListener("tailorahub:data-changed", run);
+    document.addEventListener("visibilitychange", handleVisible);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", run);
+      window.removeEventListener("tailorahub:data-changed", run);
+      document.removeEventListener("visibilitychange", handleVisible);
+    };
+  }, [intervalMs]);
 }
 
 function normalizeReferralCode(value) {
@@ -524,7 +601,7 @@ function addDaysToDateInput(value, days) {
 }
 
 function measurementAppointmentLatestDate(deliveryDate) {
-  return addDaysToDateInput(deliveryDate, -(MEASUREMENT_APPOINTMENT_BLOCKED_WINDOW_DAYS + 1));
+  return deliveryDate || "";
 }
 
 function isMeasurementAppointmentAllowed(appointmentDate, deliveryDate) {
@@ -792,7 +869,7 @@ function App() {
     if (!signedIn) return undefined;
 
     function expireIfIdle() {
-      if (!isSessionExpired()) return false;
+      if (!isSessionExpired() || getRefreshToken()) return false;
       clearSession();
       setSignedIn(false);
       setRole("");
@@ -1673,7 +1750,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
         {tailorLoginMode === "password" ? (
           <>
             <Field label={t("common.password", "Password")}>
-              <input value={form.password} onChange={(e) => update("password", e.target.value)} type="password" autoComplete="current-password" />
+              <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="current-password" />
             </Field>
             <button type="button" className="text-link" onClick={openForgotPassword}>{t("auth.forgotPassword", "Forgot password?")}</button>
           </>
@@ -1733,7 +1810,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
         {tailorLoginMode === "password" ? (
           <>
             <Field label={t("common.password", "Password")}>
-              <input value={form.password} onChange={(e) => update("password", e.target.value)} type="password" autoComplete="current-password" />
+              <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="current-password" />
             </Field>
             <button type="button" className="text-link" onClick={openForgotPassword}>{t("auth.forgotPassword", "Forgot password?")}</button>
           </>
@@ -1782,10 +1859,10 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
               <input value={forgotFlow.otp} onChange={(e) => setForgotFlow((old) => ({ ...old, otp: cleanDigits(e.target.value) }))} inputMode="numeric" maxLength={6} />
             </Field>
             <Field label={t("auth.newPassword", "New password")} error={forgotFlow.newPassword ? resetPasswordError : ""}>
-              <input value={forgotFlow.newPassword} onChange={(e) => setForgotFlow((old) => ({ ...old, newPassword: e.target.value }))} type="password" autoComplete="new-password" />
+              <PasswordInput ariaLabel="New password" value={forgotFlow.newPassword} onChange={(e) => setForgotFlow((old) => ({ ...old, newPassword: e.target.value }))} autoComplete="new-password" />
             </Field>
             <Field label={t("auth.confirmNewPassword", "Confirm new password")} error={forgotFlow.confirmPassword && resetPasswordError ? resetPasswordError : ""}>
-              <input value={forgotFlow.confirmPassword} onChange={(e) => setForgotFlow((old) => ({ ...old, confirmPassword: e.target.value }))} type="password" autoComplete="new-password" />
+              <PasswordInput ariaLabel="Confirm new password" value={forgotFlow.confirmPassword} onChange={(e) => setForgotFlow((old) => ({ ...old, confirmPassword: e.target.value }))} autoComplete="new-password" />
             </Field>
             <div className="inline-actions">
               <button type="button" className="secondary-btn" onClick={sendForgotPasswordOtp} disabled={busy || forgotFlow.cooldown > 0}>
@@ -1812,7 +1889,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
             <input value={form.email} onChange={(e) => update("email", e.target.value)} onBlur={() => form.email && checkAvailability("email", form.email)} type="email" autoComplete="email" placeholder="Verify later, not required now" />
           </Field>
           <Field label={t("auth.mobileNumber", "Mobile number")} error={fieldErrors.phone} success={otpState.phoneVerified ? "Mobile number verified" : fieldSuccess.phone || (checking.phone ? "Checking..." : "")}>
-            <input value={form.phone} onChange={(e) => update("phone", e.target.value)} onBlur={() => checkAvailability("phone", form.phone)} inputMode="numeric" maxLength={10} autoComplete="tel" />
+            <input value={form.phone} onChange={(e) => update("phone", e.target.value)} onBlur={() => checkAvailability("phone", form.phone)} type="tel" inputMode="numeric" maxLength={10} autoComplete="tel" placeholder="Enter 10 digit mobile number" />
           </Field>
           <Field label={t("auth.sixDigitOtp", "6 digit OTP")} error={otpState.phoneSent && !otpState.phoneVerified && !otpState.phoneCode ? "Enter the OTP sent to mobile" : ""}>
             <input value={otpState.phoneCode} onChange={(e) => setOtpState((old) => ({ ...old, phoneCode: cleanDigits(e.target.value) }))} inputMode="numeric" maxLength={6} disabled={otpState.phoneVerified} />
@@ -1822,10 +1899,10 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
             <button type="button" className="ok-btn" onClick={() => verifyRegistrationOtp("phone")} disabled={busy || otpState.phoneVerified || !otpState.phoneSent}>Verify OTP</button>
           </div>
           <Field label={t("common.password", "Password")} error={fieldErrors.password}>
-            <input value={form.password} onChange={(e) => update("password", e.target.value)} type="password" autoComplete="new-password" />
+            <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="new-password" />
           </Field>
           <Field label={t("auth.confirmPassword", "Confirm password")} error={fieldErrors.confirmPassword}>
-            <input value={form.confirmPassword} onChange={(e) => update("confirmPassword", e.target.value)} type="password" autoComplete="new-password" />
+            <PasswordInput ariaLabel="Confirm password" value={form.confirmPassword} onChange={(e) => update("confirmPassword", e.target.value)} autoComplete="new-password" />
           </Field>
           <div className="span-2 strength-meter" data-score={customerStrength}>
             <span style={{ width: `${Math.max(customerStrength, 1) * 25}%` }} />
@@ -1870,7 +1947,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
       return (
         <div className="wizard-grid">
           <Field label="Mobile number" error={fieldErrors.phone} success={otpState.phoneVerified ? "Mobile number verified" : fieldSuccess.phone || (checking.phone ? "Checking..." : "")}>
-            <input value={form.phone} onChange={(e) => update("phone", e.target.value)} onBlur={() => checkAvailability("phone", form.phone)} inputMode="numeric" maxLength={10} />
+            <input value={form.phone} onChange={(e) => update("phone", e.target.value)} onBlur={() => checkAvailability("phone", form.phone)} type="tel" inputMode="numeric" maxLength={10} autoComplete="tel" placeholder="Enter 10 digit mobile number" />
           </Field>
           <Field label="6 digit OTP" error={otpState.phoneSent && !otpState.phoneVerified && !otpState.phoneCode ? "Enter the OTP sent to mobile" : ""}>
             <input value={otpState.phoneCode} onChange={(e) => setOtpState((old) => ({ ...old, phoneCode: cleanDigits(e.target.value) }))} inputMode="numeric" maxLength={6} disabled={otpState.phoneVerified} />
@@ -1929,10 +2006,10 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
           </Field>
           <Field label="Referral code (optional)"><input value={form.referralCode} onChange={(e) => update("referralCode", e.target.value.toUpperCase())} /></Field>
           <Field label="Password" error={fieldErrors.password}>
-            <input value={form.password} onChange={(e) => update("password", e.target.value)} type="password" />
+            <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="new-password" />
           </Field>
           <Field label="Confirm password" error={fieldErrors.confirmPassword}>
-            <input value={form.confirmPassword} onChange={(e) => update("confirmPassword", e.target.value)} type="password" />
+            <PasswordInput ariaLabel="Confirm password" value={form.confirmPassword} onChange={(e) => update("confirmPassword", e.target.value)} autoComplete="new-password" />
           </Field>
           <div className="span-2 strength-meter" data-score={strength}>
             <span style={{ width: `${Math.max(strength, 1) * 25}%` }} />
@@ -2064,7 +2141,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
                 <input value={form.identifier} onChange={(e) => update("identifier", e.target.value)} autoComplete="username" />
               </Field>
               <Field label={t("common.password", "Password")}>
-                <input value={form.password} onChange={(e) => update("password", e.target.value)} type="password" autoComplete="current-password" />
+                <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="current-password" />
               </Field>
               {selectedRole !== "admin" ? (
                 <div className="otp-box">
@@ -2202,13 +2279,14 @@ function CustomerApp({ onLogout }) {
   const [radiusKm, setRadiusKm] = useState(50);
   const [geo, setGeo] = useState({ latitude: null, longitude: null, status: "detecting", message: "Detecting your location..." });
   const [activePanel, setActivePanel] = useAppHistoryState("customerPanel", "browse");
+  const [selectedTailorId, setSelectedTailorId] = useAppHistoryState("customerTailorId", "");
   const [selected, setSelected] = useState(null);
   const [profile, setProfile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  async function load(nextGeo = geo, nextRadius = radiusKm) {
-    setLoading(true);
+  async function load(nextGeo = geo, nextRadius = radiusKm, silent = false) {
+    if (!silent) setLoading(true);
     setError("");
     try {
       const hasLocation = nextGeo.latitude !== null && nextGeo.longitude !== null;
@@ -2233,7 +2311,7 @@ function CustomerApp({ onLogout }) {
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
@@ -2271,6 +2349,7 @@ function CustomerApp({ onLogout }) {
   }, [radiusKm, geo.latitude, geo.longitude, geo.status]);
 
   async function openProfile(tailor) {
+    setSelectedTailorId(tailor.id);
     setSelected(tailor);
     setProfile(null);
     setActivePanel("profile");
@@ -2287,26 +2366,56 @@ function CustomerApp({ onLogout }) {
     }
   }
 
+  async function acceptWaitlistedBooking() {
+    setBusy(true);
+    setMessage("");
+    try {
+      const res = await api.tailorConfirmBooking(order.id);
+      setMessage(res.message || "Booking confirmed.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useAutoRefresh(() => load(geo, radiusKm, true));
+
+  useEffect(() => {
+    if (activePanel !== "profile" || !selectedTailorId || profile?.tailor?.id === selectedTailorId) return undefined;
+    let cancelled = false;
+    setProfile(null);
+    setError("");
+    Promise.all([
+      api.customerTailor(selectedTailorId),
+      api.publicTailorServices(selectedTailorId).catch(() => null),
+    ]).then(([detail, priceList]) => {
+      if (cancelled) return;
+      setProfile({ ...detail, services: priceList || detail.services || [] });
+      setSelected(detail.tailor);
+    }).catch((err) => {
+      if (!cancelled) setError(err.message);
+    });
+    return () => { cancelled = true; };
+  }, [activePanel, selectedTailorId, profile?.tailor?.id]);
+
   const unreadUpdates = unreadCount(bookings.notifications || []);
   const visibleTailors = useMemo(() => filterCustomerTailors(tailors, filters), [tailors, filters]);
   const customerDisplayName = account?.name || account?.fullName || "";
   const customerContact = account?.phone || account?.email || t("customer.findTrack", "Find and track tailoring");
   const customerHeaderTitle = customerDisplayName ? `Welcome, ${customerDisplayName}` : "Welcome";
 
-  useEffect(() => {
-    if (activePanel !== "updates" || !unreadUpdates) return;
-    let cancelled = false;
-    api.markCustomerNotificationsRead()
-      .then(() => {
-        if (cancelled) return;
-        setBookings((old) => ({
-          ...old,
-          notifications: (old.notifications || []).map((row) => ({ ...row, read: true })),
-        }));
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [activePanel, unreadUpdates]);
+  async function openCustomerNotification(row) {
+    await api.markCustomerNotificationRead(row.id);
+    setBookings((old) => ({ ...old, notifications: (old.notifications || []).map((item) => item.id === row.id ? { ...item, read: true, read_at: new Date().toISOString() } : item) }));
+    const entityId = row.entity_id || row.order_id || row.booking_request_id;
+    const entityType = String(row.entity_type || "booking").toLowerCase();
+    setActivePanel(entityType === "request" || entityType === "booking_request" ? "requests" : "orders");
+    const url = new URL(window.location.href);
+    if (entityId) url.searchParams.set(entityType.includes("request") ? "requestId" : "orderId", entityId);
+    window.history.replaceState(currentHistoryState(), "", `${url.pathname}${url.search}${url.hash}`);
+  }
 
   function patchTailorState(nextTailor) {
     setTailors((rows) => rows.map((row) => row.id === nextTailor.id ? nextTailor : row));
@@ -2352,6 +2461,7 @@ function CustomerApp({ onLogout }) {
         return { ...old, orders: nextOrders };
       });
     }
+    setSelectedTailorId("");
     setSelected(null);
     setProfile(null);
     setActivePanel("orders");
@@ -2400,7 +2510,7 @@ function CustomerApp({ onLogout }) {
             selected && profile ? <CustomerTailorProfile profile={profile} reload={load} onFavorite={toggleFavorite} onFollow={toggleFollow} onBookingCreated={handleBookingCreated} /> : <Empty text={t("customer.selectTailorEmpty", "Select a tailor from Browse Tailors to see profile, services, reviews, availability and booking form.")} />
           ) : null}
           {activePanel === "favorites" ? <CustomerFavoritesPanel tailors={favorites} openProfile={openProfile} onFavorite={toggleFavorite} onFollow={toggleFollow} /> : null}
-          {activePanel === "updates" ? <Updates title={t("customer.updatesTitle", "Customer Updates")} rows={bookings.notifications || []} /> : null}
+          {activePanel === "updates" ? <Updates title={t("customer.updatesTitle", "Customer Updates")} rows={bookings.notifications || []} onOpen={openCustomerNotification} /> : null}
           {activePanel === "wallet" ? <CustomerWalletPanel /> : null}
           {activePanel === "referrals" ? <CustomerReferralPanel /> : null}
           {activePanel === "requests" ? <CustomerRequests rows={bookings.requests || []} /> : null}
@@ -2721,33 +2831,72 @@ function servicePatchId(service) {
 function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookingCreated }) {
   const { tailor, services, reviews, offers = [] } = profile;
   const serviceRows = useMemo(() => (services || []).map(normalizeService), [services]);
-  const [serviceId, setServiceId] = useState(serviceRows[0]?.id || "");
-  const [form, setForm] = useState({ quantity: 1, requirements: "", preferredDate: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
+  const [serviceId, setServiceId] = useState("");
+  const [form, setForm] = useState({ quantity: 1, requirements: "", preferredDate: "", urgentDays: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
   const [showHomeMap, setShowHomeMap] = useState(false);
   const [message, setMessage] = useState("");
+  const [clockMinute, setClockMinute] = useState(() => Math.floor(Date.now() / 60000));
   const disabled = tailor.availability === "NOT_AVAILABLE" || !tailor.acceptingRequests;
-  const latestAppointmentDate = useMemo(() => measurementAppointmentLatestDate(form.preferredDate), [form.preferredDate]);
-  const selectedService = useMemo(() => serviceRows.find((s) => s.id === serviceId) || serviceRows[0], [serviceRows, serviceId]);
+  const selectedService = useMemo(() => serviceRows.find((s) => s.id === serviceId) || null, [serviceRows, serviceId]);
   const bookingQuantity = Math.max(1, Number(form.quantity || 1));
+  const garmentsPerService = selectedService?.isCombo ? Math.max(2, selectedService.comboItems.length || 0) : 1;
+  const totalGarmentQuantity = bookingQuantity * garmentsPerService;
+  const urgentOptions = [
+    { days: 1, charge: 150 },
+    { days: 2, charge: 100 },
+    { days: 3, charge: 50 },
+  ];
+  const urgentCharge = urgentOptions.find((option) => String(option.days) === String(form.urgentDays))?.charge || 0;
+  const urgentDeliveryDate = form.urgentDays ? addDaysToDateInput(todayDateInput(), Math.max(0, Number(form.urgentDays) - 1)) : "";
   const serviceAmount = Number(selectedService?.price || 0) * bookingQuantity;
-  const travelDistanceKm = form.measurementMode === "tailor_visits_customer" && form.homeLocation
-    ? estimateTravelDistanceKm(tailor, form.homeLocation)
-    : 0;
-  const travelCharge = form.measurementMode === "tailor_visits_customer" && form.homeLocation
-    ? Math.round(travelDistanceKm * TRAVEL_CHARGE_PER_KM)
-    : 0;
-  const orderSubtotal = serviceAmount + travelCharge;
-  const gstPlatformEstimate = Math.round((orderSubtotal * BOOKING_TAX_ESTIMATE_PERCENTAGE) / 100);
-  const bookingEstimateTotal = orderSubtotal + gstPlatformEstimate;
+  const bookingEstimateTotal = serviceAmount + urgentCharge;
+  const measurementCutoff = useMemo(() => {
+    if (!form.preferredDate) return null;
+    const deadline = new Date(`${form.preferredDate}T00:00:00`);
+    deadline.setDate(deadline.getDate() + 1);
+    deadline.setHours(deadline.getHours() - (form.urgentDays ? 12 : 48));
+    return deadline;
+  }, [form.preferredDate, form.urgentDays]);
+  const latestAppointmentDate = useMemo(() => {
+    if (!measurementCutoff) return "";
+    const latest = new Date(measurementCutoff);
+    if (!form.urgentDays) latest.setDate(latest.getDate() - 1);
+    return [latest.getFullYear(), String(latest.getMonth() + 1).padStart(2, "0"), String(latest.getDate()).padStart(2, "0")].join("-");
+  }, [measurementCutoff, form.urgentDays]);
+  const availableAppointmentSlots = useMemo(() => {
+    if (!form.appointmentDate) return [];
+    const appointmentDate = form.appointmentDate;
+    const now = new Date(clockMinute * 60000);
+    const currentMinutes = now.getHours() * 60 + now.getMinutes();
+    return APPOINTMENT_TIME_SLOTS.filter((slot) => {
+      if (appointmentDate === todayDateInput() && slot.startMinutes <= currentMinutes) return false;
+      if (!measurementCutoff) return false;
+      const end = new Date(`${appointmentDate}T00:00:00`);
+      end.setMinutes(slot.startMinutes + 120);
+      return end <= measurementCutoff;
+    });
+  }, [form.appointmentDate, clockMinute, measurementCutoff]);
 
   useEffect(() => {
-    setServiceId(serviceRows[0]?.id || "");
-  }, [tailor.id, serviceRows]);
+    const timer = window.setInterval(() => setClockMinute(Math.floor(Date.now() / 60000)), 30000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (form.appointmentSlot && !availableAppointmentSlots.some((slot) => slot.value === form.appointmentSlot)) {
+      setForm((old) => ({ ...old, appointmentSlot: "" }));
+    }
+  }, [availableAppointmentSlots, form.appointmentSlot]);
+
+  useEffect(() => {
+    setServiceId("");
+  }, [tailor.id]);
 
   function update(key, value) {
     setForm((old) => {
       const next = { ...old, [key]: value };
-      if (key === "preferredDate" && old.appointmentDate && !isMeasurementAppointmentAllowed(old.appointmentDate, value)) {
+      if (["preferredDate", "urgentDays"].includes(key)) next.appointmentSlot = "";
+      if (key === "preferredDate" && next.appointmentDate && next.appointmentDate > value) {
         next.appointmentDate = "";
       }
       if (key === "measurementMode" && value !== "tailor_visits_customer") {
@@ -2757,11 +2906,26 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
     });
   }
 
+  function updateCompletionSpeed(value) {
+    const preferredDate = value ? addDaysToDateInput(todayDateInput(), Math.max(0, Number(value) - 1)) : "";
+    setForm((old) => ({
+      ...old,
+      urgentDays: value,
+      preferredDate,
+      appointmentDate: old.appointmentDate && preferredDate && old.appointmentDate <= preferredDate ? old.appointmentDate : "",
+      appointmentSlot: "",
+    }));
+  }
+
   async function submit(event) {
     event.preventDefault();
     setMessage("");
     const service = selectedService || serviceRows.find((s) => s.id === serviceId);
     const today = todayDateInput();
+    if (!service || !serviceId) {
+      setMessage("Select a service before sending the booking request.");
+      return;
+    }
     if (!form.preferredDate) {
       setMessage("Choose expected delivery date first.");
       return;
@@ -2776,6 +2940,10 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
     }
     if (form.appointmentDate < today) {
       setMessage("Measurement appointment cannot be in the past. Choose today or a future date.");
+      return;
+    }
+    if (!form.appointmentSlot || !availableAppointmentSlots.some((slot) => slot.value === form.appointmentSlot)) {
+      setMessage("Choose an available future appointment time slot.");
       return;
     }
     if (!isMeasurementAppointmentAllowed(form.appointmentDate, form.preferredDate)) {
@@ -2798,12 +2966,13 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
         measurementMode: form.measurementMode,
         appointmentDate: form.appointmentDate || null,
         appointmentSlot: form.appointmentSlot,
+        urgentDays: form.urgentDays ? Number(form.urgentDays) : null,
         customerLocationAddress: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.address_text : undefined,
         customerLocationLat: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.latitude : undefined,
         customerLocationLng: form.measurementMode === "tailor_visits_customer" ? form.homeLocation?.longitude : undefined,
       });
       setMessage(res.message || `Booking ${res.code} created with ${tailor.shop}.`);
-      setForm({ quantity: 1, requirements: "", preferredDate: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
+      setForm({ quantity: 1, requirements: "", preferredDate: "", urgentDays: "", instructions: "", measurementMode: "customer_visits_tailor", homeLocation: null, appointmentDate: "", appointmentSlot: "" });
       setShowHomeMap(false);
       if (onBookingCreated) {
         await onBookingCreated(res.booking || res);
@@ -2843,28 +3012,32 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
       <OfferList offers={offers} />
       <h3>Photos and Videos</h3>
       <MediaGallery portfolio={tailor.portfolio} />
-      <h3>Services</h3>
-      <PaginatedCards
-        items={serviceRows}
-        pageSize={5}
-        className="service-list"
-        label="services"
-        emptyText="No active services added yet."
-        renderItem={(s) => (
-          <button className={serviceId === s.id ? "service active" : "service"} onClick={() => setServiceId(s.id)}>
-            <span>{s.name}</span>
-            <b>{money(s.price)}</b>
-            <small>{s.category}{s.isCombo && s.comboItems.length ? ` - Includes ${s.comboItems.join(", ")}` : ""}</small>
-            {s.description ? <small>{s.description}</small> : null}
-          </button>
-        )}
-      />
       <h3>Send Booking Request</h3>
       {disabled ? <div className="notice">Currently Not Accepting New Orders</div> : (
         <form className="stack-form" onSubmit={submit}>
+          <label className="span-2">
+            Service
+            <select value={serviceId} onChange={(e) => setServiceId(e.target.value)} required>
+              <option value="">Select a service</option>
+              {serviceRows.map((service) => (
+                <option key={service.id} value={service.id}>{service.name} - {money(service.price)}</option>
+              ))}
+            </select>
+            {selectedService ? (
+              <small>{selectedService.category}{selectedService.isCombo && selectedService.comboItems.length ? ` - Includes ${selectedService.comboItems.join(", ")}` : ""}{selectedService.description ? ` - ${selectedService.description}` : ""}</small>
+            ) : <small>Choose a service to see its price.</small>}
+          </label>
           <label>Quantity<input type="number" min="1" value={form.quantity} onChange={(e) => update("quantity", e.target.value)} /></label>
+          <label>
+            Completion speed
+            <select value={form.urgentDays} onChange={(e) => updateCompletionSpeed(e.target.value)}>
+              <option value="">Regular delivery</option>
+              {urgentOptions.map((option) => <option key={option.days} value={option.days}>Within {option.days} day{option.days > 1 ? "s" : ""} (+{money(option.charge)})</option>)}
+            </select>
+            <small>Select regular delivery or one of the three faster completion options.</small>
+          </label>
           <label>Stitching requirements<textarea value={form.requirements} onChange={(e) => update("requirements", e.target.value)} /></label>
-          <label>Expected delivery date<input type="date" value={form.preferredDate} min={todayDateInput()} onChange={(e) => update("preferredDate", e.target.value)} required /></label>
+          <label>Expected delivery date<input type="date" value={form.preferredDate} min={urgentDeliveryDate || todayDateInput()} max={urgentDeliveryDate || undefined} onChange={(e) => update("preferredDate", e.target.value)} required /></label>
           <label>
             Measurement method
             <select
@@ -2904,17 +3077,17 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
               )}
             </div>
           ) : <div className="notice">Visit shop: {tailor.shopAddress || tailor.zoneId}</div>}
-          <BookingEstimateCard
-            serviceName={selectedService?.name || "Selected service"}
-            serviceAmount={serviceAmount}
-            quantity={bookingQuantity}
-            measurementMode={form.measurementMode}
-            travelDistanceKm={travelDistanceKm}
-            travelCharge={travelCharge}
-            gstPlatformEstimate={gstPlatformEstimate}
-            total={bookingEstimateTotal}
-            needsLocation={form.measurementMode === "tailor_visits_customer" && !form.homeLocation}
-          />
+          {selectedService ? (
+            <BookingEstimateCard
+              serviceName={selectedService.name}
+              serviceAmount={serviceAmount}
+              quantity={bookingQuantity}
+              totalGarments={totalGarmentQuantity}
+              urgentDays={form.urgentDays ? Number(form.urgentDays) : null}
+              urgentCharge={urgentCharge}
+              total={bookingEstimateTotal}
+            />
+          ) : null}
           <label>
             Measurement appointment date
             <input
@@ -2922,12 +3095,19 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
               value={form.appointmentDate}
               min={todayDateInput()}
               max={latestAppointmentDate || undefined}
+              disabled={!form.preferredDate}
               onChange={(e) => update("appointmentDate", e.target.value)}
               required
             />
-            <small>{latestAppointmentDate ? "Choose before the final 2-day delivery window." : "Choose expected delivery date first."}</small>
+            <small>{measurementCutoff ? `Measurement must finish by ${measurementCutoff.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}. Later dates and slots are disabled.` : "Choose expected delivery date first."}</small>
           </label>
-          <label>Appointment time<input value={form.appointmentSlot} onChange={(e) => update("appointmentSlot", e.target.value)} placeholder="10:30 AM" /></label>
+          <label>
+            Appointment time
+            <select value={form.appointmentSlot} onChange={(e) => update("appointmentSlot", e.target.value)} disabled={!form.appointmentDate || availableAppointmentSlots.length === 0} required>
+              <option value="">{!form.appointmentDate ? "Choose appointment date first" : availableAppointmentSlots.length ? "Select a time slot" : "No available slots before the measurement cutoff"}</option>
+              {availableAppointmentSlots.map((slot) => <option key={slot.value} value={slot.value}>{slot.label}</option>)}
+            </select>
+          </label>
           <label>Special instructions<textarea value={form.instructions} onChange={(e) => update("instructions", e.target.value)} /></label>
           <button className="primary-btn">Send Request</button>
         </form>
@@ -2951,42 +3131,30 @@ function BookingEstimateCard({
   serviceName,
   serviceAmount,
   quantity,
-  measurementMode,
-  travelDistanceKm,
-  travelCharge,
-  gstPlatformEstimate,
+  totalGarments,
+  urgentDays,
+  urgentCharge,
   total,
-  needsLocation,
 }) {
   return (
     <div className="booking-estimate-card span-2">
       <div className="booking-estimate-head">
         <div>
-          <span>Payment details</span>
+          <span>Price estimate</span>
           <strong>{serviceName}</strong>
         </div>
         <b>{money(total)}</b>
       </div>
       <div className="booking-estimate-row">
-        <span>Service amount x {quantity}</span>
+        <span>Service amount x {quantity} ({totalGarments} garment{totalGarments === 1 ? "" : "s"})</span>
         <strong>{money(serviceAmount)}</strong>
       </div>
-      <div className="booking-estimate-row">
-        <span>
-          Home visit travel
-          {measurementMode === "tailor_visits_customer" && !needsLocation ? ` (${travelDistanceKm.toFixed(1)} km x Rs ${TRAVEL_CHARGE_PER_KM})` : ""}
-        </span>
-        <strong>{measurementMode === "tailor_visits_customer" ? needsLocation ? "Pick location" : money(travelCharge) : "Not applicable"}</strong>
-      </div>
-      <div className="booking-estimate-row">
-        <span>GST + platform estimate</span>
-        <strong>{money(gstPlatformEstimate)}</strong>
-      </div>
+      {urgentDays ? <div className="booking-estimate-row"><span>Within {urgentDays} day{urgentDays > 1 ? "s" : ""} urgent charge</span><strong>{money(urgentCharge)}</strong></div> : null}
       <div className="booking-estimate-row total">
-        <span>Total payable at payment</span>
+        <span>Service total</span>
         <strong>{money(total)}</strong>
       </div>
-      <small>Final GST/platform values are confirmed again at Razorpay payment time.</small>
+      <small>Any applicable final charges are shown for confirmation before payment.</small>
     </div>
   );
 }
@@ -3349,6 +3517,24 @@ async function openRazorpayCheckout(options) {
   });
 }
 
+function PasswordInput({ ariaLabel = "Password", ...props }) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="password-input-wrap">
+      <input {...props} type={visible ? "text" : "password"} />
+      <button
+        type="button"
+        className="password-visibility-btn"
+        onClick={() => setVisible((current) => !current)}
+        aria-label={`${visible ? "Hide" : "Show"} ${ariaLabel.toLowerCase()}`}
+        title={`${visible ? "Hide" : "Show"} ${ariaLabel.toLowerCase()}`}
+      >
+        {visible ? <EyeOff size={18} /> : <Eye size={18} />}
+      </button>
+    </div>
+  );
+}
+
 function normalizeMeasurementModeValue(value) {
   return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
 }
@@ -3374,6 +3560,7 @@ function mapLinkFor(lat, lng, address) {
   if (lat !== undefined && lat !== null && lng !== undefined && lng !== null) {
     return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${lat},${lng}`)}`;
   }
+
   if (address) return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
   return "https://www.google.com/maps";
 }
@@ -3664,11 +3851,12 @@ function TailorMeasurementVisitPanel({ order, reload, onReadyChange }) {
 }
 
 function CustomerOrderCard({ order, reload }) {
+  const deepLinked = new URLSearchParams(window.location.search).get("orderId") === String(order.id);
   const [statusData, setStatusData] = useState(() => normalizeOrderStatusPayload(order, null));
   const [breakdown, setBreakdown] = useState(null);
   const [paymentIntent, setPaymentIntent] = useState(order.paymentIntent || order.payment_intent || null);
   const [activeView, setActiveView] = useState("");
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(deepLinked);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -3822,13 +4010,14 @@ function CustomerOrderCard({ order, reload }) {
   const blockedReason = statusData.customerManageBlockedReason || statusData.customer_manage_blocked_reason || "Manage options close on the measurement appointment date.";
 
   return (
-    <article className={`${completed ? "compact-order-card completed" : cancelled ? "compact-order-card cancelled" : "compact-order-card"}${detailsOpen ? " details-open" : ""}`}>
+    <article id={`order-${order.id}`} className={`${completed ? "compact-order-card completed" : cancelled ? "compact-order-card cancelled" : "compact-order-card"}${detailsOpen ? " details-open" : ""}${deepLinked ? " deep-linked" : ""}`}>
       <div className="compact-order-summary">
         <div className="compact-order-id">
           <strong>{statusData.code || order.code}</strong>
           <StatusPill value={statusData.status} />
           <StatusPill value={statusData.paymentStatus || statusData.payment_status} />
         </div>
+        {String(statusData.status || "").toUpperCase() === "PENDING_APPROVAL" ? <ExpiryCountdown expiresAt={statusData.expiresAt || statusData.expires_at} /> : null}
         <div>
           <h3>{statusData.serviceName || order.service_name}</h3>
           <p>{statusData.tailorName || order.shop}</p>
@@ -3879,6 +4068,17 @@ function CustomerOrderCard({ order, reload }) {
       {detailsOpen && !manageable && !completed && !cancelled ? <small className="manage-cutoff-note">{blockedReason}</small> : null}
       {cancelled ? <div className="notice">Order cancelled: {statusData.cancelReason || statusData.cancel_reason || "Cancelled before measurement."}</div> : null}
 
+      {detailsOpen && statusData.contactSharingActive ? (
+        <div className="compact-order-panel booking-contact-panel">
+          <h3>Confirmed tailor contact</h3>
+          <p><strong>{statusData.tailorName || order.shop}</strong>{statusData.tailorOwnerName ? ` - ${statusData.tailorOwnerName}` : ""}</p>
+          {statusData.tailorPhone ? <a className="secondary-btn" href={`tel:${statusData.tailorPhone}`}>Call {statusData.tailorPhone}</a> : <small>Tailor phone number is not available.</small>}
+          <p>{statusData.tailorLocationAddress || "Shop address is not available."}</p>
+          {statusData.tailorMapUrl ? <a className="secondary-btn" href={statusData.tailorMapUrl} target="_blank" rel="noreferrer">Open shop location</a> : null}
+          {statusData.tailorDirectionsUrl ? <a className="secondary-btn" href={statusData.tailorDirectionsUrl} target="_blank" rel="noreferrer">Get directions</a> : null}
+        </div>
+      ) : null}
+
       {detailsOpen && activeView === "track" ? (
         <div className="compact-order-panel">
           <OrderTracker steps={statusData.steps} />
@@ -3921,7 +4121,7 @@ function CustomerOrderManagePanel({ order, busy, mode, onUpdate, onCancel }) {
   const [cancelReason, setCancelReason] = useState("");
   const [localError, setLocalError] = useState("");
   const appointmentDate = orderDateInput(order.appointmentDate || order.appointment_date);
-  const minFromAppointment = appointmentDate ? addDaysToDateInput(appointmentDate, MEASUREMENT_APPOINTMENT_BLOCKED_WINDOW_DAYS + 1) : "";
+  const minFromAppointment = appointmentDate;
   const minDeliveryDate = laterDateInput(todayDateInput(), minFromAppointment);
 
   useEffect(() => {
@@ -3939,7 +4139,7 @@ function CustomerOrderManagePanel({ order, busy, mode, onUpdate, onCancel }) {
       return;
     }
     if (minDeliveryDate && deliveryDate < minDeliveryDate) {
-      setLocalError("Delivery date must be at least 3 days after the measurement appointment.");
+      setLocalError("Delivery date cannot be before the measurement appointment.");
       return;
     }
     await onUpdate({ preferredDate: deliveryDate });
@@ -4018,8 +4218,7 @@ function PaymentIntentNotice({ intent }) {
     <div className={String(intent.status).toLowerCase() === "pending" ? "notice payment-intent-notice" : "notice"}>
       <strong>Razorpay payment reference: {reference}</strong>
       <span>Status: {status || "pending"} - {expiresText}</span>
-      {gatewayOrderId ? <small>Gateway order: {gatewayOrderId}</small> : null}
-      <small>Tailor wallet credit happens only after Razorpay signature verification succeeds.</small>
+      {gatewayOrderId ? <small>Your secure payment request is ready.</small> : null}
     </div>
   );
 }
@@ -4030,20 +4229,13 @@ function PaymentBreakdownCard({ breakdown }) {
   }
   const orderAmount = breakdown.orderAmount ?? breakdown.order_amount;
   const serviceAmount = breakdown.serviceAmount ?? breakdown.service_amount ?? orderAmount;
-  const travelChargeAmount = breakdown.travelChargeAmount ?? breakdown.travel_charge_amount ?? 0;
-  const travelRate = breakdown.travelRatePerKm ?? breakdown.travel_rate_per_km ?? TRAVEL_CHARGE_PER_KM;
-  const gstAmount = breakdown.gstAmount ?? breakdown.gst_amount;
-  const gstPercentage = breakdown.gstPercentage ?? breakdown.gst_percentage;
-  const platformFeeAmount = breakdown.platformFeeAmount ?? breakdown.platform_fee_amount;
-  const platformFeePercentage = breakdown.platformFeePercentage ?? breakdown.platform_fee_percentage;
+  const urgentCharge = breakdown.urgentCharge ?? breakdown.urgent_charge ?? 0;
   const payableTotal = breakdown.payableTotal ?? breakdown.payable_total;
   return (
     <div className="payment-breakdown">
       <div><span>Service amount</span><strong>{money(serviceAmount)}</strong></div>
-      <div><span>Home visit travel ({money(travelRate)}/km)</span><strong>{Number(travelChargeAmount || 0) > 0 ? money(travelChargeAmount) : "Not applicable"}</strong></div>
-      <div><span>Order subtotal</span><strong>{money(orderAmount)}</strong></div>
-      <div><span>GST {Number(gstPercentage || 0)}%</span><strong>{money(gstAmount)}</strong></div>
-      <div><span>Platform fee {Number(platformFeePercentage || 0)}%</span><strong>{money(platformFeeAmount)}</strong></div>
+      {Number(urgentCharge) > 0 ? <div><span>Urgent completion charge</span><strong>{money(urgentCharge)}</strong></div> : null}
+      <div><span>Booking total</span><strong>{money(orderAmount)}</strong></div>
       <div className="total"><span>Total to pay</span><strong>{money(payableTotal)}</strong></div>
     </div>
   );
@@ -4411,6 +4603,7 @@ function TailorApp({ onLogout }) {
         nextAvailable: next.tailor.nextAvailable || "",
         availabilityNote: next.tailor.availabilityNote || "",
         acceptingRequests: next.tailor.acceptingRequests,
+        approvalMode: next.tailor.approvalMode || "AUTOMATIC",
       });
     } catch (err) {
       setError(err.message);
@@ -4418,6 +4611,7 @@ function TailorApp({ onLogout }) {
   }
 
   useEffect(() => { load(); }, []);
+  useAutoRefresh(load);
 
   async function saveAvailability(event) {
     event.preventDefault();
@@ -4427,20 +4621,16 @@ function TailorApp({ onLogout }) {
 
   const unreadUpdates = unreadCount(data?.notifications || []);
 
-  useEffect(() => {
-    if (!data || activePanel !== "updates" || !unreadUpdates) return;
-    let cancelled = false;
-    api.markTailorNotificationsRead()
-      .then(() => {
-        if (cancelled) return;
-        setData((old) => old ? {
-          ...old,
-          notifications: (old.notifications || []).map((row) => ({ ...row, read: true })),
-        } : old);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [data, activePanel, unreadUpdates]);
+  async function openTailorNotification(row) {
+    await api.markTailorNotificationRead(row.id);
+    setData((old) => old ? { ...old, notifications: (old.notifications || []).map((item) => item.id === row.id ? { ...item, read: true, read_at: new Date().toISOString() } : item) } : old);
+    const entityId = row.entity_id || row.order_id || row.booking_request_id;
+    const entityType = String(row.entity_type || "booking").toLowerCase();
+    setActivePanel(entityType === "request" || entityType === "booking_request" ? "requests" : "orders");
+    const url = new URL(window.location.href);
+    if (entityId) url.searchParams.set(entityType.includes("request") ? "requestId" : "orderId", entityId);
+    window.history.replaceState(currentHistoryState(), "", `${url.pathname}${url.search}${url.hash}`);
+  }
 
   if (!data) return <Shell title={t("dashboard.tailor.title", "Tailor Dashboard")} subtitle={t("dashboard.tailor.subtitle", "Requests, orders and availability")} icon={Scissors} onLogout={onLogout}>{error ? <div className="error banner">{error}</div> : <div className="loading">{t("tailor.loading", "Loading tailor dashboard...")}</div>}</Shell>;
   const pendingApproval = data.tailor.approvalStatus !== "APPROVED";
@@ -4529,7 +4719,7 @@ function TailorApp({ onLogout }) {
           {activePanel === "requests" ? <TailorRequests rows={data.requests} reload={load} /> : null}
           {activePanel === "waiting" ? <TailorWaitingListPanel reloadDashboard={load} /> : null}
           {activePanel === "orders" ? <TailorOrders rows={data.orders} reload={load} /> : null}
-          {activePanel === "updates" ? <Updates title={t("tailor.updatesTitle", "Tailor Updates")} rows={data.notifications || []} /> : null}
+          {activePanel === "updates" ? <Updates title={t("tailor.updatesTitle", "Tailor Updates")} rows={data.notifications || []} onOpen={openTailorNotification} /> : null}
           {activePanel === "support" ? <SupportPanel role="tailor" orders={data.orders || []} /> : null}
         </div>
       </div>
@@ -4539,18 +4729,43 @@ function TailorApp({ onLogout }) {
 
 function TailorAvailabilityPanel({ availability, setAvailability, saveAvailability }) {
   const t = useT();
+  const [slotDate, setSlotDate] = useState(todayDateInput());
+  const [slots, setSlots] = useState(() => APPOINTMENT_TIME_SLOTS.map((slot) => ({ slot: slot.value, enabled: true, capacity: 1, bookedCount: 0 })));
+  const [slotMessage, setSlotMessage] = useState("");
+
+  useEffect(() => {
+    if (availability.approvalMode !== "AUTOMATIC" || !slotDate) return;
+    api.tailorSlotCapacities(slotDate).then((result) => {
+      const existing = new Map((result.slots || []).map((row) => [row.slot_value || row.slot, row]));
+      setSlots(APPOINTMENT_TIME_SLOTS.map((slot) => {
+        const row = existing.get(slot.value);
+        return { slot: slot.value, enabled: row ? Boolean(row.enabled) : true, capacity: Number(row?.capacity || 1), bookedCount: Number(row?.booked_count || 0) };
+      }));
+    }).catch((err) => setSlotMessage(err.message));
+  }, [availability.approvalMode, slotDate]);
+
+  async function saveSlots() {
+    setSlotMessage("");
+    try {
+      await api.saveTailorSlotCapacities({ date: slotDate, slots: slots.map(({ slot, enabled, capacity }) => ({ slot, enabled, capacity })) });
+      setSlotMessage("Slot capacities saved.");
+    } catch (err) {
+      setSlotMessage(err.message);
+    }
+  }
   return (
     <section className="section-block no-top">
       <h3>{t("common.availability", "Availability")}</h3>
       <form className="availability-form" onSubmit={saveAvailability}>
+        <label>Approval mode<select value={availability.approvalMode || "AUTOMATIC"} onChange={(e) => setAvailability({ ...availability, approvalMode: e.target.value })}><option value="AUTOMATIC">Automatic Approval</option><option value="MANUAL">Manual Approval</option></select></label>
         <label>{t("tailor.status", "Status")}<select value={availability.availability} onChange={(e) => setAvailability({ ...availability, availability: e.target.value })}><option value="AVAILABLE">{t("common.available", "Available")}</option><option value="FEW_SLOTS_AVAILABLE">{t("common.fewSlots", "Few Slots Available")}</option><option value="BUSY">{t("common.busy", "Busy")}</option><option value="NOT_AVAILABLE">{t("common.unavailable", "Not Available")}</option></select></label>
-        <label>{t("tailor.availableSlots", "Available slots")}<input type="number" min="0" value={availability.availableSlots} onChange={(e) => setAvailability({ ...availability, availableSlots: Number(e.target.value) })} /></label>
-        <label>{t("tailor.maxNewOrders", "Max new orders")}<input type="number" min="0" value={availability.maxNewOrders} onChange={(e) => setAvailability({ ...availability, maxNewOrders: Number(e.target.value) })} /></label>
+        {availability.approvalMode === "AUTOMATIC" ? <><label>{t("tailor.availableSlots", "Default slot capacity")}<input type="number" min="0" value={availability.availableSlots} onChange={(e) => setAvailability({ ...availability, availableSlots: Number(e.target.value) })} /></label><label>{t("tailor.maxNewOrders", "Max new orders")}<input type="number" min="0" value={availability.maxNewOrders} onChange={(e) => setAvailability({ ...availability, maxNewOrders: Number(e.target.value) })} /></label></> : <div className="notice span-2">Manual requests remain pending for one hour and require your approval.</div>}
         <label>{t("tailor.nextAvailableDate", "Next available date")}<input type="date" value={availability.nextAvailable || ""} onChange={(e) => setAvailability({ ...availability, nextAvailable: e.target.value })} /></label>
         <label className="check-row"><input type="checkbox" checked={Boolean(availability.acceptingRequests)} onChange={(e) => setAvailability({ ...availability, acceptingRequests: e.target.checked })} /> {t("tailor.acceptingRequests", "Accepting new requests")}</label>
         <label className="span-2">{t("tailor.availabilityNote", "Availability note")}<textarea value={availability.availabilityNote} onChange={(e) => setAvailability({ ...availability, availabilityNote: e.target.value })} /></label>
         <button className="primary-btn">{t("tailor.saveAvailability", "Save Availability")}</button>
       </form>
+      {availability.approvalMode === "AUTOMATIC" ? <div className="slot-capacity-panel"><h3>Slot capacity</h3><label>Date<input type="date" min={todayDateInput()} value={slotDate} onChange={(e) => setSlotDate(e.target.value)} /></label>{slots.map((row, index) => <div className="slot-capacity-row" key={row.slot}><label className="check-row"><input type="checkbox" checked={row.enabled} onChange={(e) => setSlots((old) => old.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: e.target.checked } : item))} /> {APPOINTMENT_TIME_SLOTS.find((slot) => slot.value === row.slot)?.label}</label><label>Capacity<input type="number" min={row.bookedCount} max="100" value={row.capacity} disabled={!row.enabled} onChange={(e) => setSlots((old) => old.map((item, itemIndex) => itemIndex === index ? { ...item, capacity: Number(e.target.value) } : item))} /></label><small>{row.bookedCount} booked</small></div>)}<button type="button" className="primary-btn" onClick={saveSlots}>Save slot capacity</button>{slotMessage ? <div className={slotMessage.includes("saved") ? "notice ok" : "error"}>{slotMessage}</div> : null}</div> : null}
     </section>
   );
 }
@@ -5192,7 +5407,7 @@ function TailorFollowersPanel({ followers }) {
   );
 }
 
-function Updates({ title, rows }) {
+function Updates({ title, rows, onOpen }) {
   return (
     <section className="section-block">
       <h3>{title}</h3>
@@ -5203,7 +5418,7 @@ function Updates({ title, rows }) {
         className="updates-list"
         label="updates"
         emptyText="No updates yet."
-        renderItem={(row) => <div className="update-item"><strong>{row.title}</strong><p>{row.body}</p><small>{fmtDate(row.ts)}</small></div>}
+        renderItem={(row) => <button type="button" className={`update-item update-action ${row.read ? "read" : "unread"}`} onClick={() => onOpen?.(row)}><strong>{row.title}</strong><p>{row.body}</p><small>{fmtDate(row.ts)}</small></button>}
       />
     </section>
   );
@@ -5270,6 +5485,21 @@ function TailorWaitingListPanel({ reloadDashboard }) {
     }
   }
 
+  async function reject(row) {
+    const reason = window.prompt("Reason for rejecting this request:", "Unable to accept this booking") || "Unable to accept this booking";
+    setBusy(row.id);
+    try {
+      const res = await api.tailorRejectBooking(row.id, reason);
+      setMessage(res.message || "Booking request rejected.");
+      await load();
+      await reloadDashboard();
+    } catch (err) {
+      setMessage(err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
   return (
     <section className="section-block">
       <div className="section-head">
@@ -5292,11 +5522,12 @@ function TailorWaitingListPanel({ reloadDashboard }) {
                 <strong>{row.code}</strong>
                 <p>{row.customerName || row.customer_name} - {row.serviceName || row.service_name}</p>
                 <small>{row.measurementMode || row.measurement_mode}</small>
+                {String(row.status || "").toUpperCase() === "PENDING_APPROVAL" ? <ExpiryCountdown expiresAt={row.expiresAt || row.expires_at} /> : null}
                 {row.customerLocationAddress || row.customer_location_address ? <small>{row.customerLocationAddress || row.customer_location_address}</small> : null}
               </div>
               <div>
                 <span className="waiting-pill"><span className="live-dot" /> Waiting</span>
-                <button type="button" className="primary-btn compact-action" onClick={() => confirm(row)} disabled={busy === row.id}>{busy === row.id ? "Confirming..." : "Confirm Next"}</button>
+                <div className="inline-actions"><button type="button" className="primary-btn compact-action" onClick={() => confirm(row)} disabled={busy === row.id}>{busy === row.id ? "Working..." : "Accept"}</button><button type="button" className="danger-link" onClick={() => reject(row)} disabled={busy === row.id}>Reject</button></div>
               </div>
             </article>
           )}
@@ -5391,6 +5622,7 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
   const [otp, setOtp] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+
   const [visitOpen, setVisitOpen] = useState(false);
   const [measurementReady, setMeasurementReady] = useState(!isTailorVisitOrder(order) || isMeasurementArrivalVerified(order));
   const paid = String(order.payment_status || order.paymentStatus || "").toLowerCase() === "paid";
@@ -5461,6 +5693,18 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
     );
   }
 
+  if (["waitlisted", "waiting_list", "pending_approval"].includes(statusValue)) {
+    return (
+      <div className="order-actions tracker-actions waiting-order-actions">
+        <small>This booking is waiting for your approval.</small>
+        <button type="button" className="primary-btn" onClick={acceptWaitlistedBooking} disabled={busy}>
+          {busy ? "Approving..." : "Accept Waitlisted Booking"}
+        </button>
+        {message ? <small className={message.toLowerCase().includes("confirmed") ? "field-success" : "field-error"}>{message}</small> : null}
+      </div>
+    );
+  }
+
   return (
     <div className="order-actions tracker-actions">
       <select value={stage} onChange={(e) => setStage(e.target.value)} disabled={busy}>
@@ -5494,8 +5738,8 @@ function AdminApp({ onLogout }) {
   const [error, setError] = useState("");
   const [query, setQuery] = useState("");
 
-  async function loadAll() {
-    setLoading(true);
+  async function loadAll(silent = false) {
+    if (!silent) setLoading(true);
     setError("");
     try {
       const [metrics, customers, tailors, requests, orders, payments, paymentIntents, withdrawalRequests, reviews, supportTickets, complaints, audit] = await Promise.all([
@@ -5516,11 +5760,12 @@ function AdminApp({ onLogout }) {
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
   useEffect(() => { loadAll(); }, []);
+  useAutoRefresh(() => loadAll(true));
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();

@@ -3,7 +3,7 @@
     "relation": ["delegate_permission/common.handle_all_urls"],
     "target": {
       "namespace": "android_app",
-      "package_name": "com.tailorahub.twa",
+      "package_name": "com.sr.tailoringmarketplace",
       "sha256_cert_fingerprints": [
         "D2:BF:DE:BA:F8:8A:3B:D2:E3:B3:9B:2B:66:F5:43:CF:88:D5:50:FA:DC:17:55:D0:05:5D:71:71:AC:FC:A1:B5"
       ]

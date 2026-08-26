@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 import re
 import uuid
+from zoneinfo import ZoneInfo
 from urllib import error as urllib_error, request as urllib_request
 from urllib.parse import quote_plus
 
@@ -27,16 +28,26 @@ from app.core.database import get_db
 from app.emailer import send_email
 from app.qr import generate_wallet_qr
 from app.services.tracker_service import tracker_connections
+from app.services.booking_rules import APP_TIMEZONE, BookingRuleError, calculate_booking, zoned_slot
 
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-MEASUREMENT_APPOINTMENT_BLOCKED_WINDOW_DAYS = 2
-MEASUREMENT_APPOINTMENT_ERROR = "Measurement appointment must be scheduled at least 3 days before the delivery date."
+MEASUREMENT_APPOINTMENT_ERROR = "Measurement appointment must be on or before the delivery date."
 MEASUREMENT_APPOINTMENT_REQUIRED_ERROR = "Choose measurement appointment date."
 PAST_DELIVERY_DATE_ERROR = "Expected delivery date cannot be in the past. Choose today or a future date."
 PAST_APPOINTMENT_DATE_ERROR = "Measurement appointment cannot be in the past. Choose today or a future date."
+APPOINTMENT_TIMEZONE = ZoneInfo("Asia/Kolkata")
+APPOINTMENT_SLOTS = {
+    "08:00-10:00": 480,
+    "10:00-12:00": 600,
+    "12:00-14:00": 720,
+    "14:00-16:00": 840,
+    "16:00-18:00": 960,
+    "18:00-20:00": 1080,
+    "20:00-22:00": 1200,
+}
 TRAVEL_CHARGE_PER_KM = Decimal("5.00")
 DEFAULT_PLATFORM_SETTINGS = {
     "commission_percentage": Decimal("20.00"),
@@ -56,6 +67,7 @@ class BookingCreateIn(BaseModel):
     measurement_mode: str = Field(default="customer_visits_tailor", alias="measurementMode")
     appointment_date: date | None = Field(default=None, alias="appointmentDate")
     appointment_slot: str | None = Field(default=None, alias="appointmentSlot")
+    urgent_days: int | None = Field(default=None, alias="urgentDays")
     customer_location_address: str | None = Field(default=None, alias="customerLocationAddress")
     customer_location_lat: float | None = Field(default=None, alias="customerLocationLat", ge=-90, le=90)
     customer_location_lng: float | None = Field(default=None, alias="customerLocationLng", ge=-180, le=180)
@@ -169,7 +181,7 @@ def customer_manage_cutoff_error(order: dict | None) -> str | None:
 
 
 def latest_measurement_appointment_date(delivery_date: date) -> date:
-    return delivery_date - timedelta(days=MEASUREMENT_APPOINTMENT_BLOCKED_WINDOW_DAYS + 1)
+    return delivery_date
 
 
 def resolve_booking_dates(
@@ -177,7 +189,7 @@ def resolve_booking_dates(
     appointment_date: date | None,
     service_days: int | None,
 ) -> tuple[date, date]:
-    today = date.today()
+    today = datetime.now(APPOINTMENT_TIMEZONE).date()
     delivery_date = preferred_date or (today + timedelta(days=service_days or 5))
     if delivery_date < today:
         raise HTTPException(400, PAST_DELIVERY_DATE_ERROR)
@@ -185,10 +197,27 @@ def resolve_booking_dates(
         raise HTTPException(400, MEASUREMENT_APPOINTMENT_REQUIRED_ERROR)
     if appointment_date < today:
         raise HTTPException(400, PAST_APPOINTMENT_DATE_ERROR)
-    latest_appointment_date = latest_measurement_appointment_date(delivery_date)
-    if appointment_date > latest_appointment_date:
+    if appointment_date > delivery_date:
         raise HTTPException(400, MEASUREMENT_APPOINTMENT_ERROR)
     return delivery_date, appointment_date
+
+
+def validate_appointment_slot(
+    appointment_date: date,
+    appointment_slot: str | None,
+    now: datetime | None = None,
+) -> str:
+    if appointment_slot not in APPOINTMENT_SLOTS:
+        raise HTTPException(400, "Choose a valid appointment time slot.")
+    current = now or datetime.now(APPOINTMENT_TIMEZONE)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=APPOINTMENT_TIMEZONE)
+    current = current.astimezone(APPOINTMENT_TIMEZONE)
+    if appointment_date == current.date():
+        current_minutes = current.hour * 60 + current.minute
+        if APPOINTMENT_SLOTS[appointment_slot] <= current_minutes:
+            raise HTTPException(400, "Selected appointment time slot has already expired. Choose a later slot.")
+    return appointment_slot
 
 
 def uid(prefix: str) -> str:
@@ -293,15 +322,19 @@ async def payment_breakdown_for_order(db: AsyncSession, order: dict) -> dict:
         logger.exception("Platform settings unavailable; using default payment settings")
         settings = DEFAULT_PLATFORM_SETTINGS.copy()
     settings = {**DEFAULT_PLATFORM_SETTINGS, **(settings or {})}
-    service_amount = money_decimal(order.get("base_price") or order.get("total") or 0)
-    order_amount = money_decimal(order.get("total") or service_amount)
-    travel_charge_amount = max(order_amount - service_amount, Decimal("0.00"))
-    gst_amount = percent_amount(order_amount, settings.get("gst_percentage"))
-    platform_fee_amount = percent_amount(order_amount, settings.get("platform_fee_percentage"))
-    charge_amount = gst_amount + platform_fee_amount
+    service_amount = money_decimal(order.get("base_amount") or order.get("base_price") or order.get("total") or 0)
+    urgent_charge = money_decimal(order.get("urgent_charge"))
+    order_amount = money_decimal(order.get("final_amount") or order.get("total") or service_amount + urgent_charge)
+    # Customer pricing is the immutable service snapshot plus the one-time
+    # urgent charge. Commission is settled internally and is never added to
+    # the amount shown to or paid by the customer.
+    travel_charge_amount = Decimal("0.00")
+    gst_amount = Decimal("0.00")
+    platform_fee_amount = Decimal("0.00")
+    charge_amount = Decimal("0.00")
     commission_amount = percent_amount(order_amount, settings.get("commission_percentage"))
     tailor_credit_amount = max(order_amount - commission_amount, Decimal("0.00"))
-    grand_total = order_amount + charge_amount
+    grand_total = order_amount
     return {
         "service_amount": service_amount,
         "serviceAmount": service_amount,
@@ -309,6 +342,8 @@ async def payment_breakdown_for_order(db: AsyncSession, order: dict) -> dict:
         "travelChargeAmount": travel_charge_amount,
         "travel_rate_per_km": TRAVEL_CHARGE_PER_KM,
         "travelRatePerKm": TRAVEL_CHARGE_PER_KM,
+        "urgent_charge": urgent_charge,
+        "urgentCharge": urgent_charge,
         "order_amount": order_amount,
         "orderAmount": order_amount,
         "commission_percentage": money_decimal(settings.get("commission_percentage")),
@@ -626,10 +661,31 @@ def normalize_measurement_mode(value: str) -> str:
     return aliases[cleaned]
 
 
-async def notify(db: AsyncSession, to_ref: str, title: str, body: str, order_id: str | None = None) -> None:
+async def notify(
+    db: AsyncSession,
+    to_ref: str,
+    title: str,
+    body: str,
+    order_id: str | None = None,
+    *,
+    notification_type: str = "BOOKING_UPDATE",
+    entity_type: str = "booking",
+    entity_id: str | None = None,
+    request_group_id: str | None = None,
+    payment_id: str | None = None,
+    dedupe_key: str | None = None,
+) -> None:
     await db.execute(
-        text("INSERT INTO notifications (id,to_ref,channel,title,body,order_id) VALUES (:id,:to_ref,'in_app',:title,:body,:order_id)"),
-        {"id": uid("n"), "to_ref": to_ref, "title": title, "body": body, "order_id": order_id},
+        text("""INSERT INTO notifications
+          (id,to_ref,channel,title,body,order_id,notification_type,entity_type,entity_id,
+           request_group_id,booking_request_id,payment_id,dedupe_key)
+          VALUES (:id,:to_ref,'in_app',:title,:body,:order_id,:notification_type,:entity_type,
+                  :entity_id,:request_group_id,:booking_request_id,:payment_id,:dedupe_key)
+          ON CONFLICT (to_ref,dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING"""),
+        {"id": uid("n"), "to_ref": to_ref, "title": title, "body": body, "order_id": order_id,
+         "notification_type": notification_type, "entity_type": entity_type,
+         "entity_id": entity_id or order_id, "request_group_id": request_group_id,
+         "booking_request_id": order_id, "payment_id": payment_id, "dedupe_key": dedupe_key},
     )
 
 
@@ -638,6 +694,43 @@ async def add_history(db: AsyncSession, order_id: str, status: str, note: str, b
         text("INSERT INTO order_status_history (order_id,status,note,by_role) VALUES (:order_id,:status,:note,:by_role)"),
         {"order_id": order_id, "status": status, "note": note, "by_role": by_role},
     )
+
+
+async def release_capacity_and_promote(db: AsyncSession, order: dict) -> dict | None:
+    """Release one automatic slot and atomically promote its oldest valid waiter."""
+    if not order.get("appointment_date") or not order.get("appointment_slot"):
+        return None
+    released = await fetch_one(db, """UPDATE tailor_slot_capacities
+        SET booked_count=GREATEST(booked_count-1,0),updated_at=now()
+        WHERE tailor_id=:tailor_id AND slot_date=:slot_date AND slot_value=:slot_value
+        RETURNING id,enabled,capacity,booked_count""", {
+            "tailor_id": order["tailor_id"], "slot_date": order["appointment_date"], "slot_value": order["appointment_slot"]})
+    if not released or not released.get("enabled") or int(released["booked_count"]) >= int(released["capacity"]):
+        return None
+    candidate = await fetch_one(db, """SELECT o.* FROM orders o
+        JOIN booking_request_groups g ON g.id=o.request_group_id
+        WHERE o.tailor_id=:tailor_id AND o.appointment_date=:slot_date AND o.appointment_slot=:slot_value
+          AND upper(o.status) IN ('WAITLISTED','WAITING_LIST') AND g.assigned_tailor_id IS NULL
+          AND o.measurement_cutoff >= now() AND o.measurement_appointment_at > now()
+        ORDER BY o.ts ASC FOR UPDATE OF o SKIP LOCKED LIMIT 1""", {
+            "tailor_id": order["tailor_id"], "slot_date": order["appointment_date"], "slot_value": order["appointment_slot"]})
+    if not candidate:
+        return None
+    won = await fetch_one(db, """UPDATE booking_request_groups SET status='ASSIGNED',assigned_tailor_id=:tailor_id,
+        assigned_order_id=:order_id,assigned_at=now() WHERE id=:group_id AND assigned_tailor_id IS NULL RETURNING id""", {
+            "tailor_id": candidate["tailor_id"], "order_id": candidate["id"], "group_id": candidate["request_group_id"]})
+    if not won:
+        return None
+    capacity = await fetch_one(db, """UPDATE tailor_slot_capacities SET booked_count=booked_count+1,updated_at=now()
+        WHERE id=:id AND enabled=TRUE AND booked_count < capacity RETURNING id""", {"id": released["id"]})
+    if not capacity:
+        return None
+    await db.execute(text("UPDATE orders SET status='AUTO_APPROVED',status_reason=NULL,assigned_at=now() WHERE id=:id"), {"id": candidate["id"]})
+    await add_history(db, candidate["id"], "AUTO_APPROVED", "Promoted from the waiting list after capacity became available", "system")
+    await notify(db, "user:" + candidate["customer_id"], "Booking promoted from waiting list",
+                 f"Booking {candidate['code']} is now approved.", candidate["id"],
+                 notification_type="WAITLIST_PROMOTED", dedupe_key="waitlist-promoted:" + candidate["id"])
+    return candidate
 
 
 async def ensure_measurement_visit_schema(db: AsyncSession) -> None:
@@ -737,11 +830,13 @@ BOOKING_DETAIL_SELECT = """
            cu.email AS customer_email,
            tu.name AS tailor_user_name,
            tu.phone AS tailor_phone,
-           tu.email AS tailor_email
+           tu.email AS tailor_email,
+           g.assigned_order_id
     FROM orders o
     JOIN tailors t ON t.id=o.tailor_id
     JOIN users cu ON cu.id=o.customer_id
     LEFT JOIN users tu ON tu.id=t.user_id
+    LEFT JOIN booking_request_groups g ON g.id=o.request_group_id
 """
 
 
@@ -797,7 +892,14 @@ def clean_trip_coordinates(body: MeasurementTripLocationIn) -> dict:
     return {"lat": body.latitude, "lng": body.longitude}
 
 
-def public_booking(row: dict) -> dict:
+ACTIVE_CONTACT_STATUSES = {
+    "AUTO_APPROVED", "CONFIRMED", "ASSIGNED", "TAILOR_CONFIRMED",
+    "MEASUREMENT_PENDING", "MEASUREMENT_DONE", "IN_PROGRESS",
+    "READY_FOR_DELIVERY", "OUT_FOR_DELIVERY", "PAYMENT_PENDING", "PAID",
+}
+
+
+def public_booking(row: dict, viewer: dict | None = None) -> dict:
     service_amount = money_decimal(row.get("base_price") or row.get("total") or 0)
     order_amount = money_decimal(row.get("total") or service_amount)
     travel_charge_amount = max(order_amount - service_amount, Decimal("0.00"))
@@ -809,21 +911,29 @@ def public_booking(row: dict) -> dict:
     tailor_lng = row.get("tailor_lng")
     route_origin_lat = tailor_trip_lat if tailor_trip_lat is not None else tailor_lat
     route_origin_lng = tailor_trip_lng if tailor_trip_lng is not None else tailor_lng
+    roles = set((viewer or {}).get("roles") or [])
+    viewer_id = (viewer or {}).get("id")
+    status = str(row.get("status") or "").upper()
+    assigned = bool(row.get("assigned_at")) or status in ACTIVE_CONTACT_STATUSES
+    group_winner = not row.get("request_group_id") or str(row.get("assigned_order_id") or row.get("id")) == str(row.get("id"))
+    contact_active = assigned and group_winner and status in ACTIVE_CONTACT_STATUSES
+    customer_authorized = contact_active and "customer" in roles and str(viewer_id) == str(row.get("customer_id"))
+    tailor_authorized = contact_active and "tailor" in roles and str((viewer or {}).get("tailor_id") or "") == str(row.get("tailor_id"))
     return {
         "id": row["id"],
         "code": row["code"],
         "tailorId": row.get("tailor_id"),
         "tailorName": row.get("shop"),
         "tailorOwnerName": row.get("tailor_owner_name") or row.get("tailor_user_name"),
-        "tailorPhone": row.get("tailor_phone"),
-        "tailorEmail": row.get("tailor_email"),
-        "tailorLocationAddress": row.get("tailor_location_address"),
-        "tailorLat": float(tailor_lat) if tailor_lat is not None else None,
-        "tailorLng": float(tailor_lng) if tailor_lng is not None else None,
+        "tailorPhone": row.get("tailor_phone") if customer_authorized else None,
+        "tailorEmail": row.get("tailor_email") if customer_authorized else None,
+        "tailorLocationAddress": row.get("tailor_location_address") if customer_authorized else None,
+        "tailorLat": float(tailor_lat) if customer_authorized and tailor_lat is not None else None,
+        "tailorLng": float(tailor_lng) if customer_authorized and tailor_lng is not None else None,
         "customerId": row.get("customer_id"),
         "customerName": row.get("customer_name"),
-        "customerPhone": row.get("customer_phone"),
-        "customerEmail": row.get("customer_email"),
+        "customerPhone": row.get("customer_phone") if tailor_authorized else None,
+        "customerEmail": row.get("customer_email") if tailor_authorized else None,
         "serviceId": row.get("service_id"),
         "serviceName": row.get("service_name"),
         "quantity": row.get("quantity"),
@@ -840,9 +950,9 @@ def public_booking(row: dict) -> dict:
         "deliveredAt": row.get("delivered_at"),
         "completedAt": row.get("completed_at"),
         "measurementMode": row.get("measurement_mode"),
-        "customerLocationAddress": row.get("customer_location_address"),
-        "customerLocationLat": float(customer_location_lat) if customer_location_lat is not None else None,
-        "customerLocationLng": float(customer_location_lng) if customer_location_lng is not None else None,
+        "customerLocationAddress": row.get("customer_location_address") if tailor_authorized else None,
+        "customerLocationLat": float(customer_location_lat) if tailor_authorized and customer_location_lat is not None else None,
+        "customerLocationLng": float(customer_location_lng) if tailor_authorized and customer_location_lng is not None else None,
         "customerLocationConfirmedAt": row.get("customer_location_confirmed_at"),
         "measurementTripStatus": row.get("measurement_trip_status") or "not_started",
         "tailorTripLat": float(tailor_trip_lat) if tailor_trip_lat is not None else None,
@@ -853,14 +963,25 @@ def public_booking(row: dict) -> dict:
         "measurementOtpSentAt": row.get("measurement_otp_sent_at"),
         "measurementOtpVerifiedAt": row.get("measurement_otp_verified_at"),
         "measurementOtpRequired": measurement_visit_needs_otp(row),
-        "customerMapUrl": google_maps_search_url(customer_location_lat, customer_location_lng, row.get("customer_location_address") or row.get("address")),
-        "customerDirectionsUrl": google_maps_directions_url(customer_location_lat, customer_location_lng, row.get("customer_location_address") or row.get("address"), route_origin_lat, route_origin_lng),
-        "tailorMapUrl": google_maps_search_url(route_origin_lat, route_origin_lng, row.get("tailor_location_address")),
-        "tailorDirectionsUrl": google_maps_directions_url(customer_location_lat, customer_location_lng, row.get("customer_location_address") or row.get("address"), route_origin_lat, route_origin_lng),
-        "address": row.get("address"),
+        "customerMapUrl": google_maps_search_url(customer_location_lat, customer_location_lng, row.get("customer_location_address") or row.get("address")) if tailor_authorized else None,
+        "customerDirectionsUrl": google_maps_directions_url(customer_location_lat, customer_location_lng, row.get("customer_location_address") or row.get("address"), route_origin_lat, route_origin_lng) if tailor_authorized else None,
+        "tailorMapUrl": google_maps_search_url(route_origin_lat, route_origin_lng, row.get("tailor_location_address")) if customer_authorized else None,
+        "tailorDirectionsUrl": google_maps_directions_url(route_origin_lat, route_origin_lng, row.get("tailor_location_address")) if customer_authorized else None,
+        "address": row.get("address") if tailor_authorized else None,
+        "contactSharingActive": contact_active,
         "appointmentDate": row.get("appointment_date"),
         "appointmentSlot": row.get("appointment_slot"),
         "expectedCompletion": row.get("expected_completion"),
+        "requestGroupId": row.get("request_group_id"),
+        "statusReason": row.get("status_reason"),
+        "expiresAt": row.get("expires_at"),
+        "urgentDays": row.get("urgent_days"),
+        "totalGarmentQuantity": row.get("total_garment_quantity") or row.get("quantity"),
+        "urgentCharge": money_decimal(row.get("urgent_charge")),
+        "finalAmount": money_decimal(row.get("final_amount") or order_amount),
+        "priceSnapshot": row.get("price_snapshot") or {},
+        "deliveryDeadline": row.get("delivery_deadline"),
+        "measurementCutoff": row.get("measurement_cutoff"),
         "basePrice": service_amount,
         "base_price": service_amount,
         "serviceAmount": service_amount,
@@ -909,7 +1030,7 @@ async def get_accessible_order(db: AsyncSession, booking_id: str, user: dict) ->
     raise HTTPException(404, "Booking not found")
 
 
-async def tracker_status_payload(db: AsyncSession, order: dict) -> dict:
+async def tracker_status_payload(db: AsyncSession, order: dict, viewer: dict | None = None) -> dict:
     result = await db.execute(
         text(
             """
@@ -946,7 +1067,7 @@ async def tracker_status_payload(db: AsyncSession, order: dict) -> dict:
         )
     payment_intent = await latest_payment_intent(db, order["id"])
     return {
-        "booking": public_booking(order),
+        "booking": public_booking(order, viewer),
         "trackerStage": current_stage,
         "tracker_stage": current_stage,
         "steps": steps,
@@ -996,6 +1117,38 @@ async def bookings_scaffold() -> dict:
     return {"module": "bookings", "ready": True}
 
 
+@router.get("/availability")
+async def booking_slot_availability(
+    tailorId: str,
+    slotDate: date,
+    customer: dict = Depends(get_current_customer),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    now = datetime.now(APP_TIMEZONE)
+    if slotDate < now.date():
+        raise HTTPException(400, PAST_APPOINTMENT_DATE_ERROR)
+    tailor = await fetch_one(db, "SELECT id,approval_mode,available_slots,is_available,availability FROM tailors WHERE id=:id AND deleted_at IS NULL", {"id": tailorId})
+    if not tailor:
+        raise HTTPException(404, "Tailor is not available")
+    rows = (await db.execute(text("""SELECT slot_value,enabled,capacity,booked_count
+        FROM tailor_slot_capacities WHERE tailor_id=:tailor_id AND slot_date=:slot_date"""),
+        {"tailor_id": tailor["id"], "slot_date": slotDate})).mappings().all()
+    configured = {row["slot_value"]: dict(row) for row in rows}
+    default_capacity = max(int(tailor.get("available_slots") or 1), 1)
+    tailor_available = bool(tailor.get("is_available")) and tailor.get("availability") not in {"BUSY", "NOT_AVAILABLE"}
+    slots = []
+    for value, start_minutes in APPOINTMENT_SLOTS.items():
+        row = configured.get(value)
+        expired = slotDate == now.date() and start_minutes <= now.hour * 60 + now.minute
+        if str(tailor.get("approval_mode") or "AUTOMATIC").upper() == "AUTOMATIC":
+            enabled = bool(tailor_available and (not row or (row["enabled"] and int(row["booked_count"]) < int(row["capacity"]))))
+        else:
+            enabled = bool(row["enabled"]) if row else True
+        slots.append({"slot": value, "available": enabled and not expired, "expired": expired,
+                      "remaining": max(int(row["capacity"]) - int(row["booked_count"]), 0) if row else default_capacity})
+    return {"tailorId": tailor["id"], "slotDate": slotDate, "timezone": "Asia/Kolkata", "slots": slots}
+
+
 @router.post("")
 async def create_booking(
     body: BookingCreateIn,
@@ -1042,14 +1195,29 @@ async def create_booking(
     if not service:
         raise HTTPException(404, "Selected service is not available")
 
+    approval_mode = str(tailor.get("approval_mode") or "AUTOMATIC").upper()
     available = bool(tailor.get("is_available")) and tailor.get("availability") not in {"BUSY", "NOT_AVAILABLE"}
-    status = "auto_approved" if available else "waiting_list"
     order_id = uid("ord")
+    request_group_id = uid("grp")
     code_row = await fetch_one(db, "SELECT 'ORD-' || nextval('order_code_seq') AS code")
     code = code_row["code"]
     quantity = body.quantity or 1
-    base_price = int(service["price"]) * quantity
     expected, appointment_date = resolve_booking_dates(body.preferred_date, body.appointment_date, service.get("days"))
+    appointment_slot = validate_appointment_slot(appointment_date, body.appointment_slot)
+    try:
+        calculation = calculate_booking(
+            unit_price=service["price"],
+            service_quantity=quantity,
+            is_combo=bool(service.get("is_combo")),
+            combo_items=service.get("combo_items"),
+            urgent_days=body.urgent_days,
+            delivery_date=expected,
+            appointment_date=appointment_date,
+            appointment_slot=appointment_slot,
+        )
+    except BookingRuleError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    base_price = calculation.base_amount
     customer_address = body.customer_location_address if measurement_mode == "tailor_visits_customer" else tailor.get("shop_address")
     travel_distance_km = Decimal("0.00")
     travel_charge = Decimal("0.00")
@@ -1061,17 +1229,69 @@ async def create_booking(
             body.customer_location_lng,
         )
         travel_charge = travel_charge_for_distance(travel_distance_km)
-    order_total = int((money_decimal(base_price) + travel_charge).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+    order_total = calculation.final_amount
+
+    await db.execute(
+        text("INSERT INTO booking_request_groups (id,customer_id,status) VALUES (:id,:customer_id,'UNASSIGNED')"),
+        {"id": request_group_id, "customer_id": customer["id"]},
+    )
+    status = "PENDING_APPROVAL"
+    status_reason = None
+    expires_at = datetime.now(APP_TIMEZONE) + timedelta(hours=1) if approval_mode == "MANUAL" else None
+    slot_configuration = await fetch_one(db, """SELECT * FROM tailor_slot_capacities
+        WHERE tailor_id=:tailor_id AND slot_date=:slot_date AND slot_value=:slot_value FOR UPDATE""",
+        {"tailor_id": tailor["id"], "slot_date": appointment_date, "slot_value": appointment_slot})
+    if approval_mode == "AUTOMATIC" and available and not slot_configuration:
+        await db.execute(text("""INSERT INTO tailor_slot_capacities
+            (tailor_id,slot_date,slot_value,enabled,capacity,booked_count)
+            VALUES (:tailor_id,:slot_date,:slot_value,TRUE,:capacity,0)
+            ON CONFLICT (tailor_id,slot_date,slot_value) DO NOTHING"""),
+            {"tailor_id": tailor["id"], "slot_date": appointment_date, "slot_value": appointment_slot,
+             "capacity": max(int(tailor.get("available_slots") or 1), 1)})
+        slot_configuration = await fetch_one(db, """SELECT * FROM tailor_slot_capacities
+            WHERE tailor_id=:tailor_id AND slot_date=:slot_date AND slot_value=:slot_value FOR UPDATE""",
+            {"tailor_id": tailor["id"], "slot_date": appointment_date, "slot_value": appointment_slot})
+    if slot_configuration and not slot_configuration.get("enabled"):
+        raise HTTPException(409, "The selected measurement slot is unavailable.")
+    if approval_mode == "MANUAL":
+        conflict = await fetch_one(db, """SELECT id FROM orders WHERE tailor_id=:tailor_id
+            AND appointment_date=:slot_date AND appointment_slot=:slot_value
+            AND upper(status) IN ('AUTO_APPROVED','CONFIRMED','ASSIGNED','MEASUREMENT_PENDING','MEASUREMENT_DONE','IN_PROGRESS') LIMIT 1""",
+            {"tailor_id": tailor["id"], "slot_date": appointment_date, "slot_value": appointment_slot})
+        if conflict:
+            raise HTTPException(409, "The selected measurement slot is already assigned.")
+    if approval_mode == "AUTOMATIC" and available and slot_configuration:
+        capacity = await fetch_one(
+            db,
+            """UPDATE tailor_slot_capacities SET booked_count=booked_count+1,updated_at=now()
+               WHERE tailor_id=:tailor_id AND slot_date=:slot_date AND slot_value=:slot_value
+                 AND enabled=TRUE AND booked_count < capacity RETURNING id""",
+            {"tailor_id": tailor["id"], "slot_date": appointment_date, "slot_value": appointment_slot},
+        )
+        if capacity:
+            status = "AUTO_APPROVED"
+            await db.execute(
+                text("UPDATE booking_request_groups SET status='ASSIGNED',assigned_tailor_id=:tailor_id,assigned_order_id=:order_id,assigned_at=now() WHERE id=:id AND assigned_tailor_id IS NULL"),
+                {"id": request_group_id, "tailor_id": tailor["id"], "order_id": order_id},
+            )
+        else:
+            status, status_reason = "WAITLISTED", "CAPACITY_FULL"
+    elif approval_mode == "AUTOMATIC":
+        status, status_reason = "WAITLISTED", "CAPACITY_FULL"
 
     result = await db.execute(
         text(
             """
             INSERT INTO orders
-              (id,code,customer_id,tailor_id,service_id,service_name,garment_id,quantity,status,base_price,total,
+              (id,code,customer_id,tailor_id,service_id,service_name,garment_id,quantity,status,status_reason,request_group_id,expires_at,
+               base_price,total,base_amount,urgent_days,urgent_charge,final_amount,total_garment_quantity,price_snapshot,
+               delivery_deadline,measurement_cutoff,measurement_appointment_at,assigned_at,
                measurement_mode,appointment_date,appointment_slot,address,expected_completion,notes,
                customer_location_address,customer_location_lat,customer_location_lng,customer_location_confirmed_at,tracker_stage)
             VALUES
-              (:id,:code,:customer_id,:tailor_id,:service_id,:service_name,:garment_id,:quantity,:status,:base_price,:total,
+              (:id,:code,:customer_id,:tailor_id,:service_id,:service_name,:garment_id,:quantity,:status,:status_reason,:request_group_id,:expires_at,
+               :base_price,:total,:base_amount,:urgent_days,:urgent_charge,:final_amount,:total_garment_quantity,CAST(:price_snapshot AS jsonb),
+               :delivery_deadline,:measurement_cutoff,:measurement_appointment_at,:assigned_at,
                :measurement_mode,:appointment_date,:appointment_slot,:address,:expected_completion,:notes,
                :customer_location_address,:customer_location_lat,:customer_location_lng,:customer_location_confirmed_at,'Order Placed')
             RETURNING *
@@ -1087,11 +1307,31 @@ async def create_booking(
             "garment_id": service.get("garment_id"),
             "quantity": quantity,
             "status": status,
+            "status_reason": status_reason,
+            "request_group_id": request_group_id,
+            "expires_at": expires_at,
             "base_price": base_price,
             "total": order_total,
+            "base_amount": calculation.base_amount,
+            "urgent_days": calculation.urgent_days,
+            "urgent_charge": calculation.urgent_charge,
+            "final_amount": calculation.final_amount,
+            "total_garment_quantity": calculation.total_garment_quantity,
+            "price_snapshot": json.dumps({
+                "serviceId": service["id"], "serviceName": service.get("service_name") or service.get("name"),
+                "unitPrice": str(calculation.unit_price), "serviceQuantity": quantity,
+                "garmentsPerService": calculation.garments_per_service, "totalGarments": calculation.total_garment_quantity,
+                "isCombo": bool(service.get("is_combo")), "comboItems": service.get("combo_items") or [],
+                "urgentDays": calculation.urgent_days, "urgentCharge": str(calculation.urgent_charge),
+                "finalAmount": str(calculation.final_amount),
+            }),
+            "delivery_deadline": calculation.delivery_deadline,
+            "measurement_cutoff": calculation.measurement_cutoff,
+            "measurement_appointment_at": calculation.appointment_start,
+            "assigned_at": datetime.now(APP_TIMEZONE) if status == "AUTO_APPROVED" else None,
             "measurement_mode": measurement_mode,
             "appointment_date": appointment_date,
-            "appointment_slot": body.appointment_slot,
+            "appointment_slot": appointment_slot,
             "address": customer_address,
             "expected_completion": expected,
             "notes": body.instructions or body.requirements,
@@ -1112,28 +1352,28 @@ async def create_booking(
         db,
         order_id,
         status,
-        "Booking auto-approved because tailor is available" if status == "auto_approved" else "Tailor is busy; customer added to waiting list",
+        "Booking auto-approved within configured capacity" if status == "AUTO_APPROVED" else "Waiting for tailor approval" if status == "PENDING_APPROVAL" else "Slot capacity is full",
         "system",
     )
     await add_history(db, order_id, "Order Placed", "Order placed by customer", "customer")
     await notify(
         db,
         "tailor:" + tailor["id"],
-        "New TailoraHub booking" if status == "auto_approved" else "New waiting-list customer",
-        f"{customer['name']} booked {service.get('service_name') or service.get('name')} ({code}).",
+        "New TailoraHub booking" if status == "AUTO_APPROVED" else "Booking approval required" if status == "PENDING_APPROVAL" else "New waiting-list customer",
+        f"A customer requested {service.get('service_name') or service.get('name')} ({code}). Open the request to review it.",
         order_id,
     )
     await notify(
         db,
         "user:" + customer["id"],
-        "Booking auto-approved" if status == "auto_approved" else "You are on the waiting list",
-        f"{tailor['shop']} {'received your booking.' if status == 'auto_approved' else 'is currently busy. You are on the waiting list.'}",
+        "Booking auto-approved" if status == "AUTO_APPROVED" else "Waiting for tailor approval" if status == "PENDING_APPROVAL" else "You are on the waiting list",
+        f"Booking {code} was created. Open the booking to see its current status.",
         order_id,
     )
     await db.commit()
     final = await fetch_booking_detail(db, order_id)
     return {
-        "booking": public_booking(final),
+        "booking": public_booking(final, {"id": customer["id"], "roles": ["customer"]}),
         "code": code,
         "status": status,
         "message": "Booking auto-approved." if status == "auto_approved" else "Tailor is currently busy — you're on the waiting list.",
@@ -1148,7 +1388,10 @@ async def get_measurement_trip(
 ) -> dict:
     await ensure_measurement_visit_schema(db)
     order = await get_accessible_order(db, booking_id, user)
-    return jsonable_encoder({"booking": public_booking(order)})
+    viewer = {**user}
+    if "tailor" in (user.get("roles") or []):
+        viewer["tailor_id"] = order.get("tailor_id")
+    return jsonable_encoder({"booking": public_booking(order, viewer)})
 
 
 async def broadcast_measurement_trip(db: AsyncSession, booking_id: str, order: dict) -> None:
@@ -1371,7 +1614,10 @@ async def booking_status(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     order = await get_accessible_order(db, booking_id, user)
-    return await tracker_status_payload(db, order)
+    viewer = {**user}
+    if "tailor" in (user.get("roles") or []):
+        viewer["tailor_id"] = order.get("tailor_id")
+    return await tracker_status_payload(db, order, viewer)
 
 
 @router.get("/{booking_id}/payment-breakdown")
@@ -1422,20 +1668,29 @@ async def customer_update_booking(
         raise HTTPException(400, "Choose instructions or a new delivery date to update.")
 
     if body.preferred_date is not None:
-        if body.preferred_date < date.today():
+        if body.preferred_date < datetime.now(APP_TIMEZONE).date():
             raise HTTPException(400, "Delivery date cannot be in the past.")
         appointment_date = order.get("appointment_date")
         if isinstance(appointment_date, datetime):
             appointment_date = appointment_date.date()
-        if appointment_date and appointment_date > latest_measurement_appointment_date(body.preferred_date):
-            raise HTTPException(400, "Delivery date must stay at least 3 days after the measurement appointment.")
+        delivery_deadline = datetime.combine(body.preferred_date + timedelta(days=1), datetime.min.time(), APP_TIMEZONE)
+        measurement_cutoff = delivery_deadline - timedelta(hours=12 if order.get("urgent_days") in {1, 2, 3} else 48)
+        if appointment_date and order.get("appointment_slot"):
+            try:
+                _, appointment_end = zoned_slot(appointment_date, order["appointment_slot"])
+            except BookingRuleError as exc:
+                raise HTTPException(400, str(exc)) from exc
+            if appointment_end > measurement_cutoff:
+                raise HTTPException(400, "Delivery date does not leave the required measurement preparation time.")
 
     await db.execute(
         text(
             """
             UPDATE orders
             SET notes=COALESCE(:notes, notes),
-                expected_completion=COALESCE(:expected_completion, expected_completion)
+                expected_completion=COALESCE(:expected_completion, expected_completion),
+                delivery_deadline=COALESCE(:delivery_deadline, delivery_deadline),
+                measurement_cutoff=COALESCE(:measurement_cutoff, measurement_cutoff)
             WHERE id=:id
             """
         ),
@@ -1443,6 +1698,8 @@ async def customer_update_booking(
             "id": booking_id,
             "notes": body.instructions,
             "expected_completion": body.preferred_date,
+            "delivery_deadline": delivery_deadline if body.preferred_date is not None else None,
+            "measurement_cutoff": measurement_cutoff if body.preferred_date is not None else None,
         },
     )
     changed_parts = []
@@ -1523,6 +1780,8 @@ async def customer_cancel_booking(
         f"Your order {order['code']} was cancelled before measurement.",
         booking_id,
     )
+    if str(order.get("status") or "").upper() in ACTIVE_CONTACT_STATUSES:
+        await release_capacity_and_promote(db, order)
     await db.commit()
     updated = await fetch_one(
         db,
@@ -1560,7 +1819,17 @@ async def update_booking_stage(
         update_sql = "UPDATE orders SET tracker_stage=:stage, status=:status, measurement_done_at=COALESCE(measurement_done_at, now()) WHERE id=:id"
     await db.execute(text(update_sql), {"id": booking_id, "stage": stage, "status": next_status})
     await add_history(db, booking_id, stage, body.note or f"Tracker moved to {stage}", "tailor")
-    await notify(db, "user:" + order["customer_id"], "TailoraHub order tracker update", f"Order {order['code']} status: {stage}.", booking_id)
+    contact_text = f"Tailor phone: {order.get('tailor_phone') or 'Phone not provided'}. Shop location: {order.get('tailor_location_address') or 'Open the order for the pinned location'}."
+    await notify(
+        db,
+        "user:" + order["customer_id"],
+        "TailoraHub order tracker update",
+        f"Order {order['code']} status: {stage}. {contact_text}",
+        booking_id,
+        notification_type="BOOKING_STATUS_UPDATED",
+        entity_type="booking",
+        entity_id=booking_id,
+    )
     await db.commit()
     updated = await fetch_booking_detail(db, booking_id)
     payload = await tracker_status_payload(db, updated)
@@ -2064,7 +2333,7 @@ async def my_waiting_list(
             FROM orders o
             JOIN users u ON u.id=o.customer_id
             JOIN tailors t ON t.id=o.tailor_id
-            WHERE o.tailor_id=:tailor_id AND o.status='waiting_list'
+            WHERE o.tailor_id=:tailor_id AND upper(o.status) IN ('WAITING_LIST','WAITLISTED','PENDING_APPROVAL')
             ORDER BY o.ts ASC
             """
         ),
@@ -2086,15 +2355,46 @@ async def tailor_confirm_booking(
     )
     if not order:
         raise HTTPException(404, "Booking not found")
-    if order["status"] != "waiting_list":
-        raise HTTPException(409, "Only waiting-list bookings can be confirmed from this queue")
+    status = str(order["status"] or "").upper()
+    if status not in {"WAITING_LIST", "WAITLISTED", "PENDING_APPROVAL"}:
+        raise HTTPException(409, "Only active pending or waiting-list bookings can be confirmed")
+    if order.get("expires_at") and order["expires_at"] <= datetime.now(timezone.utc):
+        await db.execute(text("UPDATE orders SET status='EXPIRED',status_reason='TAILOR_RESPONSE_TIMEOUT' WHERE id=:id"), {"id": booking_id})
+        await db.commit()
+        raise HTTPException(409, "This request expired because the response time ended")
+    conflict = await fetch_one(db, """SELECT id FROM orders WHERE tailor_id=:tailor_id AND appointment_date=:appointment_date
+        AND appointment_slot=:appointment_slot AND id<>:id AND upper(status) IN ('AUTO_APPROVED','CONFIRMED','ASSIGNED','MEASUREMENT_PENDING','MEASUREMENT_DONE','IN_PROGRESS') LIMIT 1""",
+        {"tailor_id": tailor["id"], "appointment_date": order.get("appointment_date"), "appointment_slot": order.get("appointment_slot"), "id": booking_id})
+    if conflict:
+        raise HTTPException(409, "This measurement slot is already assigned. Choose another slot.")
+    if order.get("request_group_id"):
+        assigned = await fetch_one(db, """UPDATE booking_request_groups SET status='ASSIGNED',assigned_tailor_id=:tailor_id,
+            assigned_order_id=:order_id,assigned_at=now() WHERE id=:group_id AND assigned_tailor_id IS NULL RETURNING id""",
+            {"group_id": order["request_group_id"], "tailor_id": tailor["id"], "order_id": booking_id})
+        if not assigned:
+            raise HTTPException(409, "Another tailor has already accepted this request")
+        await db.execute(text("""UPDATE orders SET status='CANCELLED',status_reason='ANOTHER_TAILOR_ACCEPTED'
+            WHERE request_group_id=:group_id AND id<>:id AND upper(status) IN ('PENDING_APPROVAL','WAITLISTED','WAITING_LIST')"""),
+            {"group_id": order["request_group_id"], "id": booking_id})
 
     await db.execute(
-        text("UPDATE orders SET status='measurement_pending', tracker_stage='Measurement Scheduled' WHERE id=:id"),
+        text("UPDATE orders SET status='CONFIRMED',assigned_at=now(),expires_at=NULL,tracker_stage='Measurement Scheduled' WHERE id=:id"),
         {"id": booking_id},
     )
-    await add_history(db, booking_id, "Measurement Scheduled", "Tailor confirmed this waiting-list booking", "tailor")
-    await notify(db, "user:" + order["customer_id"], "Tailor confirmed your booking", f"{tailor['shop']} confirmed order {order['code']}. Measurement is pending.", booking_id)
+    await add_history(db, booking_id, "CONFIRMED", "Tailor accepted and was atomically assigned", "tailor")
+    tailor_contact = order.get("tailor_phone") or "Phone not provided"
+    tailor_location = order.get("tailor_location_address") or "Open the order to view the pinned shop location"
+    await notify(
+        db,
+        "user:" + order["customer_id"],
+        "Tailor confirmed your booking",
+        f"Order {order['code']} is confirmed. Tailor phone: {tailor_contact}. Shop location: {tailor_location}.",
+        booking_id,
+        notification_type="BOOKING_CONFIRMED",
+        entity_type="booking",
+        entity_id=booking_id,
+        dedupe_key="booking-confirmed:" + booking_id,
+    )
     await db.commit()
     updated = await fetch_one(
         db,
@@ -2102,7 +2402,37 @@ async def tailor_confirm_booking(
         {"id": booking_id},
     )
     await tracker_connections.broadcast(booking_id, jsonable_encoder(await tracker_status_payload(db, updated)))
-    return {"booking": public_booking(updated), "message": "Booking moved to measurement pending."}
+    return {"booking": public_booking(updated, {"id": tailor.get("user_id"), "tailor_id": tailor["id"], "roles": ["tailor"]}), "message": "Booking confirmed and assigned."}
+
+
+@router.post("/{booking_id}/tailor-reject")
+async def tailor_reject_booking(
+    booking_id: str,
+    body: CustomerCancelOrderIn,
+    tailor: dict = Depends(get_current_tailor),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    order = await fetch_one(db, "SELECT * FROM orders WHERE id=:id AND tailor_id=:tailor_id FOR UPDATE",
+                            {"id": booking_id, "tailor_id": tailor["id"]})
+    if not order:
+        raise HTTPException(404, "Booking request not found")
+    if str(order.get("status") or "").upper() not in {"PENDING_APPROVAL", "WAITLISTED", "WAITING_LIST"}:
+        raise HTTPException(409, "Only an active pending request can be rejected")
+    reason = (body.reason or "Tailor is unavailable").strip()
+    await db.execute(text("UPDATE orders SET status='REJECTED',status_reason=:reason,expires_at=NULL WHERE id=:id"),
+                     {"id": booking_id, "reason": reason})
+    if order.get("request_group_id"):
+        await db.execute(text("""UPDATE booking_request_groups g SET status='CLOSED',closed_at=now()
+            WHERE g.id=:group_id AND g.assigned_tailor_id IS NULL AND NOT EXISTS
+              (SELECT 1 FROM orders o WHERE o.request_group_id=g.id AND o.id<>:id
+               AND upper(o.status) IN ('PENDING_APPROVAL','WAITLISTED','WAITING_LIST'))"""),
+            {"group_id": order["request_group_id"], "id": booking_id})
+    await add_history(db, booking_id, "REJECTED", reason, "tailor")
+    await notify(db, "user:" + order["customer_id"], "Booking request rejected",
+                 f"Booking {order['code']} was not accepted by this tailor. Open the booking for details.", booking_id,
+                 notification_type="BOOKING_REJECTED", dedupe_key="booking-rejected:" + booking_id)
+    await db.commit()
+    return {"ok": True, "message": "Booking request rejected."}
 
 
 @router.post("/{booking_id}/measurement-done")
@@ -2117,7 +2447,7 @@ async def measurement_done(
         raise HTTPException(404, "Booking not found")
     if is_completed_order(order):
         raise HTTPException(409, "This order is already completed. Measurement updates are disabled.")
-    if order["status"] not in {"auto_approved", "tailor_confirmed", "measurement_pending"}:
+    if str(order["status"] or "").upper() not in {"AUTO_APPROVED", "CONFIRMED", "ASSIGNED", "TAILOR_CONFIRMED", "MEASUREMENT_PENDING"}:
         raise HTTPException(409, "Measurement can be marked done only after booking approval")
     if measurement_visit_needs_otp(order):
         raise HTTPException(409, "Verify the customer's measurement arrival OTP before marking measurement done.")

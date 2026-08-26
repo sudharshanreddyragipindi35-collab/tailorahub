@@ -1,4 +1,4 @@
-package com.tailorahub.twa;
+package com.sr.tailoringmarketplace;
 
 
 
@@ -11,4 +11,3 @@ public class DelegationService extends
         
     }
 }
-

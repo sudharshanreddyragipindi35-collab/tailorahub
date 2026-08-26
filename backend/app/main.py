@@ -267,6 +267,18 @@ class AvailabilityPatch(BaseModel):
     nextAvailable: date | None = None
     availabilityNote: str | None = None
     acceptingRequests: bool | None = None
+    approvalMode: str | None = None
+
+
+class SlotCapacityItem(BaseModel):
+    slot: str
+    enabled: bool = True
+    capacity: int = Field(default=1, ge=0, le=100)
+
+
+class SlotCapacityUpdate(BaseModel):
+    date: date
+    slots: list[SlotCapacityItem]
 
 
 class TailorMediaUpload(BaseModel):
@@ -563,6 +575,7 @@ def as_tailor(t: dict | None) -> dict | None:
         "availabilityNote": t.get("availability_note"),
         "acceptingRequests": bool(t.get("accepting_requests", True)),
         "availabilityUpdated": t.get("availability_updated"),
+        "approvalMode": t.get("approval_mode") or "AUTOMATIC",
         "startingPrice": t.get("starting_price"),
         "activeOrders": t.get("active_orders") or 0,
         "favoriteCount": t.get("favorite_count") or 0,
@@ -1990,9 +2003,20 @@ def customer_bookings(customer: dict = Depends(customer_user), db: Session = Dep
 
 @app.post("/api/customer/notifications/read")
 def mark_customer_notifications_read(customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
-    db.execute(text("UPDATE notifications SET read=TRUE WHERE to_ref=:ref AND read=FALSE"), {"ref": "user:" + customer["id"]})
+    db.execute(text("UPDATE notifications SET read=TRUE,read_at=COALESCE(read_at,now()) WHERE to_ref=:ref AND read=FALSE"), {"ref": "user:" + customer["id"]})
     db.commit()
     return {"ok": True}
+
+
+@app.post("/api/customer/notifications/{notification_id}/read")
+def mark_customer_notification_read(notification_id: str, customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
+    row = fetch_one(db, """UPDATE notifications SET read=TRUE,read_at=COALESCE(read_at,now())
+        WHERE id=:id AND to_ref=:ref RETURNING id,notification_type,entity_type,entity_id,order_id,
+        booking_request_id,measurement_id,payment_id""", {"id": notification_id, "ref": "user:" + customer["id"]})
+    if not row:
+        raise HTTPException(404, "Notification not found")
+    db.commit()
+    return {"ok": True, "notification": row}
 
 
 @app.get("/api/customer/orders/{order_id}/timeline")
@@ -2287,8 +2311,14 @@ def tailor_dashboard(user: dict = Depends(tailor_user), db: Session = Depends(db
     )
     orders = fetch_all(
         db,
-        """SELECT o.*, u.name AS customer_name, u.phone AS customer_phone, u.email AS customer_email,
-        r.address AS customer_address, r.visit_date, r.visit_slot
+        """SELECT o.*, u.name AS customer_name,
+        CASE WHEN upper(o.status) IN ('AUTO_APPROVED','CONFIRMED','ASSIGNED','TAILOR_CONFIRMED','MEASUREMENT_PENDING','MEASUREMENT_DONE','IN_PROGRESS','READY_FOR_DELIVERY','OUT_FOR_DELIVERY','PAYMENT_PENDING','PAID')
+             AND (o.assigned_at IS NOT NULL OR o.request_group_id IS NULL) THEN u.phone ELSE NULL END AS customer_phone,
+        CASE WHEN upper(o.status) IN ('AUTO_APPROVED','CONFIRMED','ASSIGNED','TAILOR_CONFIRMED','MEASUREMENT_PENDING','MEASUREMENT_DONE','IN_PROGRESS','READY_FOR_DELIVERY','OUT_FOR_DELIVERY','PAYMENT_PENDING','PAID')
+             AND (o.assigned_at IS NOT NULL OR o.request_group_id IS NULL) THEN u.email ELSE NULL END AS customer_email,
+        CASE WHEN upper(o.status) IN ('AUTO_APPROVED','CONFIRMED','ASSIGNED','TAILOR_CONFIRMED','MEASUREMENT_PENDING','MEASUREMENT_DONE','IN_PROGRESS','READY_FOR_DELIVERY','OUT_FOR_DELIVERY','PAYMENT_PENDING','PAID')
+             AND (o.assigned_at IS NOT NULL OR o.request_group_id IS NULL) THEN COALESCE(o.customer_location_address,r.address) ELSE NULL END AS customer_address,
+        r.visit_date, r.visit_slot
         FROM orders o
         JOIN users u ON u.id=o.customer_id
         LEFT JOIN booking_requirements r ON r.id=o.requirement_id
@@ -2339,9 +2369,21 @@ def tailor_dashboard(user: dict = Depends(tailor_user), db: Session = Depends(db
 @app.post("/api/tailor/notifications/read")
 def mark_tailor_notifications_read(user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
     tailor = get_tailor_for_user(db, user)
-    db.execute(text("UPDATE notifications SET read=TRUE WHERE to_ref=:ref AND read=FALSE"), {"ref": "tailor:" + tailor["id"]})
+    db.execute(text("UPDATE notifications SET read=TRUE,read_at=COALESCE(read_at,now()) WHERE to_ref=:ref AND read=FALSE"), {"ref": "tailor:" + tailor["id"]})
     db.commit()
     return {"ok": True}
+
+
+@app.post("/api/tailor/notifications/{notification_id}/read")
+def mark_tailor_notification_read(notification_id: str, user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    tailor = get_tailor_for_user(db, user)
+    row = fetch_one(db, """UPDATE notifications SET read=TRUE,read_at=COALESCE(read_at,now())
+        WHERE id=:id AND to_ref=:ref RETURNING id,notification_type,entity_type,entity_id,order_id,
+        booking_request_id,measurement_id,payment_id""", {"id": notification_id, "ref": "tailor:" + tailor["id"]})
+    if not row:
+        raise HTTPException(404, "Notification not found")
+    db.commit()
+    return {"ok": True, "notification": row}
 
 
 @app.patch("/api/tailor/availability")
@@ -2349,6 +2391,9 @@ def update_tailor_availability(body: AvailabilityPatch, user: dict = Depends(tai
     if body.availability not in AVAILABILITY_STATUSES:
         raise HTTPException(400, "Invalid availability status")
     tailor = get_tailor_for_user(db, user)
+    approval_mode = (body.approvalMode or tailor.get("approval_mode") or "AUTOMATIC").upper()
+    if approval_mode not in {"AUTOMATIC", "MANUAL"}:
+        raise HTTPException(400, "Approval mode must be AUTOMATIC or MANUAL")
     accepting = body.acceptingRequests
     if body.availability == "NOT_AVAILABLE":
         accepting = False if accepting is None else accepting
@@ -2361,7 +2406,7 @@ def update_tailor_availability(body: AvailabilityPatch, user: dict = Depends(tai
                 WHEN :availability IN ('AVAILABLE','FEW_SLOTS_AVAILABLE') AND COALESCE(:accepting,accepting_requests)=TRUE THEN TRUE
                 ELSE FALSE
             END,
-            availability_updated=now()
+            approval_mode=:approval_mode, availability_updated=now()
             WHERE id=:id"""
         ),
         {
@@ -2372,11 +2417,36 @@ def update_tailor_availability(body: AvailabilityPatch, user: dict = Depends(tai
             "next_available": body.nextAvailable,
             "note": body.availabilityNote,
             "accepting": accepting,
+            "approval_mode": approval_mode,
         },
     )
     db.commit()
     updated = fetch_one(db, "SELECT t.*, u.phone, u.email FROM tailors t JOIN users u ON u.id=t.user_id WHERE t.id=:id", {"id": tailor["id"]})
     return as_tailor(updated)
+
+
+@app.get("/api/tailor/slot-capacities")
+def tailor_slot_capacities(slot_date: date, user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    tailor = get_tailor_for_user(db, user)
+    rows = fetch_all(db, "SELECT slot_value,enabled,capacity,booked_count FROM tailor_slot_capacities WHERE tailor_id=:id AND slot_date=:date ORDER BY slot_value", {"id": tailor["id"], "date": slot_date})
+    return {"date": slot_date, "approvalMode": tailor.get("approval_mode") or "AUTOMATIC", "slots": rows}
+
+
+@app.put("/api/tailor/slot-capacities")
+def save_tailor_slot_capacities(body: SlotCapacityUpdate, user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    tailor = get_tailor_for_user(db, user)
+    if (tailor.get("approval_mode") or "AUTOMATIC").upper() != "AUTOMATIC":
+        raise HTTPException(409, "Slot capacity is available only in Automatic Approval mode")
+    valid_slots = {"08:00-10:00","10:00-12:00","12:00-14:00","14:00-16:00","16:00-18:00","18:00-20:00","20:00-22:00"}
+    for item in body.slots:
+        if item.slot not in valid_slots:
+            raise HTTPException(400, f"Invalid slot: {item.slot}")
+        db.execute(text("""INSERT INTO tailor_slot_capacities (tailor_id,slot_date,slot_value,enabled,capacity)
+          VALUES (:id,:date,:slot,:enabled,:capacity)
+          ON CONFLICT (tailor_id,slot_date,slot_value) DO UPDATE SET enabled=EXCLUDED.enabled,capacity=EXCLUDED.capacity,updated_at=now()
+          WHERE tailor_slot_capacities.booked_count <= EXCLUDED.capacity"""), {"id": tailor["id"], "date": body.date, "slot": item.slot, "enabled": item.enabled, "capacity": item.capacity})
+    db.commit()
+    return tailor_slot_capacities(body.date, user, db)
 
 
 @app.post("/api/tailor/media", status_code=201)
