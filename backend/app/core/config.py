@@ -26,6 +26,7 @@ class AppSettings(BaseSettings):
     jwt_refresh_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(48), alias="JWT_REFRESH_SECRET")
     jwt_algorithm: str = "HS256"
     access_token_minutes: int = Field(default=1440, alias="ACCESS_TOKEN_MINUTES")
+    session_inactivity_minutes: int = Field(default=15, alias="SESSION_INACTIVITY_MINUTES")
     cors_origins: str = Field(default="http://localhost:5173", alias="CORS_ORIGINS")
 
     sms_provider: str = Field(default="mock", alias="SMS_PROVIDER")

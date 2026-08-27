@@ -19,10 +19,12 @@ from app.security import (
 from .config import get_settings
 
 
-def create_access_token(subject: str, roles: list[str] | None = None) -> str:
+def create_access_token(subject: str, roles: list[str] | None = None, session_id: str | None = None) -> str:
     settings = get_settings()
     exp = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_minutes)
     payload = {"sub": subject, "roles": roles or [], "type": "access", "exp": exp}
+    if session_id:
+        payload["sid"] = session_id
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 

@@ -1,7 +1,8 @@
 const API_BASE = (import.meta.env.VITE_API_BASE || "http://127.0.0.1:9000/api").replace(/\/+$/, "");
 const API_ORIGIN = API_BASE.replace(/\/api$/, "");
 const SESSION_STORAGE_VERSION = "2026-08-12-session-referral-v2";
-export const SESSION_TIMEOUT_MS = 0;
+export const SESSION_TIMEOUT_MS = 15 * 60 * 1000;
+export const INACTIVITY_LOGOUT_MESSAGE = "Your session expired after 15 minutes of inactivity. Please log in again.";
 const LAST_ACTIVE_KEY = "tl_last_active_at";
 const AUTH_STORAGE_KEYS = ["tl_token", "tl_admin_token", "tl_role", "tl_refresh_token", LAST_ACTIVE_KEY];
 
@@ -22,7 +23,7 @@ let refreshToken = sessionStorage.getItem("tl_refresh_token") || "";
 let refreshInFlight = null;
 let sessionClearNotified = false;
 
-export function setSession(nextToken, nextRole, nextRefreshToken = "") {
+export function setSession(nextToken, nextRole, nextRefreshToken = "", { recordActivity = true } = {}) {
   token = nextToken || "";
   role = nextRole || "";
   refreshToken = nextRefreshToken || "";
@@ -35,15 +36,20 @@ export function setSession(nextToken, nextRole, nextRefreshToken = "") {
   if (refreshToken) sessionStorage.setItem("tl_refresh_token", refreshToken);
   else sessionStorage.removeItem("tl_refresh_token");
   sessionStorage.removeItem("tl_admin_token");
-  if (token) markSessionActive();
-  else sessionStorage.removeItem(LAST_ACTIVE_KEY);
+  if (token && recordActivity) markSessionActive();
+  else if (!token) sessionStorage.removeItem(LAST_ACTIVE_KEY);
 }
 
-export function clearSession() {
+export function clearSession(reason = "") {
   setSession("", "");
+  Object.keys(sessionStorage).forEach((key) => {
+    if (key.startsWith("tailorahub:") || key.startsWith("tailorahub-") || key.startsWith("tl_booking")) {
+      sessionStorage.removeItem(key);
+    }
+  });
   if (!sessionClearNotified) {
     sessionClearNotified = true;
-    window.dispatchEvent(new Event("tailorahub:session-cleared"));
+    window.dispatchEvent(new CustomEvent("tailorahub:session-cleared", { detail: { reason } }));
   }
 }
 
@@ -81,13 +87,22 @@ export function isSessionExpired(now = Date.now()) {
   }
 }
 
+export function isSessionInactive(now = Date.now()) {
+  if (!token) return false;
+  const lastActivityAt = getSessionLastActive();
+  return !lastActivityAt || now - lastActivityAt >= SESSION_TIMEOUT_MS;
+}
+
 export function hasValidStoredSession() {
   if (!token || !role) return false;
+  if (isSessionInactive()) {
+    clearSession(INACTIVITY_LOGOUT_MESSAGE);
+    return false;
+  }
   if (isSessionExpired() && !refreshToken) {
     clearSession();
     return false;
   }
-  markSessionActive();
   return true;
 }
 
@@ -108,7 +123,7 @@ async function refreshAccessToken() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) return false;
-      setSession(data.token || data.access_token, data.role || role, data.refreshToken || data.refresh_token || refreshToken);
+      setSession(data.token || data.access_token, data.role || role, data.refreshToken || data.refresh_token || refreshToken, { recordActivity: false });
       return true;
     })().finally(() => {
       refreshInFlight = null;
@@ -184,7 +199,11 @@ function formatRequestError(path, status, data) {
 }
 
 async function request(path, options = {}, retried = false) {
-  if (!path.includes("/auth/refresh")) {
+  if (!path.includes("/auth/refresh") && !path.includes("/auth/logout")) {
+    if (token && isSessionInactive()) {
+      clearSession(INACTIVITY_LOGOUT_MESSAGE);
+      throw new Error(INACTIVITY_LOGOUT_MESSAGE);
+    }
     if (isSessionExpired() && !refreshToken) {
       clearSession();
       throw new Error("Session expired. Please log in again.");
@@ -192,6 +211,7 @@ async function request(path, options = {}, retried = false) {
   }
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (token && getSessionLastActive()) headers["X-TailoraHub-Activity-At"] = String(getSessionLastActive());
   let res;
   try {
     res = await fetch(API_BASE + path, { ...options, headers });
@@ -217,7 +237,11 @@ async function request(path, options = {}, retried = false) {
 }
 
 async function requestText(path, options = {}, retried = false) {
-  if (!path.includes("/auth/refresh")) {
+  if (!path.includes("/auth/refresh") && !path.includes("/auth/logout")) {
+    if (token && isSessionInactive()) {
+      clearSession(INACTIVITY_LOGOUT_MESSAGE);
+      throw new Error(INACTIVITY_LOGOUT_MESSAGE);
+    }
     if (isSessionExpired() && !refreshToken) {
       clearSession();
       throw new Error("Session expired. Please log in again.");
@@ -225,6 +249,7 @@ async function requestText(path, options = {}, retried = false) {
   }
   const headers = { ...(options.headers || {}) };
   if (token) headers.Authorization = `Bearer ${token}`;
+  if (token && getSessionLastActive()) headers["X-TailoraHub-Activity-At"] = String(getSessionLastActive());
   let res;
   try {
     res = await fetch(API_BASE + path, { ...options, headers });
@@ -274,6 +299,7 @@ export const api = {
   customerResetPassword: (payload) => request("/v1/auth/customer-reset-password", { method: "POST", body: JSON.stringify(payload) }),
   refreshSession: (refreshTokenValue = refreshToken) => request("/v1/auth/refresh", { method: "POST", body: JSON.stringify({ refreshToken: refreshTokenValue }) }),
   refreshLegacySession: (refreshTokenValue = refreshToken) => request("/auth/refresh", { method: "POST", body: JSON.stringify({ refreshToken: refreshTokenValue }) }),
+  logoutSession: (refreshTokenValue = refreshToken) => request("/v1/auth/logout", { method: "POST", body: JSON.stringify({ refreshToken: refreshTokenValue }) }),
   registerTailor: (payload) => request("/v1/tailors/register", { method: "POST", body: JSON.stringify(payload) }),
   registerCustomer: (payload) => request("/v1/customers/register", { method: "POST", body: JSON.stringify(payload) }),
   me: () => request("/me"),

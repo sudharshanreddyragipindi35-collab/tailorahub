@@ -19,9 +19,11 @@ def verify_password(password: str, hashed: str | None) -> bool:
     return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
 
 
-def create_token(user: dict) -> str:
+def create_token(user: dict, session_id: str | None = None) -> str:
     exp = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_minutes)
     payload = {"sub": user["id"], "roles": user.get("roles", []), "exp": exp}
+    if session_id:
+        payload["sid"] = session_id
     return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
 
 

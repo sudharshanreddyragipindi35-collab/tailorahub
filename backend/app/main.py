@@ -8,7 +8,7 @@ import string
 import uuid
 
 import jwt
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
@@ -464,16 +464,16 @@ def as_public_user(u: dict | None) -> dict | None:
 
 
 def create_session_payload(db: Session, user: dict) -> dict:
-    access_token = create_token(user)
     refresh_token = create_refresh_token(user["id"])
     refresh_payload = decode_refresh_token(refresh_token)
     token_hash = hash_refresh_token(refresh_token)
+    access_token = create_token(user, token_hash)
     expires_at = datetime.fromtimestamp(refresh_payload["exp"], timezone.utc)
     db.execute(
         text(
             """
-            INSERT INTO refresh_sessions (id,user_id,token_hash,expires_at,created_at)
-            VALUES (gen_random_uuid(),:user_id,:token_hash,:expires_at,now())
+            INSERT INTO refresh_sessions (id,user_id,token_hash,expires_at,last_activity_at,created_at)
+            VALUES (gen_random_uuid(),:user_id,:token_hash,:expires_at,now(),now())
             """
         ),
         {"user_id": user["id"], "token_hash": token_hash, "expires_at": expires_at},
@@ -509,11 +509,19 @@ def rotate_session_payload(db: Session, refresh_token: str) -> dict:
     )
     if not session or session["user_id"] != refresh_payload.get("sub"):
         raise HTTPException(401, "Refresh token expired or revoked")
+    if session.get("last_activity_at") and (datetime.now(timezone.utc) - session["last_activity_at"]).total_seconds() >= settings.session_inactivity_minutes * 60:
+        db.execute(text("UPDATE refresh_sessions SET revoked_at=now() WHERE token_hash=:token_hash"), {"token_hash": old_hash})
+        raise HTTPException(401, "Session expired due to inactivity")
     user = fetch_one(db, "SELECT * FROM users WHERE id=:id", {"id": session["user_id"]})
     next_payload = create_session_payload(db, user)
+    next_hash = hash_refresh_token(next_payload["refreshToken"])
+    db.execute(
+        text("UPDATE refresh_sessions SET last_activity_at=:last_activity_at WHERE token_hash=:next_hash"),
+        {"last_activity_at": session["last_activity_at"], "next_hash": next_hash},
+    )
     db.execute(
         text("UPDATE refresh_sessions SET revoked_at=now(), replaced_by_token_hash=:next_hash WHERE token_hash=:old_hash"),
-        {"next_hash": hash_refresh_token(next_payload["refreshToken"]), "old_hash": old_hash},
+        {"next_hash": next_hash, "old_hash": old_hash},
     )
     return next_payload
 
@@ -670,6 +678,7 @@ def is_completed_order(row: dict | None) -> bool:
 def current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     db: Session = Depends(db_session),
+    activity_at: str | None = Header(default=None, alias="X-TailoraHub-Activity-At"),
 ) -> dict:
     if not credentials:
         raise HTTPException(401, "Sign in required")
@@ -677,6 +686,25 @@ def current_user(
         payload = decode_token(credentials.credentials)
     except jwt.PyJWTError:
         raise HTTPException(401, "Session expired")
+    session_id = payload.get("sid")
+    if session_id:
+        auth_session = fetch_one(db, "SELECT last_activity_at, revoked_at, expires_at FROM refresh_sessions WHERE token_hash=:sid", {"sid": session_id})
+        now = datetime.now(timezone.utc)
+        if not auth_session or auth_session.get("revoked_at") or auth_session["expires_at"] <= now:
+            raise HTTPException(401, "Session expired")
+        client_activity = None
+        try:
+            client_activity = datetime.fromtimestamp(int(activity_at or "0") / 1000, timezone.utc)
+        except (TypeError, ValueError, OSError):
+            pass
+        effective_activity = max(auth_session["last_activity_at"], client_activity) if client_activity else auth_session["last_activity_at"]
+        if (now - effective_activity).total_seconds() >= settings.session_inactivity_minutes * 60:
+            db.execute(text("UPDATE refresh_sessions SET revoked_at=now() WHERE token_hash=:sid"), {"sid": session_id})
+            db.commit()
+            raise HTTPException(401, "Session expired due to inactivity")
+        if client_activity and client_activity > auth_session["last_activity_at"] and client_activity <= now:
+            db.execute(text("UPDATE refresh_sessions SET last_activity_at=:activity WHERE token_hash=:sid"), {"activity": client_activity, "sid": session_id})
+            db.commit()
     user = fetch_one(db, "SELECT * FROM users WHERE id=:id", {"id": payload.get("sub")})
     if not user:
         raise HTTPException(401, "Account not found")

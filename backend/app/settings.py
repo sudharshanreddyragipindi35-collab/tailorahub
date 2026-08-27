@@ -38,6 +38,7 @@ class Settings:
     jwt_refresh_secret = env_value("JWT_REFRESH_SECRET", _RUNTIME_JWT_REFRESH_SECRET)
     jwt_algorithm = "HS256"
     access_token_minutes = env_int("ACCESS_TOKEN_MINUTES", 1440)
+    session_inactivity_minutes = env_int("SESSION_INACTIVITY_MINUTES", 15)
     cors_origins = [x.strip() for x in env_value("CORS_ORIGINS", "http://localhost:5173,https://tailorahub.com,https://www.tailorahub.com,https://api.tailorahub.com").split(",") if x.strip()]
 
     auto_migrate = env_bool("AUTO_MIGRATE", True)

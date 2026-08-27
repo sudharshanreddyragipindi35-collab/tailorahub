@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.otp import OTP_TTL_MINUTES, OtpFlowError, issue_otp, verify_otp
-from app.api.v1.session_tokens import create_token_pair, rotate_refresh_session
+from app.api.v1.session_tokens import create_token_pair, revoke_refresh_session, rotate_refresh_session
 from app.core.database import get_db
 from app.emailer import send_email
 from app.integrations import sms_service
@@ -24,6 +24,13 @@ class RefreshIn(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     refresh_token: str = Field(alias="refreshToken", min_length=20)
+
+
+@router.post("/logout", status_code=204, response_class=Response)
+async def logout(body: RefreshIn, db: AsyncSession = Depends(get_db)) -> Response:
+    await revoke_refresh_session(db, body.refresh_token)
+    await db.commit()
+    return Response(status_code=204)
 
 
 def clean_phone(value: str) -> str:

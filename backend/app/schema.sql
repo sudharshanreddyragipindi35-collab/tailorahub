@@ -620,8 +620,9 @@ CREATE TABLE IF NOT EXISTS refresh_sessions (
   expires_at TIMESTAMPTZ NOT NULL,
   revoked_at TIMESTAMPTZ,
   replaced_by_token_hash VARCHAR(128),
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE refresh_sessions ADD COLUMN IF NOT EXISTS last_activity_at TIMESTAMPTZ NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS refresh_sessions_user_idx ON refresh_sessions(user_id, expires_at DESC);
 CREATE INDEX IF NOT EXISTS refresh_sessions_active_idx ON refresh_sessions(token_hash) WHERE revoked_at IS NULL;
 

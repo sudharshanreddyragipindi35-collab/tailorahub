@@ -25,7 +25,9 @@ import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
 import Scissors from "lucide-react/dist/esm/icons/scissors.js";
 import Search from "lucide-react/dist/esm/icons/search.js";
 import Shield from "lucide-react/dist/esm/icons/shield.js";
+import SlidersHorizontal from "lucide-react/dist/esm/icons/sliders-horizontal.js";
 import Star from "lucide-react/dist/esm/icons/star.js";
+import MapPin from "lucide-react/dist/esm/icons/map-pin.js";
 import Sun from "lucide-react/dist/esm/icons/sun.js";
 import Tag from "lucide-react/dist/esm/icons/tag.js";
 import Trash2 from "lucide-react/dist/esm/icons/trash-2.js";
@@ -33,10 +35,11 @@ import UploadCloud from "lucide-react/dist/esm/icons/upload-cloud.js";
 import UsersRound from "lucide-react/dist/esm/icons/users-round.js";
 import Video from "lucide-react/dist/esm/icons/video.js";
 import XCircle from "lucide-react/dist/esm/icons/x-circle.js";
-import { api, assetUrl, clearSession, getRefreshToken, getRole, getToken, hasValidStoredSession, isSessionExpired, markSessionActive, setSession } from "./api";
+import { api, assetUrl, clearSession, getRefreshToken, getRole, getToken, hasValidStoredSession, INACTIVITY_LOGOUT_MESSAGE, isSessionExpired, isSessionInactive, markSessionActive, setSession } from "./api";
 import MapPicker from "./components/MapPicker";
 import { registerPwa } from "./registerPwa";
 import "./styles.css";
+import "./premium-ui.css";
 
 const roles = [
   ["customer", "Customer", UsersRound, "Discover approved ateliers, book appointments, track orders and pay securely."],
@@ -94,6 +97,16 @@ const translations = {
     "role.admin.description": "టైలర్లను ఆమోదించండి, ఆపరేషన్లను పరిశీలించండి మరియు TailoraHub ప్లాట్‌ఫారమ్‌ను నిర్వహించండి.",
     "home.tagline": "స్టైల్‌కు పరిపూర్ణత కలిసే స్థలం",
     "home.chooseRole": "పాత్రను ఎంచుకోండి",
+    "home.premiumBadge": "టైలరింగ్‌కు కొత్త మెరుగుదల",
+    "home.kicker": "ఆలోచించి కుట్టిన ఫిట్. ఆత్మవిశ్వాసంతో మీరు.",
+    "home.heroLead": "మీ కోసం",
+    "home.heroEmphasis": "ప్రత్యేకంగా",
+    "home.heroTail": "రూపొందించబడింది.",
+    "home.description": "ధృవీకరించిన టైలరింగ్ నిపుణులను ఎంచుకుని, ప్రతి వివరాన్ని నిర్ణయించి, కొలతల నుంచి తుది ఫిట్టింగ్ వరకు మీ ఆర్డర్‌ను అనుసరించండి.",
+    "home.welcome": "TailoraHub‌కు స్వాగతం",
+    "home.continueTitle": "మీరు ఎలా కొనసాగాలనుకుంటున్నారు?",
+    "home.benefitsLabel": "TailoraHub ప్రయోజనాలు",
+    "home.footerTagline": "నమ్మకం, నైపుణ్యం మరియు సరైన ఫిట్ చుట్టూ రూపుదిద్దుకుంది.",
     "home.verifiedTailors": "ధృవీకరించిన టైలర్లు",
     "home.securePayments": "సురక్షిత చెల్లింపులు",
     "home.premiumExperience": "ప్రీమియం అనుభవం",
@@ -423,6 +436,47 @@ const ROUTE_QUERY_KEYS = {
   tailorPanel: "view",
   adminSection: "view",
 };
+const ROLE_DEFAULT_VIEWS = { customer: "browse", tailor: "overview", admin: "dashboard" };
+const ROLE_VIEWS = {
+  customer: new Set(["browse", "profile", "account-profile", "favorites", "updates", "wallet", "referrals", "requests", "orders", "support"]),
+  tailor: new Set(["overview", "availability", "wallet", "referrals", "media", "services", "offers", "followers", "requests", "waiting", "orders", "updates", "support"]),
+  admin: new Set(adminSections.map(([id]) => id)),
+};
+
+function clearNavigationState() {
+  Object.keys(sessionStorage).forEach((key) => {
+    if (key.startsWith(`${APP_HISTORY_KEY}:view:`)) sessionStorage.removeItem(key);
+  });
+}
+
+function roleFromAuthenticatedUser(storedRole, user) {
+  const roles = Array.isArray(user?.roles) ? user.roles.map((value) => String(value).toLowerCase()) : [];
+  if (roles.includes(storedRole)) return storedRole;
+  return ["admin", "tailor", "customer"].find((candidate) => roles.includes(candidate)) || "";
+}
+
+function replaceWithRoleLanding(roleName) {
+  const defaultView = ROLE_DEFAULT_VIEWS[roleName];
+  const url = new URL(window.location.href);
+  url.pathname = "/";
+  url.search = "";
+  url.hash = "";
+  if (defaultView) url.searchParams.set("view", defaultView);
+  window.history.replaceState({ [APP_HISTORY_KEY]: {} }, "", `${url.pathname}${url.search}`);
+}
+
+function validateRestoredRoute(roleName) {
+  const allowedViews = ROLE_VIEWS[roleName];
+  const defaultView = ROLE_DEFAULT_VIEWS[roleName];
+  if (!allowedViews || !defaultView) return;
+  const url = new URL(window.location.href);
+  const requestedView = url.searchParams.get("view");
+  const validProfile = requestedView !== "profile" || Boolean(url.searchParams.get("tailorId"));
+  if (requestedView && allowedViews.has(requestedView) && validProfile) return;
+  url.searchParams.set("view", defaultView);
+  url.searchParams.delete("tailorId");
+  window.history.replaceState(currentHistoryState(), "", `${url.pathname}${url.search}${url.hash}`);
+}
 const MEASUREMENT_APPOINTMENT_ERROR = "Measurement appointment must be on or before the delivery date.";
 const APPOINTMENT_TIME_SLOTS = [
   { value: "08:00-10:00", label: "8:00 AM-10:00 AM", startMinutes: 480 },
@@ -839,8 +893,10 @@ function MediaGallery({ portfolio, onRemove }) {
 
 function App() {
   const [referralEntry, setReferralEntry] = useState(() => readReferralEntry());
-  const [role, setRole] = useState(() => (!referralEntry && hasValidStoredSession() ? getRole() : ""));
-  const [signedIn, setSignedIn] = useState(() => !referralEntry && Boolean(getToken() && getRole()));
+  const [role, setRole] = useState("");
+  const [signedIn, setSignedIn] = useState(false);
+  const [authInitializing, setAuthInitializing] = useState(true);
+  const [authNotice, setAuthNotice] = useState("");
   const [theme, setTheme] = useState(initialTheme);
   const [language, setLanguage] = useState(initialLanguage);
   const languageValue = useMemo(() => ({
@@ -850,13 +906,40 @@ function App() {
   }), [language]);
 
   useEffect(() => {
-    function handleSessionCleared() {
+    function handleSessionCleared(event) {
       setSignedIn(false);
       setRole("");
+      if (event.detail?.reason) setAuthNotice(event.detail.reason);
     }
     window.addEventListener("tailorahub:session-cleared", handleSessionCleared);
     return () => window.removeEventListener("tailorahub:session-cleared", handleSessionCleared);
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function restoreAuthentication() {
+      if (referralEntry || !hasValidStoredSession()) {
+        if (!cancelled) setAuthInitializing(false);
+        return;
+      }
+      try {
+        const me = await api.me();
+        const restoredRole = roleFromAuthenticatedUser(getRole(), me?.user);
+        if (!restoredRole) throw new Error("Authenticated account has no supported role");
+        if (!cancelled) {
+          validateRestoredRoute(restoredRole);
+          setRole(restoredRole);
+          setSignedIn(true);
+        }
+      } catch {
+        clearSession();
+      } finally {
+        if (!cancelled) setAuthInitializing(false);
+      }
+    }
+    restoreAuthentication();
+    return () => { cancelled = true; };
+  }, [referralEntry]);
 
   useEffect(() => {
     if (!referralEntry) return;
@@ -869,8 +952,12 @@ function App() {
     if (!signedIn) return undefined;
 
     function expireIfIdle() {
-      if (!isSessionExpired() || getRefreshToken()) return false;
-      clearSession();
+      const inactive = isSessionInactive();
+      if (!inactive && (!isSessionExpired() || getRefreshToken())) return false;
+      const reason = inactive ? INACTIVITY_LOGOUT_MESSAGE : "Session expired. Please log in again.";
+      const refresh = getRefreshToken();
+      if (refresh) api.logoutSession(refresh).catch(() => {});
+      clearSession(reason);
       setSignedIn(false);
       setRole("");
       return true;
@@ -882,11 +969,10 @@ function App() {
 
     function handleResume() {
       if (document.visibilityState === "hidden") return;
-      handleActivity();
+      expireIfIdle();
     }
 
-    markSessionActive();
-    const activityEvents = ["click", "keydown", "pointerdown", "touchstart", "scroll"];
+    const activityEvents = ["click", "keydown", "input", "pointerdown", "touchstart", "scroll", "popstate"];
     activityEvents.forEach((eventName) => window.addEventListener(eventName, handleActivity, { passive: true, capture: true }));
     window.addEventListener("focus", handleResume);
     document.addEventListener("visibilitychange", handleResume);
@@ -912,7 +998,10 @@ function App() {
 
   function handleAuth(res, selectedRole) {
     const nextRole = res.role || selectedRole;
+    clearNavigationState();
+    replaceWithRoleLanding(nextRole);
     setSession(res.token || res.access_token, nextRole, res.refreshToken || res.refresh_token);
+    setAuthNotice("");
     setRole(nextRole);
     setSignedIn(true);
     if (referralEntry) {
@@ -921,14 +1010,19 @@ function App() {
     }
   }
 
-  function logout() {
+  async function logout() {
+    const refresh = getRefreshToken();
+    if (refresh) await api.logoutSession(refresh).catch(() => {});
     clearSession();
+    clearNavigationState();
+    window.history.replaceState({}, "", "/");
     setSignedIn(false);
     setRole("");
   }
 
   let content;
-  if (!signedIn) content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={referralEntry} />;
+  if (authInitializing) content = <main className="app-shell"><section className="panel"><p>Restoring your secure session...</p></section></main>;
+  else if (!signedIn) content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={referralEntry} sessionMessage={authNotice} />;
   else if (role === "customer") content = <CustomerApp onLogout={logout} />;
   else if (role === "tailor") content = <TailorApp onLogout={logout} />;
   else content = <AdminApp onLogout={logout} />;
@@ -1062,7 +1156,7 @@ function LuxuryRoleCard({ role, active, onSelect }) {
   );
 }
 
-function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEntry }) {
+function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEntry, sessionMessage = "" }) {
   const t = useT();
   const [authStage, setAuthStage] = useAppHistoryState("authStage", "home");
   const [selectedRole, setSelectedRole] = useState("customer");
@@ -2067,23 +2161,38 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
             </div>
           </header>
 
-          <div className="ppt-center-brand">
-            <h2>TAILORAHUB</h2>
-            <div className="ppt-ornament" aria-hidden="true"><span /><b>*</b><span /></div>
-            <p>{t("home.tagline", "Where Style Meets Perfection")}</p>
+          <div className="home-experience">
+            <div className="home-editorial-copy">
+              <span className="home-premium-badge"><Star size={13} /> {t("home.premiumBadge", "Tailoring, elevated")}</span>
+              <p className="home-kicker">{t("home.kicker", "A considered fit. A confident you.")}</p>
+              <h1>{t("home.heroLead", "Crafted for")} <em>{t("home.heroEmphasis", "your")}</em> {t("home.heroTail", "story.")}</h1>
+              <p className="home-description">
+                {t("home.description", "Meet verified tailoring professionals, shape every detail and follow your order from first measurement to final fitting.")}
+              </p>
+              <div className="home-proof" aria-label={t("home.benefitsLabel", "TailoraHub benefits")}>
+                <span><BadgeCheck size={18} /> {t("home.verifiedTailors", "Verified ateliers")}</span>
+                <span><CreditCard size={18} /> {t("home.securePayments", "Secure payments")}</span>
+                <span><Star size={18} /> {t("home.premiumExperience", "Quality assured")}</span>
+              </div>
+            </div>
+
+            <section className="home-role-panel" aria-labelledby="role-selection-title">
+              <div className="home-role-heading">
+                <div>
+                  <span>{t("home.welcome", "Welcome to TailoraHub")}</span>
+                  <h2 id="role-selection-title">{t("home.continueTitle", "How would you like to continue?")}</h2>
+                </div>
+                <small>{t("home.chooseRole", "Choose your space")}</small>
+              </div>
+              <div className="role-grid luxury-role-grid" aria-label={t("home.chooseRole", "Choose role")}>
+                {roles.map((role) => (
+                  <LuxuryRoleCard key={role[0]} role={role} active={selectedRole === role[0]} onSelect={chooseRole} />
+                ))}
+              </div>
+            </section>
           </div>
 
-          <div className="role-grid luxury-role-grid" aria-label={t("home.chooseRole", "Choose role")}>
-            {roles.map((role) => (
-              <LuxuryRoleCard key={role[0]} role={role} active={selectedRole === role[0]} onSelect={chooseRole} />
-            ))}
-          </div>
-
-          <div className="mobile-home-benefits" aria-hidden="true">
-            <span><BadgeCheck size={26} />{t("home.verifiedTailors", "Verified Tailors")}</span>
-            <span><CreditCard size={26} />{t("home.securePayments", "Secure Payments")}</span>
-            <span><Star size={26} />{t("home.premiumExperience", "Premium Experience")}</span>
-          </div>
+          <footer className="home-footer"><span>© 2026 TailoraHub</span><span>{t("home.footerTagline", "Designed around trust, craft and fit.")}</span></footer>
         </section>
       </main>
     );
@@ -2192,8 +2301,39 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   );
 }
 
-function Shell({ title, subtitle, icon: Icon, onLogout, children, actions }) {
+function Shell({ title, subtitle, icon: Icon, onLogout, children, actions, variant = "default", searchValue = "", onSearch, onUpdates, avatarLabel = "TH", unread = 0 }) {
   const { language, setLanguage, t } = useLanguage();
+  if (variant === "customer" || variant === "tailor") {
+    const workspaceName = variant === "tailor" ? "Tailor workspace" : "Customer workspace";
+    return (
+      <div className={`page-shell customer-page-shell ${variant}-page-shell`}>
+        <header className="customer-global-header">
+          <div className="customer-preview-label" aria-label="TailoraHub customer workspace">
+            <Scissors size={18} />
+            <span><strong>{workspaceName}</strong><small>Live account and booking data</small></span>
+          </div>
+          <label className="customer-global-search">
+            <Search size={19} />
+            <input
+              value={searchValue}
+              onChange={(event) => onSearch?.(event.target.value)}
+              placeholder="Search this workspace"
+              aria-label="Search this workspace"
+            />
+            <kbd>Ctrl K</kbd>
+          </label>
+          <div className="customer-global-actions">
+            <button type="button" className="customer-bell-btn" onClick={onUpdates} aria-label="Open updates">
+              <Bell size={18} />
+              {unread ? <b>{unread}</b> : null}
+            </button>
+            <span className="customer-top-avatar" aria-label={title}>{avatarLabel}</span>
+          </div>
+        </header>
+        {children}
+      </div>
+    );
+  }
   return (
     <div className="page-shell">
       <header className="app-header">
@@ -2271,6 +2411,7 @@ function customerSearchSuggestions(rows, query) {
 
 function CustomerApp({ onLogout }) {
   const t = useT();
+  const { language, setLanguage } = useLanguage();
   const [account, setAccount] = useState(null);
   const [tailors, setTailors] = useState([]);
   const [favorites, setFavorites] = useState([]);
@@ -2391,6 +2532,7 @@ function CustomerApp({ onLogout }) {
   const customerDisplayName = account?.name || account?.fullName || "";
   const customerContact = account?.phone || account?.email || t("customer.findTrack", "Find and track tailoring");
   const customerHeaderTitle = customerDisplayName ? `Welcome, ${customerDisplayName}` : "Welcome";
+  const customerInitials = String(customerDisplayName || "Customer").trim().split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "CU";
 
   async function openCustomerNotification(row) {
     await api.markCustomerNotificationRead(row.id);
@@ -2455,31 +2597,42 @@ function CustomerApp({ onLogout }) {
   }
 
   const panels = [
-    ["browse", t("customer.panel.browse", "Browse Tailors"), UsersRound, null],
-    ["profile", t("customer.panel.profile", "Selected Tailor"), Scissors, null],
-    ["favorites", t("common.favorites", "Favorites"), Heart, null],
-    ["updates", t("common.updates", "Updates"), FileClock, unreadUpdates],
+    ["overview", t("common.overview", "Overview"), LayoutDashboard, null],
+    ["browse", t("customer.panel.browse", "Browse Tailors"), Search, null],
+    ...(selectedTailorId ? [["profile", t("customer.panel.profile", "Selected Tailor"), Scissors, null]] : []),
+    ["favorites", t("common.favorites", "Favorites"), Heart, favorites.length],
+    ["orders", t("common.orders", "My Orders"), Scissors, (bookings.orders || []).length],
+    ["requests", t("common.requests", "Requests"), ClipboardList, (bookings.requests || []).length],
+    ["updates", t("common.updates", "Updates"), Bell, unreadUpdates],
     ["wallet", t("common.wallet", "Wallet"), CreditCard, null],
-    ["referrals", t("common.referrals", "Referrals"), UsersRound, null],
-    ["requests", t("common.requests", "Requests"), ClipboardList, null],
-    ["orders", t("common.orders", "Orders"), CreditCard, null],
-    ["support", t("common.support", "Support"), AlertTriangle, null],
+    ["referrals", t("common.referrals", "Refer & Earn"), UsersRound, null],
+    ["support", t("common.support", "Help & Support"), AlertTriangle, null],
+    ["account-profile", "Profile", UsersRound, null],
   ];
 
   return (
-    <Shell title={customerHeaderTitle} subtitle={t("dashboard.customer.subtitle", "Browse and book approved tailors")} icon={UsersRound} onLogout={onLogout} actions={<button className="icon-btn" onClick={() => load()} title={t("common.refresh", "Refresh")}><RefreshCw size={17} /></button>}>
-      {error ? <div className="error banner">{error}</div> : null}
-      {loading ? <div className="loading">{t("customer.loading", "Loading customer data...")}</div> : null}
+    <Shell
+      variant="customer"
+      title={customerHeaderTitle}
+      subtitle={t("dashboard.customer.subtitle", "Browse and book approved tailors")}
+      icon={UsersRound}
+      onLogout={onLogout}
+      searchValue={filters.q}
+      onSearch={(value) => {
+        setFilters((old) => ({ ...old, q: value }));
+        setActivePanel("browse");
+      }}
+      onUpdates={() => setActivePanel("updates")}
+      avatarLabel={customerInitials}
+      unread={unreadUpdates}
+    >
       <div className="customer-workspace">
         <aside className="customer-side-card">
-          <div className="tailor-side-head">
-            <CustomerAvatar customer={account || { name: customerDisplayName }} size="lg" />
-            <div>
-              <h3>{customerDisplayName || "Welcome"}</h3>
-              <p>{selected ? selected.shop : customerContact}</p>
-            </div>
+          <div className="customer-sidebar-brand">
+            <span className="customer-sidebar-mark">TH</span>
+            <span><strong>TailoraHub</strong><small>Tailoring marketplace</small></span>
           </div>
-          <small>{selected ? `${t("customer.selected", "Selected")}: ${selected.ownerName}` : t("customer.chooseSection", "Choose a section to continue.")}</small>
+          <div className="customer-sidebar-space"><strong>Customer space</strong><small>10 screens</small></div>
           <nav className="tailor-side-nav">
             {panels.map(([id, label, Icon, count]) => (
               <button key={id} className={activePanel === id ? "active" : ""} onClick={() => setActivePanel(id)}>
@@ -2489,8 +2642,22 @@ function CustomerApp({ onLogout }) {
               </button>
             ))}
           </nav>
+          <div className="customer-sidebar-footer">
+            <div className="customer-sidebar-tools">
+              <LanguageSelect language={language} setLanguage={setLanguage} />
+              <button className="icon-btn" onClick={() => load()} title={t("common.refresh", "Refresh")}><RefreshCw size={17} /></button>
+              <button className="icon-btn" onClick={onLogout} title={t("common.logout", "Logout")}><LogOut size={17} /></button>
+            </div>
+            <div className="customer-sidebar-user">
+              <CustomerAvatar customer={account || { name: customerDisplayName }} size="md" />
+              <span><strong>{customerDisplayName || "Customer"}</strong><small>{customerContact}</small></span>
+            </div>
+          </div>
         </aside>
         <div className="customer-content">
+          {error ? <div className="error banner">{error}</div> : null}
+          {loading ? <div className="loading">{t("customer.loading", "Loading customer data...")}</div> : null}
+          {activePanel === "overview" ? <CustomerOverviewPanel customerName={customerDisplayName} tailors={visibleTailors} favorites={favorites} bookings={bookings} onBrowse={() => setActivePanel("browse")} onOrders={() => setActivePanel("orders")} /> : null}
           {activePanel === "browse" ? <CustomerBrowsePanel filters={filters} setFilters={setFilters} allTailors={tailors} tailors={visibleTailors} openProfile={openProfile} onBook={openProfile} onFavorite={toggleFavorite} onFollow={toggleFollow} geo={geo} radiusKm={radiusKm} setRadiusKm={setRadiusKm} /> : null}
           {activePanel === "profile" ? (
             selected && profile ? <CustomerTailorProfile profile={profile} reload={load} onFavorite={toggleFavorite} onFollow={toggleFollow} onBookingCreated={handleBookingCreated} /> : <Empty text={t("customer.selectTailorEmpty", "Select a tailor from Browse Tailors to see profile, services, reviews, availability and booking form.")} />
@@ -2500,20 +2667,45 @@ function CustomerApp({ onLogout }) {
           {activePanel === "wallet" ? <CustomerWalletPanel /> : null}
           {activePanel === "referrals" ? <CustomerReferralPanel /> : null}
           {activePanel === "requests" ? <CustomerRequests rows={bookings.requests || []} /> : null}
-          {activePanel === "orders" ? <CustomerOrders rows={bookings.orders || []} reload={load} /> : null}
+          {activePanel === "orders" ? <CustomerOrders rows={bookings.orders || []} reload={load} onCreate={() => setActivePanel("browse")} /> : null}
           {activePanel === "support" ? <SupportPanel role="customer" orders={bookings.orders || []} /> : null}
+          {activePanel === "account-profile" ? <CustomerAccountProfile account={account} onSupport={() => setActivePanel("support")} /> : null}
         </div>
       </div>
     </Shell>
   );
 }
 
+function CustomerOverviewPanel({ customerName, tailors, favorites, bookings, onBrowse, onOrders }) {
+  const activeOrders = (bookings.orders || []).filter((row) => !["DELIVERED", "COMPLETED", "CANCELLED", "REJECTED"].includes(String(row.status || "").toUpperCase())).length;
+  return (
+    <section className="customer-overview-page">
+      <header className="customer-page-heading">
+        <div>
+          <span className="customer-page-eyebrow">Customer workspace</span>
+          <h1>{customerName ? `Welcome, ${customerName.split(/\s+/)[0]}` : "Welcome"}</h1>
+          <p>Find verified tailors, manage bookings, and follow every order through delivery.</p>
+        </div>
+        <button type="button" className="primary-btn customer-heading-action" onClick={onBrowse}>Find a tailor <ArrowRight size={17} /></button>
+      </header>
+      <div className="customer-overview-stats">
+        <button type="button" onClick={onBrowse}><Search size={19} /><span><small>Approved tailors</small><strong>{tailors.length}</strong></span></button>
+        <button type="button" onClick={onOrders}><Scissors size={19} /><span><small>Active orders</small><strong>{activeOrders}</strong></span></button>
+        <button type="button" onClick={onBrowse}><Heart size={19} /><span><small>Favorite tailors</small><strong>{favorites.length}</strong></span></button>
+        <button type="button" onClick={onOrders}><ClipboardList size={19} /><span><small>Booking requests</small><strong>{(bookings.requests || []).length}</strong></span></button>
+      </div>
+    </section>
+  );
+}
+
 function CustomerBrowsePanel({ filters, setFilters, allTailors, tailors, openProfile, onBook, onFavorite, onFollow, geo, radiusKm, setRadiusKm }) {
   const t = useT();
   const filterAreaRef = useRef(null);
+  const searchInputRef = useRef(null);
   const [suggestionsOpen, setSuggestionsOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [activeFilterGroup, setActiveFilterGroup] = useState("service");
+  const [sortBy, setSortBy] = useState("nearest");
   const suggestions = useMemo(() => customerSearchSuggestions(allTailors, filters.q), [allTailors, filters.q]);
   const activeFilterCount = [filters.service, filters.ratingMin, filters.distanceKm, filters.availability].filter(Boolean).length;
   const serviceOptions = [
@@ -2563,6 +2755,12 @@ function CustomerBrowsePanel({ filters, setFilters, allTailors, tailors, openPro
   ];
   const activeGroup = filterGroups.find((group) => group.key === activeFilterGroup) || filterGroups[0];
   const selectedLabel = (group) => group.options.find(([value]) => value === group.value)?.[1] || "";
+  const sortedTailors = useMemo(() => {
+    const rows = [...tailors];
+    if (sortBy === "rating") return rows.sort((a, b) => Number(b.rating || 0) - Number(a.rating || 0));
+    if (sortBy === "price") return rows.sort((a, b) => Number(a.startingPrice || 0) - Number(b.startingPrice || 0));
+    return rows.sort((a, b) => Number(a.distanceKm ?? Number.POSITIVE_INFINITY) - Number(b.distanceKm ?? Number.POSITIVE_INFINITY));
+  }, [tailors, sortBy]);
 
   useEffect(() => {
     if (!filtersOpen) return undefined;
@@ -2575,13 +2773,22 @@ function CustomerBrowsePanel({ filters, setFilters, allTailors, tailors, openPro
   }, [filtersOpen]);
 
   return (
-    <section className="section-block no-top">
+    <section className="section-block no-top customer-browse-panel">
+      <header className="customer-page-heading customer-browse-heading">
+        <div>
+          <span className="customer-page-eyebrow">Customer workspace</span>
+          <h1>Browse tailors</h1>
+          <p>Compare verified tailoring professionals by service, location, availability and price.</p>
+        </div>
+        <button type="button" className="primary-btn customer-heading-action" onClick={() => searchInputRef.current?.focus()}>Find a tailor <ArrowRight size={17} /></button>
+      </header>
       <section className={filtersOpen ? "toolbar customer-live-toolbar filter-open" : "toolbar customer-live-toolbar"}>
         <div className="live-search-wrap" ref={filterAreaRef}>
           <div className="live-search-line">
             <label className="search live-search">
               <Search size={16} />
               <input
+                ref={searchInputRef}
                 value={filters.q}
                 onChange={(e) => {
                   updateFilter({ q: e.target.value });
@@ -2589,9 +2796,14 @@ function CustomerBrowsePanel({ filters, setFilters, allTailors, tailors, openPro
                 }}
                 onFocus={() => setSuggestionsOpen(true)}
                 onBlur={() => window.setTimeout(() => setSuggestionsOpen(false), 120)}
-                placeholder={t("customer.searchPlaceholder", "Search tailor, service, location, rating")}
+                placeholder={t("customer.searchPlaceholder", "Search tailor, service or location")}
               />
             </label>
+            <select className="customer-sort-select" value={sortBy} onChange={(event) => setSortBy(event.target.value)} aria-label="Sort tailors">
+              <option value="nearest">Nearest first</option>
+              <option value="rating">Highest rated</option>
+              <option value="price">Lowest price</option>
+            </select>
             <button
               type="button"
               className={filtersOpen ? "filter-menu-btn active" : "filter-menu-btn"}
@@ -2600,6 +2812,7 @@ function CustomerBrowsePanel({ filters, setFilters, allTailors, tailors, openPro
               aria-expanded={filtersOpen}
               title="Filters"
             >
+              <SlidersHorizontal size={17} />
               <span>Filters</span>
               {activeFilterCount ? <b>{activeFilterCount}</b> : null}
             </button>
@@ -2666,10 +2879,9 @@ function CustomerBrowsePanel({ filters, setFilters, allTailors, tailors, openPro
           ) : null}
         </div>
       </section>
-      <small className="filter-result-count">{tailors.length} tailor{tailors.length === 1 ? "" : "s"} match your filters.</small>
-      <h3>{geo.status === "ready" ? t("customer.nearbyTailors", "Nearby Tailors") : t("customer.approvedTailors", "Approved Tailors")}</h3>
+      <small className="filter-result-count customer-result-count">{tailors.length} tailor{tailors.length === 1 ? "" : "s"} match your filters.</small>
       <PaginatedCards
-        items={tailors}
+        items={sortedTailors}
         pageSize={6}
         label="tailors"
         emptyText={t("customer.noTailors", "No approved tailors match the current filters. Clear filters or approve a tailor from Admin.")}
@@ -2695,63 +2907,52 @@ function CustomerFavoritesPanel({ tailors, openProfile, onFavorite, onFollow }) 
   );
 }
 
-function TailorCard({ tailor, onOpen, onBook, onFavorite, onFollow }) {
+function TailorCard({ tailor, onOpen, onBook, onFavorite }) {
   const t = useT();
   const disabled = tailor.availability === "NOT_AVAILABLE" || !tailor.acceptingRequests;
   const firstMedia = portfolioItems(tailor.portfolio)[0];
+  const shopInitials = String(tailor.shop || "TH").trim().split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "TH";
+  const specialties = (tailor.expertise || []).slice(0, 3).join(" · ") || "Custom stitching";
   return (
-    <article className="record-card tailor-card">
+    <article className="record-card tailor-card customer-discovery-card">
       <div className="tailor-card-cover">
         {firstMedia ? (
           firstMedia.kind === "video" ? <video src={firstMedia.url} muted preload="metadata" /> : <img src={firstMedia.url} alt={`${tailor.shop} cover`} />
         ) : (
           <div className="tailor-cover-fallback">
-            <Scissors size={28} />
-            <span>TailoraHub Atelier</span>
+            <span className="tailor-cover-monogram">{shopInitials}</span>
           </div>
         )}
-        <button className={tailor.favoritedByMe ? "cover-favorite active" : "cover-favorite"} onClick={() => onFavorite(tailor)} title={tailor.favoritedByMe ? t("customer.removeFavorite", "Remove favorite") : t("customer.addFavorite", "Add favorite")}>
-          <Heart size={18} />
+        <button
+          type="button"
+          className={tailor.favoritedByMe ? "tailor-cover-favorite active" : "tailor-cover-favorite"}
+          onClick={() => onFavorite(tailor)}
+          aria-label={tailor.favoritedByMe ? t("customer.removeFavorite", "Remove favorite") : t("customer.addFavorite", "Add favorite")}
+          aria-pressed={Boolean(tailor.favoritedByMe)}
+        >
+          <Heart size={19} fill={tailor.favoritedByMe ? "currentColor" : "none"} />
         </button>
       </div>
-      <div className="tailor-card-profile-row">
-        <TailorAvatar tailor={tailor} size="lg" />
-        <div className="tailor-verify-slot">
-          {tailor.verified ? <BadgeCheck size={19} /> : null}
-        </div>
-      </div>
       <div className="tailor-card-body">
-        <div className="tailor-card-title">
+        <div className="tailor-card-trust-row">
+          <span className="tailor-verified-label"><BadgeCheck size={14} /> {tailor.verified ? "Verified atelier" : "Approved tailor"}</span>
+          <span className="tailor-card-rating"><Star size={14} fill="currentColor" /> {Number(tailor.rating || 0).toFixed(1)}</span>
+        </div>
+        <div className="tailor-card-title customer-tailor-title">
           <h3>{tailor.shop}</h3>
-          <p>{tailor.ownerName} - {tailor.zoneId}</p>
+          <p title={specialties}>{specialties}</p>
         </div>
-        <div className="rating"><Star size={15} /> {Number(tailor.rating || 0).toFixed(1)} ({tailor.ratingCount || 0})</div>
-        <p>{(tailor.expertise || []).join(", ") || "Custom stitching"}</p>
-        <div className="relationship-row">
-          <button className={tailor.favoritedByMe ? "mini-action active" : "mini-action"} onClick={() => onFavorite(tailor)} title={tailor.favoritedByMe ? t("customer.removeFavorite", "Remove favorite") : t("customer.addFavorite", "Add favorite")}>
-            <Heart size={15} />
-            <span>{tailor.favoritedByMe ? t("customer.favorited", "Favorited") : t("common.favorites", "Favorite")}</span>
-            <b>{tailor.favoriteCount || 0}</b>
+        <div className="tailor-card-facts">
+          <span><MapPin size={14} /><b>{tailor.distanceKm !== undefined ? `${Number(tailor.distanceKm).toFixed(1)} km` : (tailor.zoneId || "Local")}</b></span>
+          <span><CreditCard size={14} /><small>{t("customer.fromPrice", "From")}</small><b>{money(tailor.startingPrice)}</b></span>
+          <StatusPill value={tailor.availability} />
+        </div>
+        <div className="inline-actions tailor-discovery-actions">
+          <button className="secondary-btn" onClick={onOpen}>{t("customer.viewProfile", "View profile")}</button>
+          <button className="primary-btn compact-action" onClick={onBook} disabled={disabled}>
+            {disabled ? t("common.unavailable", "Unavailable") : t("customer.book", "Book now")}
+            {!disabled ? <ArrowRight size={16} /> : null}
           </button>
-          <button className={tailor.followedByMe ? "mini-action active" : "mini-action"} onClick={() => onFollow(tailor)} title={tailor.followedByMe ? t("customer.unfollow", "Unfollow tailor") : t("customer.followTailor", "Follow tailor")}>
-            <Bell size={15} />
-            <span>{tailor.followedByMe ? t("customer.following", "Following") : t("customer.follow", "Follow")}</span>
-            <b>{tailor.followerCount || 0}</b>
-          </button>
-        </div>
-        <div className="meta-grid">
-          <span>{t("tailor.completedOrders", "Completed")} <b>{tailor.completed || 0}</b></span>
-          <span>{t("customer.fromPrice", "From")} <b>{money(tailor.startingPrice)}</b></span>
-          <span>{tailor.distanceKm !== undefined ? t("customer.distance", "Distance") : t("status.ACTIVE", "Active")} <b>{tailor.distanceKm !== undefined ? `${Number(tailor.distanceKm).toFixed(1)} km` : tailor.activeOrders || 0}</b></span>
-        </div>
-        {tailor.experienceDisplay !== undefined ? <small>{t("customer.experience", "Experience")}: {Number(tailor.experienceDisplay || 0).toFixed(1)} {t("customer.years", "years")}</small> : null}
-        <StatusPill value={tailor.availability} />
-        <small>{t(`availability.${tailor.availability}`, availabilityCopy[tailor.availability] || "Availability not updated")}</small>
-        {tailor.nextAvailable ? <small>{t("tailor.nextAvailable", "Next available")}: {fmtDay(tailor.nextAvailable)}</small> : null}
-        {disabled ? <div className="notice">{t("availability.NOT_AVAILABLE", "Currently Not Accepting New Orders")}</div> : null}
-        <div className="inline-actions">
-          <button className="secondary-btn" onClick={onOpen}>{t("customer.viewProfile", "View Profile")}</button>
-          <button className="primary-btn compact-action" onClick={onBook}>{t("customer.book", "Book")}</button>
         </div>
       </div>
     </article>
@@ -3089,7 +3290,7 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
       <MediaGallery portfolio={tailor.portfolio} />
       <h3>Send Booking Request</h3>
       {disabled ? <div className="notice">Currently Not Accepting New Orders</div> : (
-        <form className="stack-form" onSubmit={previewBooking}>
+        <form className="stack-form booking-request-form" onSubmit={previewBooking}>
           <label className="span-2">
             Service
             <select value={serviceId} onChange={(e) => setServiceId(e.target.value)} required>
@@ -3111,7 +3312,7 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
             </select>
             <small>Select regular delivery or one of the three faster completion options.</small>
           </label>
-          <label>Stitching requirements<textarea value={form.requirements} onChange={(e) => update("requirements", e.target.value)} /></label>
+          <label className="booking-requirements span-2">Stitching requirements<textarea value={form.requirements} onChange={(e) => update("requirements", e.target.value)} /></label>
           <label>Expected delivery date<input type="date" value={form.preferredDate} min={urgentDeliveryDate || todayDateInput()} max={urgentDeliveryDate || undefined} onChange={(e) => update("preferredDate", e.target.value)} required /></label>
           <label>
             Measurement method
@@ -3151,7 +3352,13 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
                 </>
               )}
             </div>
-          ) : <div className="notice">Visit shop: {tailor.shopAddress || tailor.zoneId}</div>}
+          ) : (
+            <div className="booking-visit-summary span-2" role="note">
+              <span>Measurement location</span>
+              <strong>Visit the tailor's shop</strong>
+              <small>{tailor.shopAddress || tailor.zoneId}</small>
+            </div>
+          )}
           {selectedService ? (
             <BookingEstimateCard
               serviceName={selectedService.name}
@@ -3183,8 +3390,14 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
               {availableAppointmentSlots.map((slot) => <option key={slot.value} value={slot.value}>{slot.label}</option>)}
             </select>
           </label>
-          <label>Special instructions<textarea value={form.instructions} onChange={(e) => update("instructions", e.target.value)} /></label>
-          <button className="primary-btn">Preview Booking</button>
+          <label className="booking-special-instructions span-2">Special instructions<textarea value={form.instructions} onChange={(e) => update("instructions", e.target.value)} /></label>
+          <div className="booking-form-actions span-2">
+            <div>
+              <strong>Ready to review?</strong>
+              <small>Your booking will not be created until you confirm it on the preview page.</small>
+            </div>
+            <button className="primary-btn">Preview Booking</button>
+          </div>
         </form>
       )}
       {message ? <div className={message.includes("waiting list") ? "notice waiting-notice" : message.includes("Booking") || message.includes("approved") ? "notice ok" : "error"}>{message.includes("waiting list") ? <><span className="live-dot" /> {message}</> : message}</div> : null}
@@ -3402,27 +3615,33 @@ function CustomerRequests({ rows }) {
   );
 }
 
-function CustomerOrders({ rows, reload }) {
-  const [filter, setFilter] = useState("in_progress");
-  const inProgressOrders = rows.filter((order) => !isClosedOrder(order) && !isCancelledCustomerOrder(order));
+function CustomerOrders({ rows, reload, onCreate }) {
+  const [filter, setFilter] = useState("all");
+  const activeOrders = rows.filter((order) => !isClosedOrder(order) && !isCancelledCustomerOrder(order));
   const completedOrders = rows.filter((order) => isClosedOrder(order) && !isCancelledCustomerOrder(order));
-  const cancelledOrders = rows.filter((order) => isCancelledCustomerOrder(order));
+  const today = todayDateInput();
+  const upcomingOrders = activeOrders.filter((order) => {
+    const nextDate = orderDateInput(order.appointmentDate || order.appointment_date || order.expectedCompletion || order.expected_completion);
+    return !nextDate || nextDate >= today;
+  });
   const filters = [
-    ["in_progress", "In progress", inProgressOrders],
+    ["all", "All", rows],
+    ["active", "Active", activeOrders],
+    ["upcoming", "Upcoming", upcomingOrders],
     ["completed", "Completed", completedOrders],
-    ["cancelled", "Cancelled", cancelledOrders],
-    ["all", "All orders", rows],
   ];
   const activeFilter = filters.find(([key]) => key === filter) || filters[0];
   const activeRows = activeFilter[2];
 
   return (
-    <section className="section-block no-top">
-      <div className="section-head">
+    <section className="section-block no-top customer-orders-page">
+      <div className="customer-orders-hero">
         <div>
-          <h3>Orders</h3>
-          <p>Track active orders, review completed orders, or check cancelled orders.</p>
+          <span className="customer-orders-eyebrow">Customer workspace</span>
+          <h3>My orders</h3>
+          <p>Follow every garment from booking and measurement through delivery.</p>
         </div>
+        <button type="button" className="primary-btn customer-create-booking" onClick={onCreate}>Create booking <ArrowRight size={18} /></button>
       </div>
       {rows.length ? (
         <>
@@ -3441,17 +3660,16 @@ function CustomerOrders({ rows, reload }) {
               </button>
             ))}
           </div>
-          {filter === "all" ? (
-            <div className="order-card-list">
-              <CustomerOrderGroup title="In progress orders" rows={inProgressOrders} emptyText="No in-progress orders right now." reload={reload} />
-              <CustomerOrderGroup title="Completed orders" rows={completedOrders} emptyText="No completed orders yet." reload={reload} />
-              <CustomerOrderGroup title="Cancelled orders" rows={cancelledOrders} emptyText="No cancelled orders." reload={reload} />
-            </div>
-          ) : (
-            <CustomerOrderGroup title={`${activeFilter[1]} orders`} rows={activeRows} emptyText={`No ${activeFilter[1].toLowerCase()} orders right now.`} reload={reload} />
-          )}
+          <PaginatedCards
+            items={activeRows}
+            pageSize={4}
+            className="customer-order-card-list customer-order-timeline-list"
+            label="orders"
+            emptyText={`No ${activeFilter[1].toLowerCase()} orders right now.`}
+            renderItem={(order) => <CustomerOrderCard order={order} reload={reload} />}
+          />
         </>
-      ) : <Empty />}
+      ) : <Empty text="No orders yet. Choose an approved tailor to create your first booking." />}
     </section>
   );
 }
@@ -3590,6 +3808,51 @@ async function openRazorpayCheckout(options) {
     });
     checkout.open();
   });
+
+  useEffect(() => {
+    if (sessionMessage) setInfo(sessionMessage);
+  }, [sessionMessage]);
+}
+
+function CustomerAccountProfile({ account, onSupport }) {
+  const displayName = account?.name || account?.fullName || "Customer";
+  return (
+    <section className="customer-account-profile section-block no-top">
+      <div className="section-head customer-profile-heading">
+        <div>
+          <h3>Profile</h3>
+          <p>Your account and verified contact information.</p>
+        </div>
+      </div>
+      <div className="customer-profile-layout">
+        <aside className="customer-profile-identity">
+          <CustomerAvatar customer={account || { name: displayName }} size="xl" />
+          <div>
+            <h3>{displayName}</h3>
+            <p>TailoraHub customer{account?.joined ? ` since ${fmtDay(account.joined)}` : ""}</p>
+          </div>
+          <StatusPill value={account?.status || "ACTIVE"} />
+        </aside>
+        <div className="customer-profile-details">
+          <div className="customer-profile-details-head">
+            <div>
+              <small>Account details</small>
+              <h3>Personal information</h3>
+            </div>
+            <button type="button" className="secondary-btn" onClick={onSupport}>Request changes</button>
+          </div>
+          <dl className="customer-profile-fields">
+            <div><dt>Full name</dt><dd>{displayName}</dd></div>
+            <div><dt>Mobile number</dt><dd>{account?.phone || "Not provided"}</dd></div>
+            <div><dt>Email address</dt><dd>{account?.email || "Not provided"}</dd></div>
+            <div><dt>Location / zone</dt><dd>{account?.zoneId || "Not provided"}</dd></div>
+            <div className="wide"><dt>Primary address</dt><dd>{account?.address || "No address saved"}</dd></div>
+          </dl>
+          <p className="customer-profile-note">For security, use Help &amp; Support to change verified phone or email details.</p>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function BookingPreview({ preview, message, submitting, onEdit, onSubmit }) {
@@ -4119,65 +4382,74 @@ function CustomerOrderCard({ order, reload }) {
   const currentStep = (statusData.steps || []).find((step) => step.current) || [...(statusData.steps || [])].reverse().find((step) => step.completed) || { stage: statusData.trackerStage || "Order Placed" };
   const completedCount = (statusData.steps || []).filter((step) => step.completed || step.current).length;
   const progress = statusData.steps?.length ? Math.round((completedCount / statusData.steps.length) * 100) : 14;
-  const appointmentDate = statusData.appointmentDate || statusData.appointment_date;
   const deliveryDate = statusData.expectedCompletion || statusData.expected_completion;
   const blockedReason = statusData.customerManageBlockedReason || statusData.customer_manage_blocked_reason || "Manage options close on the measurement appointment date.";
+  const displayStatus = cancelled ? "CANCELLED" : completed ? "COMPLETED" : currentStep.stage || statusData.status;
 
   return (
-    <article id={`order-${order.id}`} className={`${completed ? "compact-order-card completed" : cancelled ? "compact-order-card cancelled" : "compact-order-card"}${detailsOpen ? " details-open" : ""}${deepLinked ? " deep-linked" : ""}`}>
-      <div className="compact-order-summary">
-        <div className="compact-order-id">
-          <strong>{statusData.code || order.code}</strong>
-          <StatusPill value={statusData.status} />
-          <StatusPill value={statusData.paymentStatus || statusData.payment_status} />
-        </div>
-        {String(statusData.status || "").toUpperCase() === "PENDING_APPROVAL" ? <ExpiryCountdown expiresAt={statusData.expiresAt || statusData.expires_at} /> : null}
-        <div>
+    <article id={`order-${order.id}`} className={`${completed ? "compact-order-card customer-order-card completed" : cancelled ? "compact-order-card customer-order-card cancelled" : "compact-order-card customer-order-card"}${detailsOpen ? " details-open" : ""}${deepLinked ? " deep-linked" : ""}`}>
+      <div className="customer-order-preview">
+        <div className="customer-order-primary">
+          <small>{statusData.code || order.code}</small>
           <h3>{statusData.serviceName || order.service_name}</h3>
-          <p>{statusData.tailorName || order.shop}</p>
+          <p>Tailor: {statusData.tailorName || order.shop}</p>
+          {String(statusData.status || "").toUpperCase() === "PENDING_APPROVAL" ? <ExpiryCountdown expiresAt={statusData.expiresAt || statusData.expires_at} /> : null}
         </div>
-        <div className="compact-progress-row" aria-label={`Order progress ${progress}%`}>
+        <div className="customer-order-stage"><StatusPill value={displayStatus} /></div>
+        <div className="customer-order-facts">
+          <span><FileClock size={15} /><small>Due {fmtDay(deliveryDate)}</small></span>
+          <span><CreditCard size={15} /><small>{money(statusData.total || order.total)}</small></span>
+          <span><Scissors size={15} /><small>{currentStep.stage || "Tracked order"}</small></span>
+        </div>
+        <div className="customer-order-reference-actions">
+          <button
+            type="button"
+            className={detailsOpen && activeView === "track" ? "secondary-btn active" : "secondary-btn"}
+            onClick={() => {
+              setDetailsOpen(true);
+              setActiveView((view) => view === "track" ? "" : "track");
+            }}
+          >
+            {detailsOpen && activeView === "track" ? "Hide timeline" : "View timeline"}
+          </button>
+          <button
+            type="button"
+            className="primary-btn"
+            onClick={() => {
+              setDetailsOpen((open) => !open);
+              setActiveView("");
+            }}
+          >
+            {detailsOpen ? "Close order" : "Open order"} <ArrowRight size={17} />
+          </button>
+        </div>
+        <div className="customer-order-progress compact-progress-row" aria-label={`Order progress ${progress}%`}>
           <span><i style={{ width: `${progress}%` }} /></span>
-          <b>{currentStep.stage}</b>
-        </div>
-        <div className="compact-order-meta">
-          <span><small>Measurement</small><b>{fmtDay(appointmentDate)}</b></span>
-          <span><small>Delivery</small><b>{fmtDay(deliveryDate)}</b></span>
-          <span><small>Total</small><b>{money(statusData.total || order.total)}</b></span>
         </div>
       </div>
 
-      <div className="compact-order-actions" role="tablist" aria-label={`Actions for ${statusData.code || order.code}`}>
-        <button
-          type="button"
-          className="view-more-order-btn"
-          onClick={() => {
-            setDetailsOpen((open) => {
-              if (open) setActiveView("");
-              return !open;
-            });
-          }}
-        >
-          {detailsOpen ? "Show less" : "View more"}
-        </button>
-        {detailsOpen ? (
-          <button type="button" className={activeView === "track" ? "active" : ""} onClick={() => setActiveView((view) => view === "track" ? "" : "track")}>
-            Track order
-          </button>
-        ) : null}
-        {detailsOpen && !completed && !cancelled ? (
-          <>
-            <button type="button" className={activeView === "manage" ? "active" : ""} onClick={() => setActiveView((view) => view === "manage" ? "" : "manage")} disabled={!manageable}>
-              Manage order
-            </button>
-            <button type="button" className={activeView === "instructions" ? "active" : ""} onClick={() => setActiveView((view) => view === "instructions" ? "" : "instructions")} disabled={!manageable}>
-              Update instructions
-            </button>
-          </>
-        ) : null}
-        {!isPaid && !completed && !cancelled ? <button type="button" onClick={pay} disabled={busy}>{busy ? "Opening..." : "Pay securely"}</button> : null}
-        {detailsOpen && completed ? <button type="button" className={activeView === "feedback" ? "active" : ""} onClick={() => setActiveView((view) => view === "feedback" ? "" : "feedback")}>Feedback</button> : null}
-      </div>
+      {detailsOpen ? (
+        <div className="compact-order-actions customer-order-expanded-actions" role="tablist" aria-label={`Actions for ${statusData.code || order.code}`}>
+          {!completed && !cancelled ? (
+            <>
+              <button type="button" className={activeView === "manage" ? "active" : ""} onClick={() => setActiveView((view) => view === "manage" ? "" : "manage")} disabled={!manageable}>
+                Manage order
+              </button>
+              <button type="button" className={activeView === "instructions" ? "active" : ""} onClick={() => setActiveView((view) => view === "instructions" ? "" : "instructions")} disabled={!manageable}>
+                Update instructions
+              </button>
+              {isTailorVisitOrder(statusData) ? (
+                <button type="button" className={activeView === "measurement" ? "active" : ""} onClick={() => setActiveView((view) => view === "measurement" ? "" : "measurement")}>
+                  Measurement visit
+                </button>
+              ) : null}
+            </>
+          ) : null}
+          {!isPaid && !completed && !cancelled ? <button type="button" onClick={pay} disabled={busy}>{busy ? "Opening..." : "Pay securely"}</button> : null}
+          {completed ? <button type="button" className={activeView === "feedback" ? "active" : ""} onClick={() => setActiveView((view) => view === "feedback" ? "" : "feedback")}>Feedback</button> : null}
+          <StatusPill value={statusData.paymentStatus || statusData.payment_status} />
+        </div>
+      ) : null}
 
       {detailsOpen && !manageable && !completed && !cancelled ? <small className="manage-cutoff-note">{blockedReason}</small> : null}
       {cancelled ? <div className="notice">Order cancelled: {statusData.cancelReason || statusData.cancel_reason || "Cancelled before measurement."}</div> : null}
@@ -4196,10 +4468,13 @@ function CustomerOrderCard({ order, reload }) {
       {detailsOpen && activeView === "track" ? (
         <div className="compact-order-panel">
           <OrderTracker steps={statusData.steps} />
-          <CustomerMeasurementVisitPanel order={statusData} />
-          {!isPaid && !cancelled ? <PaymentBreakdownCard breakdown={breakdown} /> : null}
-          {!isPaid && paymentIntent && !cancelled ? <PaymentIntentNotice intent={paymentIntent} /> : null}
           {completed ? <QualityCheckPrompt onDispute={raiseDispute} busy={busy} /> : null}
+        </div>
+      ) : null}
+
+      {detailsOpen && activeView === "measurement" && !completed && !cancelled ? (
+        <div className="compact-order-panel customer-measurement-panel">
+          <CustomerMeasurementVisitPanel order={statusData} />
         </div>
       ) : null}
 
@@ -4700,12 +4975,14 @@ function SupportPanel({ role, orders = [] }) {
 
 function TailorApp({ onLogout }) {
   const t = useT();
+  const { language, setLanguage } = useLanguage();
   const [data, setData] = useState(null);
   const [availability, setAvailability] = useState({});
   const [savedAvailability, setSavedAvailability] = useState({});
   const [availabilityFeedback, setAvailabilityFeedback] = useState("");
   const [savingAvailability, setSavingAvailability] = useState(false);
   const [activePanel, setActivePanel] = useAppHistoryState("tailorPanel", "overview");
+  const [workspaceSearch, setWorkspaceSearch] = useState("");
   const [error, setError] = useState("");
 
   async function load() {
@@ -4770,37 +5047,43 @@ function TailorApp({ onLogout }) {
   const pendingApproval = data.tailor.approvalStatus !== "APPROVED";
   const mediaCount = portfolioItems(data.tailor.portfolio).length;
   const activeOffers = (data.offers || []).filter((offer) => offer.active !== false).length;
+  const tailorInitials = String(data.tailor.shop || data.tailor.ownerName || "Tailor").trim().split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "TH";
   const panels = [
     ["overview", t("common.overview", "Overview"), LayoutDashboard, null],
     ["availability", t("common.availability", "Availability"), CheckCircle2, null],
-    ["wallet", t("common.wallet", "Wallet"), CreditCard, null],
-    ["referrals", t("common.referrals", "Referrals"), UsersRound, null],
-    ["media", t("common.photosVideos", "Photos / Videos"), ImageIcon, null],
-    ["services", t("common.services", "Services"), Tag, null],
+    ["requests", "Booking requests", ClipboardList, Number(data.stats.pending_requests || 0)],
+    ["waiting", t("common.waitingList", "Waiting list"), FileClock, Number(data.stats.waiting_list || data.stats.waitlisted || 0)],
+    ["orders", "Order queue", Scissors, Number(data.stats.active_orders || 0)],
+    ["services", "Services & pricing", Tag, null],
+    ["media", "Portfolio", ImageIcon, mediaCount],
     ["offers", t("common.offers", "Offers"), Megaphone, null],
     ["followers", t("common.followers", "Followers"), UsersRound, null],
-    ["requests", t("common.requests", "Requests"), ClipboardList, null],
-    ["waiting", t("common.waitingList", "Waiting List"), FileClock, null],
-    ["orders", t("common.orders", "Orders"), Scissors, null],
+    ["wallet", "Earnings & wallet", CreditCard, null],
+    ["referrals", t("common.referrals", "Referrals"), UsersRound, null],
     ["updates", t("common.updates", "Updates"), FileClock, unreadUpdates],
     ["support", t("common.support", "Support"), AlertTriangle, null],
   ];
 
   return (
-    <Shell title={t("dashboard.tailor.title", "Tailor Dashboard")} subtitle={data.tailor.shop} icon={Scissors} onLogout={onLogout} actions={<button className="icon-btn" onClick={load} title={t("common.refresh", "Refresh")}><RefreshCw size={17} /></button>}>
-      {error ? <div className="error banner">{error}</div> : null}
-      {pendingApproval ? <div className="notice warn">{t("tailor.profilePending", `Your tailor profile is ${data.tailor.approvalStatus}. Customers will see you only after admin approval.`, { status: data.tailor.approvalStatus })}</div> : null}
-      <div className="tailor-workspace">
-        <aside className="tailor-side-card">
-          <div className="tailor-side-head">
-            <TailorAvatar tailor={data.tailor} />
-            <div>
-              <h3>{data.tailor.shop}</h3>
-              <p>{data.tailor.ownerName}</p>
-            </div>
+    <Shell
+      variant="tailor"
+      title={data.tailor.shop}
+      subtitle={t("dashboard.tailor.title", "Tailor Dashboard")}
+      icon={Scissors}
+      onLogout={onLogout}
+      searchValue={workspaceSearch}
+      onSearch={setWorkspaceSearch}
+      onUpdates={() => setActivePanel("updates")}
+      avatarLabel={tailorInitials}
+      unread={unreadUpdates}
+    >
+      <div className="tailor-workspace customer-workspace">
+        <aside className="tailor-side-card customer-side-card">
+          <div className="customer-sidebar-brand">
+            <span className="customer-sidebar-mark">TH</span>
+            <span><strong>TailoraHub</strong><small>Tailoring marketplace</small></span>
           </div>
-          <StatusPill value={data.tailor.availability} />
-          <small>{data.tailor.availabilityNote || t(`availability.${data.tailor.availability}`, availabilityCopy[data.tailor.availability])}</small>
+          <div className="customer-sidebar-space"><strong>Tailor space</strong><small>14 screens</small></div>
           <nav className="tailor-side-nav">
             {panels.map(([id, label, Icon, count]) => (
               <button key={id} className={activePanel === id ? "active" : ""} onClick={() => setActivePanel(id)}>
@@ -4810,39 +5093,22 @@ function TailorApp({ onLogout }) {
               </button>
             ))}
           </nav>
+          <div className="customer-sidebar-footer">
+            <div className="customer-sidebar-tools">
+              <LanguageSelect language={language} setLanguage={setLanguage} />
+              <button className="icon-btn" onClick={load} title={t("common.refresh", "Refresh")}><RefreshCw size={17} /></button>
+              <button className="icon-btn" onClick={onLogout} title={t("common.logout", "Logout")}><LogOut size={17} /></button>
+            </div>
+            <div className="customer-sidebar-user">
+              <TailorAvatar tailor={data.tailor} size="md" />
+              <span><strong>{data.tailor.shop}</strong><small>{data.tailor.ownerName}</small></span>
+            </div>
+          </div>
         </aside>
-        <div className="tailor-content">
-          {activePanel === "overview" ? (
-            <>
-              <div className="kpi-grid">
-                <Kpi label={t("tailor.pendingRequests", "Pending Requests")} value={data.stats.pending_requests} icon={ClipboardList} />
-                <Kpi label={t("tailor.activeOrders", "Active Orders")} value={data.stats.active_orders} icon={Scissors} />
-                <Kpi label={t("tailor.completedOrders", "Completed Orders")} value={data.stats.completed_orders} icon={CheckCircle2} />
-                <Kpi label={t("tailor.earnings", "Earnings")} value={money(data.stats.earnings)} icon={CreditCard} />
-                <Kpi label={t("common.followers", "Followers")} value={data.stats.followers || 0} icon={UsersRound} />
-                <Kpi label={t("common.favorites", "Favorites")} value={data.stats.favorites || 0} icon={Heart} />
-              </div>
-              <div className="two-col overview-cards">
-                <div className="record-card">
-                  <h3>{t("tailor.currentAvailability", "Current Availability")}</h3>
-                  <StatusPill value={data.tailor.availability} />
-                  <p>{data.tailor.availabilityNote || t(`availability.${data.tailor.availability}`, availabilityCopy[data.tailor.availability])}</p>
-                  <small>{t("tailor.availableSlots", "Available slots")}: {data.tailor.availableSlots || 0}</small>
-                  <small>{t("tailor.nextAvailable", "Next available")}: {fmtDay(data.tailor.nextAvailable)}</small>
-                </div>
-                <div className="record-card">
-                  <h3>{t("tailor.publicMedia", "Public Media")}</h3>
-                  <p>{mediaCount ? `${mediaCount} photo/video item${mediaCount === 1 ? "" : "s"} visible to customers.` : "No photo or video uploaded yet."}</p>
-                  <button className="secondary-btn" onClick={() => setActivePanel("media")}>{t("tailor.manageMedia", "Manage Media")}</button>
-                </div>
-                <div className="record-card">
-                  <h3>{t("tailor.followerUpdates", "Follower Updates")}</h3>
-                  <p>{data.stats.followers ? `${data.stats.followers} customer profile${data.stats.followers === 1 ? "" : "s"} will get in-app updates when you post media or offers.` : t("tailor.noFollowers", "No followers yet.")}</p>
-                  <button className="secondary-btn" onClick={() => setActivePanel("offers")}>{t("tailor.postOffer", "Post Offer")}</button>
-                </div>
-              </div>
-            </>
-          ) : null}
+        <div className="tailor-content customer-content">
+          {error ? <div className="error banner">{error}</div> : null}
+          {pendingApproval ? <div className="notice warn">{t("tailor.profilePending", `Your tailor profile is ${data.tailor.approvalStatus}. Customers will see you only after admin approval.`, { status: data.tailor.approvalStatus })}</div> : null}
+          {activePanel === "overview" ? <TailorOverviewPanel data={data} onNavigate={setActivePanel} /> : null}
           {activePanel === "availability" ? <TailorAvailabilityPanel availability={availability} setAvailability={(next) => { setAvailability(next); setAvailabilityFeedback(""); }} saveAvailability={saveAvailability} feedback={availabilityFeedback} saving={savingAvailability} /> : null}
           {activePanel === "wallet" ? <TailorWalletPanel /> : null}
           {activePanel === "referrals" ? <TailorReferralPanel /> : null}
@@ -4858,6 +5124,80 @@ function TailorApp({ onLogout }) {
         </div>
       </div>
     </Shell>
+  );
+}
+
+function TailorOverviewPanel({ data, onNavigate }) {
+  const pendingRequests = (data.requests || []).filter((row) => String(row.status || "").toUpperCase() === "PENDING");
+  const activeOrders = (data.orders || []).filter((row) => !["DELIVERED", "COMPLETED", "CANCELLED", "REJECTED"].includes(String(row.status || "").toUpperCase()));
+  const priority = pendingRequests[0] || activeOrders[0] || null;
+  const priorityIsRequest = Boolean(priority && pendingRequests.includes(priority));
+  const recentUpdates = (data.notifications || []).slice(0, 3);
+  const availableSlots = Number(data.tailor.availableSlots || 0);
+  return (
+    <section className="tailor-approved-overview">
+      <header className="customer-page-heading tailor-page-heading">
+        <div>
+          <span className="customer-page-eyebrow">Tailor workspace</span>
+          <h1>Overview</h1>
+          <p>Today&apos;s workboard brings requests, due orders and earnings into focus.</p>
+        </div>
+      </header>
+      <div className="tailor-overview-kpis">
+        <article><ClipboardList size={24} /><span><small>New requests</small><strong>{String(data.stats.pending_requests || 0).padStart(2, "0")}</strong><em>{pendingRequests.length ? `${pendingRequests.length} need attention` : "Nothing pending"}</em></span></article>
+        <article><Scissors size={24} /><span><small>Active orders</small><strong>{String(data.stats.active_orders || 0).padStart(2, "0")}</strong><em>{activeOrders.length ? "Work currently in progress" : "Queue is clear"}</em></span></article>
+        <article><FileClock size={24} /><span><small>Available slots</small><strong>{String(availableSlots).padStart(2, "0")}/{String(APPOINTMENT_TIME_SLOTS.length).padStart(2, "0")}</strong><em>{data.tailor.acceptingRequests ? "Accepting bookings" : "Requests paused"}</em></span></article>
+        <article><CreditCard size={24} /><span><small>Total earnings</small><strong>{money(data.stats.earnings || 0)}</strong><em>Live wallet total</em></span></article>
+      </div>
+      <div className="tailor-overview-focus-grid">
+        <section className="tailor-workboard-card">
+          <div className="tailor-panel-heading">
+            <div><span>Priority</span><h2>Today&apos;s workboard</h2></div>
+            <button type="button" onClick={() => onNavigate(priorityIsRequest ? "requests" : "orders")}>View details <ArrowRight size={17} /></button>
+          </div>
+          {priority ? (
+            <article className="tailor-priority-row">
+              <div className="tailor-priority-date"><small>{fmtDay(priority.preferred_date || priority.measurement_date || priority.delivery_date || priority.ts)}</small></div>
+              <div className="tailor-priority-copy">
+                <StatusPill value={priority.status || (priorityIsRequest ? "PENDING" : "IN_PROGRESS")} />
+                <strong>{priorityIsRequest ? (priority.tailor_service_name || priority.service_name || "Booking request") : (priority.serviceName || priority.service_name || priority.code || "Active order")}</strong>
+                <span>{priorityIsRequest ? (priority.customer_name || priority.customer_area || "Customer request") : `${priority.code || priority.id || "Order"} · ${priority.customerName || priority.customer_name || "Customer"}`}</span>
+              </div>
+              <button type="button" className="primary-btn" onClick={() => onNavigate(priorityIsRequest ? "requests" : "orders")}>Open details <ArrowRight size={16} /></button>
+            </article>
+          ) : <Empty text="No priority requests or active orders right now." />}
+          <div className="tailor-workboard-progress" aria-label="Tailor workflow">
+            {["Booked", "Measured", "In progress", "Final fitting"].map((label, index) => <span key={label} className={index === 0 || activeOrders.length ? "done" : ""}><b>{index < 3 && activeOrders.length ? "✓" : index + 1}</b><small>{label}</small></span>)}
+          </div>
+        </section>
+        <aside className="tailor-concierge-card">
+          <span className="tailor-concierge-icon"><AlertTriangle size={24} /></span>
+          <small>TailoraHub concierge</small>
+          <h2>Need a little help?</h2>
+          <p>Support stays connected to the relevant booking, order or payment.</p>
+          <button type="button" onClick={() => onNavigate("support")}>Start a conversation <ArrowRight size={17} /></button>
+        </aside>
+      </div>
+      <section className="tailor-recent-updates">
+        <div className="tailor-panel-heading">
+          <div><span>Live activity</span><h2>Recent updates</h2></div>
+          <button type="button" onClick={() => onNavigate("updates")}>View all <ArrowRight size={17} /></button>
+        </div>
+        {recentUpdates.length ? (
+          <div className="tailor-updates-table">
+            <div className="tailor-updates-head"><span>Item</span><span>Details</span><span>Updated</span><span>Status</span></div>
+            {recentUpdates.map((row) => (
+              <button type="button" key={row.id} onClick={() => onNavigate("updates")}>
+                <strong>{row.entity_id || row.order_id || row.booking_request_id || "Update"}</strong>
+                <span>{row.title || row.body || "TailoraHub update"}</span>
+                <span>{fmtDate(row.ts)}</span>
+                <StatusPill value={updatePresentation(row).status} />
+              </button>
+            ))}
+          </div>
+        ) : <Empty text="No recent updates." />}
+      </section>
+    </section>
   );
 }
 
@@ -4887,20 +5227,63 @@ function TailorAvailabilityPanel({ availability, setAvailability, saveAvailabili
       setSlotMessage(err.message);
     }
   }
+  const statusOptions = [
+    ["AVAILABLE", "Available", "Accepting new booking requests", "#4aa178"],
+    ["FEW_SLOTS_AVAILABLE", "Few slots", "Limited booking capacity", "#d79a29"],
+    ["BUSY", "Busy", "Requests may be delayed", "#918b82"],
+    ["NOT_AVAILABLE", "Not available", "Pause new requests", "#c85a57"],
+  ];
   return (
-    <section className="section-block no-top">
-      <h3>{t("common.availability", "Availability")}</h3>
-      <form className="availability-form" onSubmit={saveAvailability}>
+    <section className="tailor-approved-availability">
+      <header className="customer-page-heading tailor-page-heading">
+        <div>
+          <span className="customer-page-eyebrow">Tailor workspace</span>
+          <h1>{t("common.availability", "Availability")}</h1>
+          <p>Control booking mode, slot capacity and working hours with confidence.</p>
+        </div>
+        <button type="submit" form="tailor-availability-form" className="primary-btn customer-heading-action" disabled={saving}>{saving ? "Saving..." : "Save availability"} <ArrowRight size={17} /></button>
+      </header>
+      <div className="tailor-status-selector" role="group" aria-label="Availability status">
+        {statusOptions.map(([value, label, description, color]) => (
+          <button type="button" key={value} className={availability.availability === value ? "active" : ""} onClick={() => setAvailability({ ...availability, availability: value })}>
+            <span className="tailor-status-dot" style={{ backgroundColor: color }} />
+            <strong>{label}</strong>
+            <small>{description}</small>
+            {availability.availability === value ? <CheckCircle2 size={17} /> : null}
+          </button>
+        ))}
+      </div>
+      <form id="tailor-availability-form" className="availability-form tailor-availability-settings" onSubmit={saveAvailability}>
+        <div className="tailor-panel-heading span-2"><div><span>Booking settings</span><h2>Request controls</h2></div></div>
         <label>Approval mode<select value={availability.approvalMode || "AUTOMATIC"} onChange={(e) => setAvailability({ ...availability, approvalMode: e.target.value })}><option value="AUTOMATIC">Automatic Approval</option><option value="MANUAL">Manual Approval</option></select></label>
-        <label>{t("tailor.status", "Status")}<select value={availability.availability} onChange={(e) => setAvailability({ ...availability, availability: e.target.value })}><option value="AVAILABLE">{t("common.available", "Available")}</option><option value="FEW_SLOTS_AVAILABLE">{t("common.fewSlots", "Few Slots Available")}</option><option value="BUSY">{t("common.busy", "Busy")}</option><option value="NOT_AVAILABLE">{t("common.unavailable", "Not Available")}</option></select></label>
+        <label>{t("tailor.nextAvailableDate", "Next available date")}<input type="date" min={todayDateInput()} value={availability.nextAvailable || ""} onChange={(e) => setAvailability({ ...availability, nextAvailable: e.target.value })} /></label>
         {availability.approvalMode === "AUTOMATIC" ? <><label>{t("tailor.availableSlots", "Default slot capacity")}<input type="number" min="0" value={availability.availableSlots} onChange={(e) => setAvailability({ ...availability, availableSlots: Number(e.target.value) })} /></label><label>{t("tailor.maxNewOrders", "Max new orders")}<input type="number" min="0" value={availability.maxNewOrders} onChange={(e) => setAvailability({ ...availability, maxNewOrders: Number(e.target.value) })} /></label></> : <div className="notice span-2">Manual requests remain pending for one hour and require your approval.</div>}
-        <label>{t("tailor.nextAvailableDate", "Next available date")}<input type="date" value={availability.nextAvailable || ""} onChange={(e) => setAvailability({ ...availability, nextAvailable: e.target.value })} /></label>
-        <label className="check-row"><input type="checkbox" checked={Boolean(availability.acceptingRequests)} onChange={(e) => setAvailability({ ...availability, acceptingRequests: e.target.checked })} /> {t("tailor.acceptingRequests", "Accepting new requests")}</label>
+        <label className="check-row tailor-accepting-toggle"><input type="checkbox" checked={Boolean(availability.acceptingRequests)} onChange={(e) => setAvailability({ ...availability, acceptingRequests: e.target.checked })} /> {t("tailor.acceptingRequests", "Accepting new requests")}</label>
         <label className="span-2">{t("tailor.availabilityNote", "Availability note")}<textarea value={availability.availabilityNote} onChange={(e) => setAvailability({ ...availability, availabilityNote: e.target.value })} /></label>
-        <button className="primary-btn" disabled={saving}>{saving ? "Saving..." : t("tailor.saveAvailability", "Save Availability")}</button>
         {feedback ? <div className={feedback.includes("successfully") ? "notice ok span-2" : feedback === "No changes to save." ? "notice span-2" : "error span-2"} role="status" aria-live="polite">{feedback}</div> : null}
       </form>
-      {availability.approvalMode === "AUTOMATIC" ? <div className="slot-capacity-panel"><h3>Slot capacity</h3><label>Date<input type="date" min={todayDateInput()} value={slotDate} onChange={(e) => setSlotDate(e.target.value)} /></label>{slots.map((row, index) => <div className="slot-capacity-row" key={row.slot}><label className="check-row"><input type="checkbox" checked={row.enabled} onChange={(e) => setSlots((old) => old.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: e.target.checked } : item))} /> {APPOINTMENT_TIME_SLOTS.find((slot) => slot.value === row.slot)?.label}</label><label>Capacity<input type="number" min={row.bookedCount} max="100" value={row.capacity} disabled={!row.enabled} onChange={(e) => setSlots((old) => old.map((item, itemIndex) => itemIndex === index ? { ...item, capacity: Number(e.target.value) } : item))} /></label><small>{row.bookedCount} booked</small></div>)}<button type="button" className="primary-btn" onClick={saveSlots}>Save slot capacity</button>{slotMessage ? <div className={slotMessage.includes("saved") ? "notice ok" : "error"}>{slotMessage}</div> : null}</div> : null}
+      {availability.approvalMode === "AUTOMATIC" ? (
+        <section className="slot-capacity-panel tailor-slot-capacity">
+          <div className="tailor-panel-heading">
+            <div><span>Booking capacity</span><h2>{new Date(`${slotDate}T12:00:00`).toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })}</h2></div>
+            <label className="tailor-slot-date"><FileClock size={16} /><span>Edit date</span><input type="date" min={todayDateInput()} value={slotDate} onChange={(e) => setSlotDate(e.target.value)} /></label>
+          </div>
+          <div className="tailor-slot-grid">
+            {slots.map((row, index) => (
+              <article className={row.enabled ? "tailor-slot-card" : "tailor-slot-card disabled"} key={row.slot}>
+                <div><FileClock size={17} /><strong>{APPOINTMENT_TIME_SLOTS.find((slot) => slot.value === row.slot)?.label}</strong></div>
+                <small>{row.enabled ? `${row.bookedCount} of ${row.capacity} booked` : "Unavailable"}</small>
+                <span><i style={{ width: `${Math.min(100, row.capacity ? (row.bookedCount / row.capacity) * 100 : 0)}%` }} /></span>
+                <div className="tailor-slot-controls">
+                  <label><input type="checkbox" checked={row.enabled} onChange={(e) => setSlots((old) => old.map((item, itemIndex) => itemIndex === index ? { ...item, enabled: e.target.checked } : item))} /> Enabled</label>
+                  <label>Capacity <input type="number" min={row.bookedCount} max="100" value={row.capacity} disabled={!row.enabled} onChange={(e) => setSlots((old) => old.map((item, itemIndex) => itemIndex === index ? { ...item, capacity: Number(e.target.value) } : item))} /></label>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className="tailor-slot-actions"><button type="button" className="primary-btn" onClick={saveSlots}>Save slot capacity</button>{slotMessage ? <div className={slotMessage.includes("saved") ? "notice ok" : "error"}>{slotMessage}</div> : null}</div>
+        </section>
+      ) : null}
     </section>
   );
 }
@@ -5542,45 +5925,184 @@ function TailorFollowersPanel({ followers }) {
   );
 }
 
+function updatePresentation(row = {}) {
+  const text = `${row.title || ""} ${row.body || ""}`.toLowerCase();
+
+  if (text.includes("payment") || text.includes("razorpay") || text.includes("checkout")) {
+    return { Icon: CreditCard, status: text.includes("received") || text.includes("paid") ? "PAID" : "PAYMENT" };
+  }
+  if (text.includes("confirm") || text.includes("approved") || text.includes("accepted")) {
+    return { Icon: CheckCircle2, status: "CONFIRMED" };
+  }
+  if (text.includes("waiting") || text.includes("pending")) {
+    return { Icon: FileClock, status: "PENDING" };
+  }
+  if (text.includes("otp") || text.includes("secure")) {
+    return { Icon: Shield, status: "SECURE" };
+  }
+  if (text.includes("cancel") || text.includes("reject") || text.includes("failed")) {
+    return { Icon: XCircle, status: "ACTION NEEDED" };
+  }
+  return { Icon: Bell, status: "IN PROGRESS" };
+}
+
 function Updates({ title, rows, onOpen }) {
+  const displayTitle = String(title || "Updates").replace(/^Customer\s+/i, "");
+
   return (
-    <section className="section-block">
-      <h3>{title}</h3>
+    <section className="section-block updates-panel">
+      <div className="updates-heading">
+        <h3>{displayTitle}</h3>
+        <p>A single timeline for booking, payment, OTP and order notifications.</p>
+      </div>
       <ViewMoreGrid
         items={rows}
-        initial={8}
-        step={8}
-        className="updates-list"
+        initial={5}
+        step={5}
+        className="updates-list updates-timeline-list"
         label="updates"
         emptyText="No updates yet."
-        renderItem={(row) => <button type="button" className={`update-item update-action ${row.read ? "read" : "unread"}`} onClick={() => onOpen?.(row)}><strong>{row.title}</strong><p>{row.body}</p><small>{fmtDate(row.ts)}</small></button>}
+        renderItem={(row) => {
+          const { Icon, status } = updatePresentation(row);
+          return (
+            <button
+              type="button"
+              className={`update-item update-action update-timeline-item ${row.read ? "read" : "unread"}`}
+              onClick={() => onOpen?.(row)}
+            >
+              <span className="update-timeline-icon" aria-hidden="true"><Icon size={20} strokeWidth={1.8} /></span>
+              <span className="update-timeline-copy">
+                <strong>{row.title}</strong>
+                <span>{row.body}</span>
+                <small>{fmtDate(row.ts)}</small>
+              </span>
+              <StatusPill value={status} />
+            </button>
+          );
+        }}
       />
     </section>
   );
 }
 
 function TailorRequests({ rows, reload }) {
-  const pending = rows.filter((r) => r.status === "PENDING");
-  const other = rows.filter((r) => r.status !== "PENDING");
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const [workingId, setWorkingId] = useState("");
+  const [message, setMessage] = useState("");
+  const pending = rows.filter((r) => String(r.status || "").toUpperCase() === "PENDING");
+  const completed = rows.filter((r) => ["ACCEPTED", "CONFIRMED", "REJECTED", "CLOSED", "COMPLETED"].includes(String(r.status || "").toUpperCase()));
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredRows = rows.filter((row) => {
+    const status = String(row.status || "").toUpperCase();
+    if (statusFilter !== "ALL" && status !== statusFilter) return false;
+    if (!normalizedQuery) return true;
+    return [row.requirement_code, row.customer_name, row.customer_area, row.tailor_service_name, row.service_name, row.measurement_mode]
+      .some((value) => String(value || "").toLowerCase().includes(normalizedQuery));
+  });
+  const completionRate = rows.length ? Math.round((completed.length / rows.length) * 100) : 0;
 
   async function accept(row) {
-    if (!confirm("Accept this request and create an order?")) return;
-    await api.acceptRequest(row.id);
-    reload();
+    if (!window.confirm("Accept this request and create an order?")) return;
+    setWorkingId(row.id);
+    setMessage("");
+    try {
+      await api.acceptRequest(row.id);
+      setMessage("Booking request accepted successfully.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message || "Unable to accept this request.");
+    } finally {
+      setWorkingId("");
+    }
   }
 
   async function reject(row) {
-    const reason = prompt("Reject reason:", "Cannot take this order now") || "Rejected by tailor";
-    await api.rejectRequest(row.id, reason);
-    reload();
+    const reason = window.prompt("Reject reason:", "Cannot take this order now") || "Rejected by tailor";
+    setWorkingId(row.id);
+    setMessage("");
+    try {
+      await api.rejectRequest(row.id, reason);
+      setMessage("Booking request rejected.");
+      await reload();
+    } catch (err) {
+      setMessage(err.message || "Unable to reject this request.");
+    } finally {
+      setWorkingId("");
+    }
+  }
+
+  function exportRequests() {
+    const escapeCsv = (value) => `"${String(value ?? "").replace(/"/g, '""')}"`;
+    const header = ["Request", "Customer", "Area", "Service", "Quantity", "Preferred date", "Measurement", "Status"];
+    const body = filteredRows.map((row) => [
+      row.requirement_code,
+      row.customer_name,
+      row.customer_area,
+      row.tailor_service_name || row.service_name,
+      row.quantity,
+      row.preferred_date,
+      row.measurement_mode,
+      row.status,
+    ]);
+    const blob = new Blob([[header, ...body].map((line) => line.map(escapeCsv).join(",")).join("\n")], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tailorahub-booking-requests-${todayDateInput()}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
-    <section className="section-block">
-      <h3>New Requests</h3>
-      {pending.length ? <Table columns={["Request", "Customer Area", "Service", "Qty", "Preferred", "Measurement", "Actions"]} rows={pending.map((r) => [r.requirement_code, r.customer_area || "-", r.tailor_service_name || r.service_name, r.quantity, fmtDay(r.preferred_date), r.measurement_mode, <div className="inline-actions"><button onClick={() => accept(r)}>Accept</button><button className="danger-link" onClick={() => reject(r)}>Reject</button></div>])} /> : <Empty text="No new requests." />}
-      <h3>Accepted / Rejected / Closed Requests</h3>
-      {other.length ? <Table columns={["Request", "Customer", "Status", "Service", "Responded"]} rows={other.map((r) => [r.requirement_code, r.customer_name, <StatusPill value={r.status} />, r.tailor_service_name || r.service_name, fmtDate(r.responded_at || r.ts)])} /> : <Empty />}
+    <section className="tailor-approved-requests">
+      <header className="customer-page-heading tailor-page-heading">
+        <div>
+          <span className="customer-page-eyebrow">Tailor workspace</span>
+          <h1>Booking requests</h1>
+          <p>Review new customer requests and respond before their approval window closes.</p>
+        </div>
+        <button type="button" className="primary-btn customer-heading-action" disabled={!pending.length} onClick={() => document.getElementById("tailor-request-records")?.scrollIntoView({ behavior: "smooth", block: "start" })}>Review next request <ArrowRight size={17} /></button>
+      </header>
+      <div className="tailor-request-kpis">
+        <article><ClipboardList size={24} /><span><small>Total records</small><strong>{String(rows.length).padStart(2, "0")}</strong><em>{rows.length ? "All booking requests" : "No records yet"}</em></span></article>
+        <article><AlertTriangle size={24} /><span><small>Needs attention</small><strong>{String(pending.length).padStart(2, "0")}</strong><em>Priority queue</em></span></article>
+        <article><CheckCircle2 size={24} /><span><small>Completed</small><strong>{completionRate}%</strong><em>Requests responded to</em></span></article>
+        <article><RefreshCw size={24} /><span><small>Last refreshed</small><strong>Now</strong><em>Live dashboard data</em></span></article>
+      </div>
+      {message ? <div className={message.includes("successfully") || message.includes("rejected") ? "notice ok" : "error"} role="status">{message}</div> : null}
+      <section className="tailor-record-panel" id="tailor-request-records">
+        <div className="tailor-record-toolbar">
+          <label><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search current records" /></label>
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)} aria-label="Filter booking requests by status">
+            <option value="ALL">All statuses</option>
+            <option value="PENDING">Pending</option>
+            <option value="ACCEPTED">Accepted</option>
+            <option value="CONFIRMED">Confirmed</option>
+            <option value="REJECTED">Rejected</option>
+            <option value="CLOSED">Closed</option>
+          </select>
+          <button type="button" className="secondary-btn" onClick={exportRequests} disabled={!filteredRows.length}>Export</button>
+        </div>
+        {filteredRows.length ? (
+          <div className="tailor-record-table-wrap">
+            <table className="tailor-record-table">
+              <thead><tr><th>Request</th><th>Customer</th><th>Service</th><th>Preferred slot</th><th>Status</th><th>Actions</th></tr></thead>
+              <tbody>{filteredRows.map((row) => (
+                <tr key={row.id}>
+                  <td><strong>{row.requirement_code || row.id}</strong></td>
+                  <td><strong>{row.customer_name || "Customer"}</strong><small>{row.customer_area || "Area not provided"}</small></td>
+                  <td>{row.tailor_service_name || row.service_name || "Tailoring service"}<small>{row.quantity ? `Quantity ${row.quantity}` : row.measurement_mode}</small></td>
+                  <td>{fmtDay(row.preferred_date)}<small>{row.preferred_time_slot || row.time_slot || row.measurement_mode || "Slot to be confirmed"}</small></td>
+                  <td><StatusPill value={row.status} /></td>
+                  <td>{String(row.status || "").toUpperCase() === "PENDING" ? <div className="inline-actions tailor-request-actions"><button type="button" className="primary-btn" onClick={() => accept(row)} disabled={workingId === row.id}>{workingId === row.id ? "Working..." : "Accept"}</button><button type="button" className="danger-link" onClick={() => reject(row)} disabled={workingId === row.id}>Reject</button></div> : <span className="tailor-responded-at">{fmtDate(row.responded_at || row.ts)}</span>}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        ) : <Empty text="No booking requests match these filters." />}
+        <footer className="tailor-record-footer">Showing {filteredRows.length} of {rows.length} records</footer>
+      </section>
     </section>
   );
 }
