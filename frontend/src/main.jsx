@@ -5,6 +5,7 @@ import ArrowRight from "lucide-react/dist/esm/icons/arrow-right.js";
 import BadgeCheck from "lucide-react/dist/esm/icons/badge-check.js";
 import Ban from "lucide-react/dist/esm/icons/ban.js";
 import Bell from "lucide-react/dist/esm/icons/bell.js";
+import ChevronDown from "lucide-react/dist/esm/icons/chevron-down.js";
 import ChevronLeft from "lucide-react/dist/esm/icons/chevron-left.js";
 import CheckCircle2 from "lucide-react/dist/esm/icons/check-circle-2.js";
 import ClipboardList from "lucide-react/dist/esm/icons/clipboard-list.js";
@@ -19,6 +20,7 @@ import ImageIcon from "lucide-react/dist/esm/icons/image.js";
 import LayoutDashboard from "lucide-react/dist/esm/icons/layout-dashboard.js";
 import LogOut from "lucide-react/dist/esm/icons/log-out.js";
 import Megaphone from "lucide-react/dist/esm/icons/megaphone.js";
+import Menu from "lucide-react/dist/esm/icons/menu.js";
 import Moon from "lucide-react/dist/esm/icons/moon.js";
 import Pencil from "lucide-react/dist/esm/icons/pencil.js";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
@@ -2301,13 +2303,14 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   );
 }
 
-function Shell({ title, subtitle, icon: Icon, onLogout, children, actions, variant = "default", searchValue = "", onSearch, onUpdates, avatarLabel = "TH", unread = 0 }) {
+function Shell({ title, subtitle, icon: Icon, onLogout, children, actions, variant = "default", searchValue = "", onSearch, onUpdates, avatarLabel = "TH", unread = 0, mobileTitle = "Overview", onMobileMenu, mobileMenuOpen = false }) {
   const { language, setLanguage, t } = useLanguage();
   if (variant === "customer" || variant === "tailor") {
     const workspaceName = variant === "tailor" ? "Tailor workspace" : "Customer workspace";
     return (
       <div className={`page-shell customer-page-shell ${variant}-page-shell`}>
         <header className="customer-global-header">
+          <button type="button" className="workspace-mobile-back" onClick={() => window.history.back()} aria-label="Go back"><ChevronLeft size={20} /></button>
           <div className="customer-preview-label" aria-label="TailoraHub customer workspace">
             <Scissors size={18} />
             <span><strong>{workspaceName}</strong><small>Live account and booking data</small></span>
@@ -2322,6 +2325,11 @@ function Shell({ title, subtitle, icon: Icon, onLogout, children, actions, varia
             />
             <kbd>Ctrl K</kbd>
           </label>
+          <button type="button" className="workspace-mobile-current" onClick={onMobileMenu} aria-label="Open workspace navigation" aria-expanded={mobileMenuOpen}>
+            <Menu size={19} />
+            <span>{mobileTitle}</span>
+            <ChevronDown size={17} />
+          </button>
           <div className="customer-global-actions">
             <button type="button" className="customer-bell-btn" onClick={onUpdates} aria-label="Open updates">
               <Bell size={18} />
@@ -2423,6 +2431,7 @@ function CustomerApp({ onLogout }) {
   const [selectedTailorId, setSelectedTailorId] = useAppHistoryState("customerTailorId", "");
   const [selected, setSelected] = useState(null);
   const [profile, setProfile] = useState(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
@@ -2609,6 +2618,15 @@ function CustomerApp({ onLogout }) {
     ["support", t("common.support", "Help & Support"), AlertTriangle, null],
     ["account-profile", "Profile", UsersRound, null],
   ];
+  const mobilePanels = ["overview", "orders", "requests", "updates", "wallet"]
+    .map((id) => panels.find((panel) => panel[0] === id))
+    .filter(Boolean)
+    .map((panel) => panel[0] === "orders" ? [panel[0], "My", panel[2], panel[3]] : panel);
+  const mobileTitle = panels.find((panel) => panel[0] === activePanel)?.[1] || "Customer workspace";
+  const selectCustomerPanel = (id) => {
+    setActivePanel(id);
+    setMobileMenuOpen(false);
+  };
 
   return (
     <Shell
@@ -2622,12 +2640,16 @@ function CustomerApp({ onLogout }) {
         setFilters((old) => ({ ...old, q: value }));
         setActivePanel("browse");
       }}
-      onUpdates={() => setActivePanel("updates")}
+      onUpdates={() => selectCustomerPanel("updates")}
       avatarLabel={customerInitials}
       unread={unreadUpdates}
+      mobileTitle={mobileTitle}
+      onMobileMenu={() => setMobileMenuOpen((open) => !open)}
+      mobileMenuOpen={mobileMenuOpen}
     >
       <div className="customer-workspace">
-        <aside className="customer-side-card">
+        {mobileMenuOpen ? <button type="button" className="workspace-mobile-backdrop" onClick={() => setMobileMenuOpen(false)} aria-label="Close workspace navigation" /> : null}
+        <aside className={`customer-side-card ${mobileMenuOpen ? "mobile-open" : ""}`}>
           <div className="customer-sidebar-brand">
             <span className="customer-sidebar-mark">TH</span>
             <span><strong>TailoraHub</strong><small>Tailoring marketplace</small></span>
@@ -2635,7 +2657,7 @@ function CustomerApp({ onLogout }) {
           <div className="customer-sidebar-space"><strong>Customer space</strong><small>10 screens</small></div>
           <nav className="tailor-side-nav">
             {panels.map(([id, label, Icon, count]) => (
-              <button key={id} className={activePanel === id ? "active" : ""} onClick={() => setActivePanel(id)}>
+              <button key={id} className={activePanel === id ? "active" : ""} onClick={() => selectCustomerPanel(id)}>
                 <Icon size={16} />
                 <span>{label}</span>
                 {count ? <b>{count}</b> : null}
@@ -2654,6 +2676,7 @@ function CustomerApp({ onLogout }) {
             </div>
           </div>
         </aside>
+        <WorkspaceMobileNav panels={mobilePanels} activePanel={activePanel} onSelect={selectCustomerPanel} />
         <div className="customer-content">
           {error ? <div className="error banner">{error}</div> : null}
           {loading ? <div className="loading">{t("customer.loading", "Loading customer data...")}</div> : null}
@@ -2695,6 +2718,19 @@ function CustomerOverviewPanel({ customerName, tailors, favorites, bookings, onB
         <button type="button" onClick={onOrders}><ClipboardList size={19} /><span><small>Booking requests</small><strong>{(bookings.requests || []).length}</strong></span></button>
       </div>
     </section>
+  );
+}
+
+function WorkspaceMobileNav({ panels, activePanel, onSelect }) {
+  return (
+    <nav className="workspace-mobile-nav" aria-label="Mobile workspace navigation">
+      {panels.map(([id, label, Icon, count]) => (
+        <button type="button" key={id} className={activePanel === id ? "active" : ""} onClick={() => onSelect(id)}>
+          <span><Icon size={18} />{count ? <b>{count}</b> : null}</span>
+          <small>{label}</small>
+        </button>
+      ))}
+    </nav>
   );
 }
 
@@ -4983,6 +5019,7 @@ function TailorApp({ onLogout }) {
   const [savingAvailability, setSavingAvailability] = useState(false);
   const [activePanel, setActivePanel] = useAppHistoryState("tailorPanel", "overview");
   const [workspaceSearch, setWorkspaceSearch] = useState("");
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [error, setError] = useState("");
 
   async function load() {
@@ -5063,6 +5100,15 @@ function TailorApp({ onLogout }) {
     ["updates", t("common.updates", "Updates"), FileClock, unreadUpdates],
     ["support", t("common.support", "Support"), AlertTriangle, null],
   ];
+  const mobilePanels = ["overview", "availability", "requests", "orders", "wallet"]
+    .map((id) => panels.find((panel) => panel[0] === id))
+    .filter(Boolean)
+    .map((panel) => panel[0] === "orders" ? [panel[0], "Orders", panel[2], panel[3]] : panel);
+  const mobileTitle = panels.find((panel) => panel[0] === activePanel)?.[1] || "Tailor workspace";
+  const selectTailorPanel = (id) => {
+    setActivePanel(id);
+    setMobileMenuOpen(false);
+  };
 
   return (
     <Shell
@@ -5073,12 +5119,16 @@ function TailorApp({ onLogout }) {
       onLogout={onLogout}
       searchValue={workspaceSearch}
       onSearch={setWorkspaceSearch}
-      onUpdates={() => setActivePanel("updates")}
+      onUpdates={() => selectTailorPanel("updates")}
       avatarLabel={tailorInitials}
       unread={unreadUpdates}
+      mobileTitle={mobileTitle}
+      onMobileMenu={() => setMobileMenuOpen((open) => !open)}
+      mobileMenuOpen={mobileMenuOpen}
     >
       <div className="tailor-workspace customer-workspace">
-        <aside className="tailor-side-card customer-side-card">
+        {mobileMenuOpen ? <button type="button" className="workspace-mobile-backdrop" onClick={() => setMobileMenuOpen(false)} aria-label="Close workspace navigation" /> : null}
+        <aside className={`tailor-side-card customer-side-card ${mobileMenuOpen ? "mobile-open" : ""}`}>
           <div className="customer-sidebar-brand">
             <span className="customer-sidebar-mark">TH</span>
             <span><strong>TailoraHub</strong><small>Tailoring marketplace</small></span>
@@ -5086,7 +5136,7 @@ function TailorApp({ onLogout }) {
           <div className="customer-sidebar-space"><strong>Tailor space</strong><small>14 screens</small></div>
           <nav className="tailor-side-nav">
             {panels.map(([id, label, Icon, count]) => (
-              <button key={id} className={activePanel === id ? "active" : ""} onClick={() => setActivePanel(id)}>
+              <button key={id} className={activePanel === id ? "active" : ""} onClick={() => selectTailorPanel(id)}>
                 <Icon size={16} />
                 <span>{label}</span>
                 {count ? <b>{count}</b> : null}
@@ -5105,6 +5155,7 @@ function TailorApp({ onLogout }) {
             </div>
           </div>
         </aside>
+        <WorkspaceMobileNav panels={mobilePanels} activePanel={activePanel} onSelect={selectTailorPanel} />
         <div className="tailor-content customer-content">
           {error ? <div className="error banner">{error}</div> : null}
           {pendingApproval ? <div className="notice warn">{t("tailor.profilePending", `Your tailor profile is ${data.tailor.approvalStatus}. Customers will see you only after admin approval.`, { status: data.tailor.approvalStatus })}</div> : null}
