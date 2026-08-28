@@ -44,9 +44,9 @@ import "./styles.css";
 import "./premium-ui.css";
 
 const roles = [
-  ["customer", "Customer", UsersRound, "Discover approved ateliers, book appointments, track orders and pay securely."],
-  ["tailor", "Tailor", Scissors, "Manage your profile, availability, services, requests, orders and earnings."],
-  ["admin", "Admin", Shield, "Approve tailors, review operations and manage the TailoraHub platform."],
+  ["customer", "Customer", UsersRound, "Find tailors, book and track orders."],
+  ["tailor", "Tailor", Scissors, "Manage bookings, services and earnings."],
+  ["admin", "Admin", Shield, "Review and manage platform operations."],
 ];
 
 const languageOptions = [
@@ -438,10 +438,10 @@ const ROUTE_QUERY_KEYS = {
   tailorPanel: "view",
   adminSection: "view",
 };
-const ROLE_DEFAULT_VIEWS = { customer: "browse", tailor: "overview", admin: "dashboard" };
+const ROLE_DEFAULT_VIEWS = { customer: "overview", tailor: "overview", admin: "dashboard" };
 const ROLE_VIEWS = {
-  customer: new Set(["browse", "profile", "account-profile", "favorites", "updates", "wallet", "referrals", "requests", "orders", "support"]),
-  tailor: new Set(["overview", "availability", "wallet", "referrals", "media", "services", "offers", "followers", "requests", "waiting", "orders", "updates", "support"]),
+  customer: new Set(["overview", "browse", "profile", "account", "account-profile", "favorites", "updates", "wallet", "referrals", "requests", "orders", "support"]),
+  tailor: new Set(["overview", "profile", "availability", "wallet", "referrals", "media", "services", "offers", "followers", "requests", "waiting", "orders", "updates", "support"]),
   admin: new Set(adminSections.map(([id]) => id)),
 };
 
@@ -472,8 +472,13 @@ function validateRestoredRoute(roleName) {
   const defaultView = ROLE_DEFAULT_VIEWS[roleName];
   if (!allowedViews || !defaultView) return;
   const url = new URL(window.location.href);
-  const requestedView = url.searchParams.get("view");
-  const validProfile = requestedView !== "profile" || Boolean(url.searchParams.get("tailorId"));
+  let requestedView = url.searchParams.get("view");
+  if (roleName === "customer" && requestedView === "account-profile") {
+    requestedView = "account";
+    url.searchParams.set("view", requestedView);
+    window.history.replaceState(currentHistoryState(), "", `${url.pathname}${url.search}${url.hash}`);
+  }
+  const validProfile = roleName !== "customer" || requestedView !== "profile" || Boolean(url.searchParams.get("tailorId"));
   if (requestedView && allowedViews.has(requestedView) && validProfile) return;
   url.searchParams.set("view", defaultView);
   url.searchParams.delete("tailorId");
@@ -2417,6 +2422,63 @@ function customerSearchSuggestions(rows, query) {
   return Array.from(suggestions.values()).slice(0, 8);
 }
 
+/* APPROVED_PREVIEW_PARITY: shared authenticated workspace presentation. */
+const workspaceDescriptions = {
+  customer: {
+    overview: "Your next fitting, active orders and useful shortcuts in one calm workspace.",
+    browse: "Compare approved tailoring professionals by service, location, availability and price.",
+    profile: "Review the selected tailor's services, portfolio, availability, reviews and booking options.",
+    account: "Keep your contact details and TailoraHub account information easy to review.",
+    favorites: "Return to the ateliers you saved and book when the time feels right.",
+    updates: "Follow booking, payment, OTP and order notifications in one timeline.",
+    wallet: "Review available credit, reserved amounts and wallet activity.",
+    referrals: "Invite people you trust and track eligible referral activity.",
+    requests: "Review booking requests, confirmations and actions still needed.",
+    orders: "Follow every garment from booking and measurement through handover.",
+    support: "Raise a ticket and keep support connected to the relevant order.",
+  },
+  tailor: {
+    overview: "Today's workboard brings requests, due orders, availability and earnings into focus.",
+    profile: "Review the public atelier identity customers see before they book.",
+    availability: "Control booking mode, slot capacity and working availability with confidence.",
+    wallet: "Track earnings, settlements, withdrawals and reserved balances.",
+    referrals: "Review your referral network, activations and eligible rewards.",
+    media: "Present your craftsmanship through a polished photo and video portfolio.",
+    services: "Maintain service prices, delivery times and customer-facing availability.",
+    offers: "Create and manage offers without obscuring standard pricing.",
+    followers: "Understand who follows your atelier and how interest is growing.",
+    requests: "Review new booking requests before their response window closes.",
+    waiting: "Move customers into newly available slots in a clear, fair order.",
+    orders: "Organise measurement, stitching, quality check and handover work.",
+    updates: "Stay on top of requests, payments, order changes and platform notices.",
+    support: "Get help while keeping the relevant customer or order visible.",
+  },
+};
+
+function RoleSidebarBrand({ role, screenCount }) {
+  const roleLabel = role === "tailor" ? "Tailor" : "Customer";
+  return (
+    <div className="role-sidebar-brand">
+      <span className="role-sidebar-monogram">TH</span>
+      <span>
+        <strong>TailoraHub</strong>
+        <small>{roleLabel} workspace · {screenCount} screens</small>
+      </span>
+    </div>
+  );
+}
+
+function WorkspacePageHeading({ role, panelId, label }) {
+  const description = workspaceDescriptions[role]?.[panelId] || `Review and manage ${String(label || "this section").toLowerCase()} in TailoraHub.`;
+  return (
+    <header className={`workspace-page-heading workspace-page-heading-${panelId}`}>
+      <span>{role} workspace</span>
+      <h1>{label}</h1>
+      <p>{description}</p>
+    </header>
+  );
+}
+
 function CustomerApp({ onLogout }) {
   const t = useT();
   const { language, setLanguage } = useLanguage();
@@ -2427,7 +2489,7 @@ function CustomerApp({ onLogout }) {
   const [filters, setFilters] = useState({ q: "", availability: "", ratingMin: "", service: "", distanceKm: "" });
   const [radiusKm, setRadiusKm] = useState(50);
   const [geo, setGeo] = useState({ latitude: null, longitude: null, status: "detecting", message: "Detecting your location..." });
-  const [activePanel, setActivePanel] = useAppHistoryState("customerPanel", "browse");
+  const [activePanel, setActivePanel] = useAppHistoryState("customerPanel", "overview");
   const [selectedTailorId, setSelectedTailorId] = useAppHistoryState("customerTailorId", "");
   const [selected, setSelected] = useState(null);
   const [profile, setProfile] = useState(null);
@@ -2608,7 +2670,7 @@ function CustomerApp({ onLogout }) {
   const panels = [
     ["overview", t("common.overview", "Overview"), LayoutDashboard, null],
     ["browse", t("customer.panel.browse", "Browse Tailors"), Search, null],
-    ...(selectedTailorId ? [["profile", t("customer.panel.profile", "Selected Tailor"), Scissors, null]] : []),
+    ["profile", t("customer.panel.profile", "Selected Tailor"), Scissors, null],
     ["favorites", t("common.favorites", "Favorites"), Heart, favorites.length],
     ["orders", t("common.orders", "My Orders"), Scissors, (bookings.orders || []).length],
     ["requests", t("common.requests", "Requests"), ClipboardList, (bookings.requests || []).length],
@@ -2616,8 +2678,9 @@ function CustomerApp({ onLogout }) {
     ["wallet", t("common.wallet", "Wallet"), CreditCard, null],
     ["referrals", t("common.referrals", "Refer & Earn"), UsersRound, null],
     ["support", t("common.support", "Help & Support"), AlertTriangle, null],
-    ["account-profile", "Profile", UsersRound, null],
+    ["account", "Profile", UsersRound, null],
   ];
+  const activePanelMeta = panels.find(([id]) => id === activePanel) || panels[0];
   const mobilePanels = ["overview", "orders", "requests", "updates", "wallet"]
     .map((id) => panels.find((panel) => panel[0] === id))
     .filter(Boolean)
@@ -2650,11 +2713,7 @@ function CustomerApp({ onLogout }) {
       <div className="customer-workspace">
         {mobileMenuOpen ? <button type="button" className="workspace-mobile-backdrop" onClick={() => setMobileMenuOpen(false)} aria-label="Close workspace navigation" /> : null}
         <aside className={`customer-side-card ${mobileMenuOpen ? "mobile-open" : ""}`}>
-          <div className="customer-sidebar-brand">
-            <span className="customer-sidebar-mark">TH</span>
-            <span><strong>TailoraHub</strong><small>Tailoring marketplace</small></span>
-          </div>
-          <div className="customer-sidebar-space"><strong>Customer space</strong><small>10 screens</small></div>
+          <RoleSidebarBrand role="customer" screenCount={panels.length} />
           <nav className="tailor-side-nav">
             {panels.map(([id, label, Icon, count]) => (
               <button key={id} className={activePanel === id ? "active" : ""} onClick={() => selectCustomerPanel(id)}>
@@ -2680,7 +2739,8 @@ function CustomerApp({ onLogout }) {
         <div className="customer-content">
           {error ? <div className="error banner">{error}</div> : null}
           {loading ? <div className="loading">{t("customer.loading", "Loading customer data...")}</div> : null}
-          {activePanel === "overview" ? <CustomerOverviewPanel customerName={customerDisplayName} tailors={visibleTailors} favorites={favorites} bookings={bookings} onBrowse={() => setActivePanel("browse")} onOrders={() => setActivePanel("orders")} /> : null}
+          <WorkspacePageHeading role="customer" panelId={activePanel} label={activePanelMeta[1]} />
+          {activePanel === "overview" ? <CustomerOverviewPanel account={account} tailors={visibleTailors} favorites={favorites} bookings={bookings} onNavigate={setActivePanel} /> : null}
           {activePanel === "browse" ? <CustomerBrowsePanel filters={filters} setFilters={setFilters} allTailors={tailors} tailors={visibleTailors} openProfile={openProfile} onBook={openProfile} onFavorite={toggleFavorite} onFollow={toggleFollow} geo={geo} radiusKm={radiusKm} setRadiusKm={setRadiusKm} /> : null}
           {activePanel === "profile" ? (
             selected && profile ? <CustomerTailorProfile profile={profile} reload={load} onFavorite={toggleFavorite} onFollow={toggleFollow} onBookingCreated={handleBookingCreated} /> : <Empty text={t("customer.selectTailorEmpty", "Select a tailor from Browse Tailors to see profile, services, reviews, availability and booking form.")} />
@@ -2692,14 +2752,79 @@ function CustomerApp({ onLogout }) {
           {activePanel === "requests" ? <CustomerRequests rows={bookings.requests || []} /> : null}
           {activePanel === "orders" ? <CustomerOrders rows={bookings.orders || []} reload={load} onCreate={() => setActivePanel("browse")} /> : null}
           {activePanel === "support" ? <SupportPanel role="customer" orders={bookings.orders || []} /> : null}
-          {activePanel === "account-profile" ? <CustomerAccountProfile account={account} onSupport={() => setActivePanel("support")} /> : null}
+          {activePanel === "account" ? <CustomerAccountPanel account={account} onNavigate={setActivePanel} /> : null}
         </div>
       </div>
     </Shell>
   );
 }
 
-function CustomerOverviewPanel({ customerName, tailors, favorites, bookings, onBrowse, onOrders }) {
+function CustomerOverviewPanel({ account, tailors, favorites, bookings, onNavigate }) {
+  const orders = bookings?.orders || [];
+  const requests = bookings?.requests || [];
+  const updates = bookings?.notifications || [];
+  const closedStatuses = new Set(["COMPLETED", "CANCELLED", "REJECTED", "CLOSED"]);
+  const activeOrders = orders.filter((row) => !closedStatuses.has(String(row.status || "").toUpperCase()));
+  const pendingRequests = requests.filter((row) => !closedStatuses.has(String(row.status || "").toUpperCase()));
+  const priorityOrder = activeOrders[0] || orders[0] || null;
+  const orderName = priorityOrder?.serviceName || priorityOrder?.service_name || priorityOrder?.service || priorityOrder?.garment || "Tailoring order";
+  const orderPartner = priorityOrder?.tailorShop || priorityOrder?.tailor_shop || priorityOrder?.shop || priorityOrder?.tailorName || priorityOrder?.tailor_name || "Assigned atelier";
+  const orderDate = priorityOrder?.deliveryDate || priorityOrder?.delivery_date || priorityOrder?.appointmentDate || priorityOrder?.appointment_date;
+  const parsedOrderDate = orderDate ? new Date(orderDate) : null;
+  const hasValidOrderDate = parsedOrderDate && !Number.isNaN(parsedOrderDate.getTime());
+  const orderMonth = hasValidOrderDate ? parsedOrderDate.toLocaleDateString("en-IN", { month: "short" }) : "NEXT";
+  const orderDay = hasValidOrderDate ? parsedOrderDate.getDate() : "—";
+  const orderYear = hasValidOrderDate ? parsedOrderDate.getFullYear() : "STEP";
+
+  return (
+    <div className="approved-overview-screen">
+      <div className="kpi-grid approved-kpi-grid">
+        <Kpi label="Active orders" value={activeOrders.length} icon={Scissors} />
+        <Kpi label="Approved tailors" value={tailors.length} icon={UsersRound} />
+        <Kpi label="Favorites" value={favorites.length} icon={Heart} />
+        <Kpi label="Unread updates" value={unreadCount(updates)} icon={Bell} />
+      </div>
+
+      <div className="approved-overview-grid">
+        <section className="section-block approved-priority-card">
+          <div className="section-head">
+            <div><span className="approved-card-eyebrow">Priority</span><h2>{priorityOrder ? "Your active order" : `Welcome${account?.name ? `, ${account.name}` : ""}`}</h2></div>
+            <button type="button" className="text-link" onClick={() => onNavigate(priorityOrder ? "orders" : "browse")}>{priorityOrder ? "View order" : "Browse tailors"} <ArrowRight size={15} /></button>
+          </div>
+          {priorityOrder ? (
+            <article className="approved-order-highlight">
+              <span className="approved-date-tile"><small>{orderMonth}</small><strong>{orderDay}</strong><small>{orderYear}</small></span>
+              <div><StatusPill value={priorityOrder.status} /><h3>{orderName}</h3><p>{orderPartner}</p><small>{orderDate ? `Expected ${fmtDay(orderDate)}` : "Open the order for its complete timeline."}</small></div>
+              <button type="button" className="primary-btn" onClick={() => onNavigate("orders")}>Open details <ArrowRight size={15} /></button>
+            </article>
+          ) : (
+            <div className="approved-empty-hero"><Scissors size={25} /><div><h3>Start with the right atelier</h3><p>Browse approved TailoraHub professionals and create your first booking request.</p></div><button type="button" className="primary-btn" onClick={() => onNavigate("browse")}>Find a tailor <ArrowRight size={15} /></button></div>
+          )}
+          <div className="approved-progress-track" aria-label="TailoraHub order journey">
+            {["Booked", "Measured", "In progress", "Handover"].map((step, index) => <span className={priorityOrder && index < 2 ? "complete" : ""} key={step}><i>{index + 1}</i><small>{step}</small></span>)}
+          </div>
+        </section>
+
+        <section className="approved-concierge-card">
+          <span className="approved-concierge-icon"><Crown size={21} /></span>
+          <small>TailoraHub concierge</small>
+          <h2>Need a little help?</h2>
+          <p>Support stays connected to the relevant booking, order or payment.</p>
+          <button type="button" className="secondary-btn" onClick={() => onNavigate("support")}>Start a conversation <ArrowRight size={15} /></button>
+        </section>
+      </div>
+
+      <section className="section-block approved-action-section">
+        <div className="section-head"><div><span className="approved-card-eyebrow">Continue</span><h2>Quick actions</h2></div><small>{pendingRequests.length} request{pendingRequests.length === 1 ? "" : "s"} need attention</small></div>
+        <div className="approved-quick-grid">
+          {[["browse", "Browse tailors", UsersRound], ["orders", "Track orders", Scissors], ["requests", "Review requests", ClipboardList], ["wallet", "Open wallet", CreditCard]].map(([id, label, Icon]) => <button type="button" key={id} onClick={() => onNavigate(id)}><Icon size={19} /><strong>{label}</strong><ArrowRight size={15} /></button>)}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function LegacyCustomerOverviewPanel({ customerName, tailors, favorites, bookings, onBrowse, onOrders }) {
   const activeOrders = (bookings.orders || []).filter((row) => !["DELIVERED", "COMPLETED", "CANCELLED", "REJECTED"].includes(String(row.status || "").toUpperCase())).length;
   return (
     <section className="customer-overview-page">
@@ -3297,34 +3422,60 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
   }
 
   return (
-    <div className="profile-panel">
-      <div className="profile-heading">
-        <TailorAvatar tailor={tailor} size="lg" />
-        <div>
-          <h3>{tailor.shop}</h3>
-          <p>{tailor.ownerName} - {tailor.years} years experience</p>
+    <div className="profile-panel customer-tailor-profile">
+      <section className="selected-tailor-summary">
+        <div className="profile-heading">
+          <TailorAvatar tailor={tailor} size="lg" />
+          <div>
+            <span className="selected-tailor-eyebrow">Selected atelier</span>
+            <h3>{tailor.shop}</h3>
+            <p>{tailor.ownerName} · {tailor.years} years experience</p>
+          </div>
         </div>
+        <div className="relationship-row profile-actions">
+          <button className={tailor.favoritedByMe ? "mini-action active" : "mini-action"} type="button" aria-pressed={Boolean(tailor.favoritedByMe)} onClick={() => onFavorite(tailor)} title={tailor.favoritedByMe ? "Remove favorite" : "Add favorite"}>
+            <Heart size={15} />
+            <span>{tailor.favoritedByMe ? "Favorited" : "Favorite"}</span>
+            <b>{tailor.favoriteCount || 0}</b>
+          </button>
+          <button className={tailor.followedByMe ? "mini-action active following-state" : "mini-action"} type="button" aria-pressed={Boolean(tailor.followedByMe)} onClick={() => onFollow(tailor)} title={tailor.followedByMe ? "Unfollow tailor" : "Follow tailor"}>
+            {tailor.followedByMe ? <CheckCircle2 size={15} /> : <Bell size={15} />}
+            <span>{tailor.followedByMe ? "Following" : "Follow"}</span>
+            <b>{tailor.followerCount || 0}</b>
+          </button>
+        </div>
+        <div className="selected-tailor-details">
+          <div className="selected-tailor-detail-block selected-tailor-availability-block">
+            <span className="selected-tailor-detail-label">Availability</span>
+            <div className="selected-tailor-availability">
+              <StatusPill value={tailor.availability} />
+              <span>{tailor.availabilityNote || availabilityCopy[tailor.availability]}</span>
+            </div>
+          </div>
+          <div className="selected-tailor-detail-block selected-tailor-about-block">
+            <span className="selected-tailor-detail-label">About atelier</span>
+            <p className="selected-tailor-bio">{tailor.bio || "No profile description yet."}</p>
+          </div>
+        </div>
+      </section>
+      <div className="selected-tailor-showcase">
+        <section className="selected-tailor-mini-card">
+          <div className="selected-tailor-section-head"><h3>Offers</h3><small>Current promotions</small></div>
+          <OfferList offers={offers} />
+        </section>
+        <section className="selected-tailor-mini-card">
+          <div className="selected-tailor-section-head"><h3>Photos and Videos</h3><small>Recent work</small></div>
+          <MediaGallery portfolio={tailor.portfolio} />
+        </section>
       </div>
-      <div className="relationship-row profile-actions">
-        <button className={tailor.favoritedByMe ? "mini-action active" : "mini-action"} type="button" onClick={() => onFavorite(tailor)} title={tailor.favoritedByMe ? "Remove favorite" : "Add favorite"}>
-          <Heart size={15} />
-          <span>{tailor.favoritedByMe ? "Favorited" : "Favorite"}</span>
-          <b>{tailor.favoriteCount || 0}</b>
-        </button>
-        <button className={tailor.followedByMe ? "mini-action active" : "mini-action"} type="button" onClick={() => onFollow(tailor)} title={tailor.followedByMe ? "Unfollow tailor" : "Follow tailor"}>
-          <Bell size={15} />
-          <span>{tailor.followedByMe ? "Following" : "Follow"}</span>
-          <b>{tailor.followerCount || 0}</b>
-        </button>
-      </div>
-      <StatusPill value={tailor.availability} />
-      <p>{tailor.availabilityNote || availabilityCopy[tailor.availability]}</p>
-      <p>{tailor.bio || "No profile description yet."}</p>
-      <h3>Offers</h3>
-      <OfferList offers={offers} />
-      <h3>Photos and Videos</h3>
-      <MediaGallery portfolio={tailor.portfolio} />
-      <h3>Send Booking Request</h3>
+      <section className="booking-request-section">
+        <div className="booking-request-heading">
+          <div>
+            <span>Booking details</span>
+            <h3>Send Booking Request</h3>
+          </div>
+          <small>Complete the details below, then review everything before submitting.</small>
+        </div>
       {disabled ? <div className="notice">Currently Not Accepting New Orders</div> : (
         <form className="stack-form booking-request-form" onSubmit={previewBooking}>
           <label className="span-2">
@@ -3437,16 +3588,19 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
         </form>
       )}
       {message ? <div className={message.includes("waiting list") ? "notice waiting-notice" : message.includes("Booking") || message.includes("approved") ? "notice ok" : "error"}>{message.includes("waiting list") ? <><span className="live-dot" /> {message}</> : message}</div> : null}
-      <h3>Reviews</h3>
-      <ViewMoreGrid
-        items={reviews}
-        initial={4}
-        step={4}
-        className="review-list"
-        label="reviews"
-        emptyText="No public reviews yet."
-        renderItem={(review) => <ReviewCard review={review} />}
-      />
+      </section>
+      <section className="selected-tailor-reviews">
+        <div className="selected-tailor-section-head"><h3>Reviews</h3><small>Verified customer feedback</small></div>
+        <ViewMoreGrid
+          items={reviews}
+          initial={4}
+          step={4}
+          className="review-list"
+          label="reviews"
+          emptyText="No public reviews yet."
+          renderItem={(review) => <ReviewCard review={review} />}
+        />
+      </section>
     </div>
   );
 }
@@ -3885,6 +4039,63 @@ function CustomerAccountProfile({ account, onSupport }) {
             <div className="wide"><dt>Primary address</dt><dd>{account?.address || "No address saved"}</dd></div>
           </dl>
           <p className="customer-profile-note">For security, use Help &amp; Support to change verified phone or email details.</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CustomerAccountPanel({ account, onNavigate }) {
+  const displayName = account?.name || account?.fullName || "TailoraHub customer";
+  const contact = account?.phone || account?.email || "Contact information is not available.";
+  return (
+    <section className="section-block no-top approved-profile-layout">
+      <aside className="approved-profile-summary">
+        <CustomerAvatar customer={account || { name: displayName }} size="lg" />
+        <BadgeCheck size={18} />
+        <h2>{displayName}</h2>
+        <p>TailoraHub customer account</p>
+        <button type="button" className="secondary-btn" onClick={() => onNavigate("support")}>Get profile help</button>
+      </aside>
+      <div className="approved-profile-details">
+        <div className="section-head"><div><span className="approved-card-eyebrow">Account details</span><h2>Personal information</h2></div></div>
+        <dl>
+          <div><dt>Full name</dt><dd>{displayName}</dd></div>
+          <div><dt>Primary contact</dt><dd>{contact}</dd></div>
+          <div><dt>Account role</dt><dd>Customer</dd></div>
+          <div><dt>Profile ID</dt><dd>{account?.customerProfileId || account?.customer_profile_id || account?.id || "Available after profile sync"}</dd></div>
+        </dl>
+        <div className="approved-profile-actions">
+          <button type="button" className="secondary-btn" onClick={() => onNavigate("referrals")}>Referral profile</button>
+          <button type="button" className="primary-btn" onClick={() => onNavigate("browse")}>Browse tailors <ArrowRight size={15} /></button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TailorProfilePanel({ tailor, onNavigate }) {
+  return (
+    <section className="section-block no-top approved-profile-layout">
+      <aside className="approved-profile-summary">
+        <TailorAvatar tailor={tailor} size="lg" />
+        <BadgeCheck size={18} />
+        <h2>{tailor.shop || "Your atelier"}</h2>
+        <p>{tailor.approvalStatus === "APPROVED" ? "Approved TailoraHub professional" : `Approval status: ${tailor.approvalStatus || "Pending"}`}</p>
+        <StatusPill value={tailor.availability} />
+      </aside>
+      <div className="approved-profile-details">
+        <div className="section-head"><div><span className="approved-card-eyebrow">Public presentation</span><h2>Atelier profile</h2></div></div>
+        <dl>
+          <div><dt>Owner</dt><dd>{tailor.ownerName || "—"}</dd></div>
+          <div><dt>Atelier</dt><dd>{tailor.shop || "—"}</dd></div>
+          <div><dt>Experience</dt><dd>{tailor.experienceDisplay || `${tailor.years || 0} years`}</dd></div>
+          <div><dt>Location</dt><dd>{tailor.shopAddress || tailor.zoneId || "—"}</dd></div>
+          <div className="span-two"><dt>About the atelier</dt><dd>{tailor.bio || "Add portfolio media and service information to strengthen your public profile."}</dd></div>
+        </dl>
+        <div className="approved-profile-actions">
+          <button type="button" className="secondary-btn" onClick={() => onNavigate("media")}>Manage photos / videos</button>
+          <button type="button" className="primary-btn" onClick={() => onNavigate("services")}>Manage services <ArrowRight size={15} /></button>
         </div>
       </div>
     </section>
@@ -4859,17 +5070,6 @@ function SupportPanel({ role, orders = [] }) {
     setForm((old) => ({ ...old, [key]: value }));
   }
 
-  function prepareDeletionRequest() {
-    setForm((old) => ({
-      ...old,
-      category: "Account deletion request",
-      priority: "HIGH",
-      orderId: "",
-      subject: "Request to delete my TailoraHub account",
-      description: "I want to delete my TailoraHub account. Please verify my identity and process account deletion.",
-    }));
-  }
-
   async function createTicket(event) {
     event.preventDefault();
     setBusy(true);
@@ -4943,7 +5143,6 @@ function SupportPanel({ role, orders = [] }) {
           <label>Subject<input value={form.subject} onChange={(e) => update("subject", e.target.value)} placeholder="Short issue summary" /></label>
           <label>Description<textarea value={form.description} onChange={(e) => update("description", e.target.value)} placeholder="Explain what happened and what help you need" /></label>
           <div className="inline-actions support-form-actions">
-            <button type="button" className="secondary-btn support-delete-request" onClick={prepareDeletionRequest} disabled={busy}>Request account deletion</button>
             <button className="primary-btn" disabled={busy}>Create Ticket</button>
           </div>
         </form>
@@ -5087,6 +5286,7 @@ function TailorApp({ onLogout }) {
   const tailorInitials = String(data.tailor.shop || data.tailor.ownerName || "Tailor").trim().split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase() || "TH";
   const panels = [
     ["overview", t("common.overview", "Overview"), LayoutDashboard, null],
+    ["profile", "Atelier profile", BadgeCheck, null],
     ["availability", t("common.availability", "Availability"), CheckCircle2, null],
     ["requests", "Booking requests", ClipboardList, Number(data.stats.pending_requests || 0)],
     ["waiting", t("common.waitingList", "Waiting list"), FileClock, Number(data.stats.waiting_list || data.stats.waitlisted || 0)],
@@ -5129,11 +5329,7 @@ function TailorApp({ onLogout }) {
       <div className="tailor-workspace customer-workspace">
         {mobileMenuOpen ? <button type="button" className="workspace-mobile-backdrop" onClick={() => setMobileMenuOpen(false)} aria-label="Close workspace navigation" /> : null}
         <aside className={`tailor-side-card customer-side-card ${mobileMenuOpen ? "mobile-open" : ""}`}>
-          <div className="customer-sidebar-brand">
-            <span className="customer-sidebar-mark">TH</span>
-            <span><strong>TailoraHub</strong><small>Tailoring marketplace</small></span>
-          </div>
-          <div className="customer-sidebar-space"><strong>Tailor space</strong><small>14 screens</small></div>
+          <RoleSidebarBrand role="tailor" screenCount={panels.length} />
           <nav className="tailor-side-nav">
             {panels.map(([id, label, Icon, count]) => (
               <button key={id} className={activePanel === id ? "active" : ""} onClick={() => selectTailorPanel(id)}>
@@ -5159,7 +5355,9 @@ function TailorApp({ onLogout }) {
         <div className="tailor-content customer-content">
           {error ? <div className="error banner">{error}</div> : null}
           {pendingApproval ? <div className="notice warn">{t("tailor.profilePending", `Your tailor profile is ${data.tailor.approvalStatus}. Customers will see you only after admin approval.`, { status: data.tailor.approvalStatus })}</div> : null}
+          <WorkspacePageHeading role="tailor" panelId={activePanel} label={mobileTitle} />
           {activePanel === "overview" ? <TailorOverviewPanel data={data} onNavigate={setActivePanel} /> : null}
+          {activePanel === "profile" ? <TailorProfilePanel tailor={data.tailor} onNavigate={setActivePanel} /> : null}
           {activePanel === "availability" ? <TailorAvailabilityPanel availability={availability} setAvailability={(next) => { setAvailability(next); setAvailabilityFeedback(""); }} saveAvailability={saveAvailability} feedback={availabilityFeedback} saving={savingAvailability} /> : null}
           {activePanel === "wallet" ? <TailorWalletPanel /> : null}
           {activePanel === "referrals" ? <TailorReferralPanel /> : null}
@@ -5758,20 +5956,20 @@ function TailorOffersPanel({ offers, reload }) {
   }
 
   return (
-    <section className="section-block no-top">
+    <section className="section-block no-top tailor-offers-section">
       <div className="section-head">
         <div>
           <h3>Offers</h3>
           <p>Followers receive an in-app update when you post a new offer.</p>
         </div>
       </div>
-      <form className="offer-form" onSubmit={submit}>
-        <label>Offer title<input value={form.title} onChange={(e) => update("title", e.target.value)} placeholder="Festival blouse stitching offer" required /></label>
-        <label>Discount / label<input value={form.discount} onChange={(e) => update("discount", e.target.value)} placeholder="10% off this week" /></label>
-        <label className="span-2">Offer details<textarea value={form.body} onChange={(e) => update("body", e.target.value)} placeholder="Share what customers can book, pricing note, or timing." required /></label>
-        <label>Valid until<input type="date" value={form.expiresAt} onChange={(e) => update("expiresAt", e.target.value)} /></label>
-        <label>Photo or video<input type="file" accept="image/*,video/*" onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
-        <button className="primary-btn" disabled={busy}>{busy ? "Posting..." : "Post Offer"}</button>
+      <form className="offer-form tailor-offer-form" onSubmit={submit}>
+        <label className="offer-title-field">Offer title<input value={form.title} onChange={(e) => update("title", e.target.value)} placeholder="Festival blouse stitching offer" required /></label>
+        <label className="offer-label-field">Discount / label<input value={form.discount} onChange={(e) => update("discount", e.target.value)} placeholder="10% off this week" /></label>
+        <label className="offer-details-field">Offer details<textarea value={form.body} onChange={(e) => update("body", e.target.value)} placeholder="What can customers book?" required /></label>
+        <label className="offer-date-field">Valid until<input type="date" value={form.expiresAt} onChange={(e) => update("expiresAt", e.target.value)} /></label>
+        <label className="offer-media-field">Photo or video<input type="file" accept="image/*,video/*" onChange={(e) => setFile(e.target.files?.[0] || null)} /></label>
+        <button className="primary-btn offer-submit" disabled={busy}>{busy ? "Posting..." : "Post Offer"}</button>
       </form>
       {message ? <div className={message.includes("posted") || message.includes("deactivated") ? "notice ok" : "error"}>{message}</div> : null}
       <OfferList offers={offers} onRemove={remove} />
@@ -5877,35 +6075,35 @@ function TailorServicesPanel() {
   }
 
   return (
-    <section className="section-block no-top">
+    <section className="section-block no-top tailor-services-section">
       <div className="section-head">
         <div>
           <h3>Services</h3>
           <p>What you stitch and at what price -- shown on your public profile before a customer books.</p>
         </div>
       </div>
-      <form className="offer-form" onSubmit={submit}>
+      <form className="offer-form tailor-service-form" onSubmit={submit}>
         <div className="span-2 form-subhead">
           <strong>{editingId ? "Edit Service" : "Add Service"}</strong>
           {editingId ? <button type="button" className="secondary-btn" onClick={resetForm} disabled={busy}>Cancel Edit</button> : null}
         </div>
-        <label>Service name<input value={form.serviceName} onChange={(e) => update("serviceName", e.target.value)} placeholder="Blouse Stitching" required /></label>
-        <label>
+        <label className="service-name-field">Service name<input value={form.serviceName} onChange={(e) => update("serviceName", e.target.value)} placeholder="Blouse Stitching" required /></label>
+        <label className="service-category-field">
           Category
           <select value={form.category} onChange={(e) => update("category", e.target.value)}>
             {SERVICE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
           </select>
         </label>
-        <label>Price (Rs.)<input type="number" min="1" value={form.price} onChange={(e) => update("price", e.target.value)} required /></label>
-        <label className="check-row">
+        <label className="service-price-field">Price (Rs.)<input type="number" min="1" value={form.price} onChange={(e) => update("price", e.target.value)} required /></label>
+        <label className="check-row service-combo-field">
           <input type="checkbox" checked={form.isCombo} onChange={(e) => update("isCombo", e.target.checked)} />
           This is a combo
         </label>
         {form.isCombo ? (
-          <label className="span-2">Combo items (comma separated)<input value={form.comboItems} onChange={(e) => update("comboItems", e.target.value)} placeholder="Blouse, Petticoat" /></label>
+          <label className="span-2 service-combo-items-field">Combo items (comma separated)<input value={form.comboItems} onChange={(e) => update("comboItems", e.target.value)} placeholder="Blouse, Petticoat" /></label>
         ) : null}
-        <label className="span-2">Description<textarea value={form.description} onChange={(e) => update("description", e.target.value)} /></label>
-        <button className="primary-btn" disabled={busy}>{busy ? "Saving..." : editingId ? "Save Changes" : "Add Service"}</button>
+        <label className="span-2 service-description-field">Description<textarea value={form.description} onChange={(e) => update("description", e.target.value)} placeholder="Short service description" /></label>
+        <button className="primary-btn service-submit" disabled={busy}>{busy ? "Saving..." : editingId ? "Save Changes" : "Add Service"}</button>
       </form>
       {message ? <div className={/(added|updated|reactivated|deactivated)/i.test(message) ? "notice ok" : "error"}>{message}</div> : null}
       {loading ? (
@@ -5914,10 +6112,10 @@ function TailorServicesPanel() {
         <PaginatedCards
           items={services}
           pageSize={5}
-          className="record-list"
+          className="record-list tailor-service-list"
           label="services"
           renderItem={(service) => (
-            <article className="record-card service-row">
+            <article className="record-card service-row tailor-service-card">
               <div className="record-card-head">
                 <Tag size={16} />
                 <strong>{service.name}</strong>
@@ -6303,15 +6501,20 @@ function TailorOrders({ rows, reload }) {
             ))}
           </div>
           {activeRows.length ? (
-            <Table columns={["Order", "Customer", "Status", "Payment", "Due", "Total", "Actions"]} label="orders" rows={activeRows.map((o) => [
-              <><strong>{o.code}</strong><small>{o.service_name}</small></>,
-              <><span>{o.customer_name}</span><small>{o.customer_phone || ""}</small></>,
-              <StatusPill value={o.status} />,
-              <StatusPill value={o.payment_status} />,
-              fmtDay(o.expected_completion),
-              money(o.total),
-              <TailorOrderActions order={o} reload={reload} onCharge={() => addCharge(o)} onMeasurementDone={() => markMeasurementDone(o)} />,
-            ])} />
+            <PaginatedCards
+              items={activeRows}
+              pageSize={6}
+              className="tailor-order-list"
+              label="orders"
+              renderItem={(order) => (
+                <TailorOrderCard
+                  order={order}
+                  reload={reload}
+                  onCharge={() => addCharge(order)}
+                  onMeasurementDone={() => markMeasurementDone(order)}
+                />
+              )}
+            />
           ) : <Empty text={`No ${activeFilter[1].toLowerCase()} orders right now.`} />}
         </>
       ) : <Empty text="No orders yet." />}
@@ -6449,6 +6652,52 @@ function TailorOrderActions({ order, reload, onCharge, onMeasurementDone }) {
       {canMarkMeasurementDone && !measurementReady ? <small className="field-error">Verify the customer's arrival OTP before marking measurement done.</small> : null}
       {message ? <small className={message.includes("sent") || message.includes("verified") || message.includes("updated") || message.includes("unlocked") || message.includes("shared") || message.includes("marked") ? "field-success" : "field-error"}>{message}</small> : null}
     </div>
+  );
+}
+
+function TailorOrderCard({ order, reload, onCharge, onMeasurementDone }) {
+  const [open, setOpen] = useState(false);
+  const stage = order.tracker_stage || order.trackerStage || "Order Placed";
+  const stageIndex = Math.max(0, bookingTrackerStages.indexOf(stage));
+  const progress = Math.round(((stageIndex + 1) / bookingTrackerStages.length) * 100);
+  const phone = order.customer_phone || order.customerPhone || "";
+
+  return (
+    <article className={`tailor-order-card ${open ? "expanded" : ""}`}>
+      <div className="tailor-order-summary">
+        <div className="tailor-order-identity">
+          <strong>{order.code}</strong>
+          <h4>{order.service_name || order.serviceName || "Tailoring service"}</h4>
+          <span>{order.customer_name || order.customerName || "Customer"}{phone ? ` · ${phone}` : ""}</span>
+        </div>
+        <div className="tailor-order-state">
+          <StatusPill value={order.status} />
+          <StatusPill value={order.payment_status || order.paymentStatus} />
+        </div>
+        <div className="tailor-order-facts">
+          <span><small>Due</small><b>{fmtDay(order.expected_completion || order.expectedCompletion)}</b></span>
+          <span><small>Total</small><b>{money(order.total)}</b></span>
+        </div>
+        <button
+          type="button"
+          className="tailor-order-expand"
+          onClick={() => setOpen((value) => !value)}
+          aria-expanded={open}
+        >
+          <span>{open ? "Hide controls" : "Manage order"}</span>
+          <ChevronDown size={17} />
+        </button>
+      </div>
+      <div className="tailor-order-progress" aria-label={`${stage}, ${progress}% complete`}>
+        <span><i style={{ width: `${progress}%` }} /></span>
+        <b>{stage}</b>
+      </div>
+      {open ? (
+        <div className="tailor-order-expanded">
+          <TailorOrderActions order={order} reload={reload} onCharge={onCharge} onMeasurementDone={onMeasurementDone} />
+        </div>
+      ) : null}
+    </article>
   );
 }
 
