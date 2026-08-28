@@ -50,6 +50,7 @@ pwa/android-twa/*.keystore
 pwa/android-twa/*.jks
 pwa/android-twa/app-release*.apk
 pwa/android-twa/app-release*.aab
+pwa/android-twa/Vastrivo-*-release.aab
 pwa/android-twa/*.idsig
 pwa/android-twa/*-unsigned.aab
 pwa/android-twa/local.properties
