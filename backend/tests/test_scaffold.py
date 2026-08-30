@@ -1,9 +1,10 @@
+import asyncio
 import inspect
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import HTTPException, WebSocketDisconnect
 
 from app.api.v1 import api_router
 from app.api.v1.admin import verify_payment_intent
@@ -14,8 +15,10 @@ from app.api.v1.bookings import (
     pay_booking,
     resolve_booking_dates,
     send_delivery_otp,
+    track_booking,
     verify_delivery_otp,
 )
+from app.api.v1 import bookings as bookings_module
 from app.core.config import get_settings
 from app.main import app
 from app.schema_models import SchemaBase
@@ -77,6 +80,42 @@ def test_v1_router_has_health_route():
 
 def test_settings_uses_asyncpg_url():
     assert get_settings().async_database_url.startswith("postgresql+asyncpg://")
+
+
+def test_booking_tracker_websocket_replies_to_heartbeat(monkeypatch):
+    class FakeTrackerConnections:
+        def __init__(self):
+            self.disconnected = False
+
+        async def connect(self, booking_id, websocket):
+            self.booking_id = booking_id
+
+        def disconnect(self, booking_id, websocket):
+            self.disconnected = True
+
+    class FakeWebSocket:
+        def __init__(self):
+            self.messages = iter(("ping",))
+            self.sent = []
+
+        async def receive_text(self):
+            try:
+                return next(self.messages)
+            except StopIteration as exc:
+                raise WebSocketDisconnect() from exc
+
+        async def send_json(self, payload):
+            self.sent.append(payload)
+
+    connections = FakeTrackerConnections()
+    websocket = FakeWebSocket()
+    monkeypatch.setattr(bookings_module, "tracker_connections", connections)
+
+    asyncio.run(track_booking(websocket, "ORD-PHASE2"))
+
+    assert websocket.sent == [{"type": "pong"}]
+    assert connections.booking_id == "ORD-PHASE2"
+    assert connections.disconnected is True
 
 
 def test_large_collection_routes_expose_bounded_pagination():

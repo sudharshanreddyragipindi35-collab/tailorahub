@@ -3955,7 +3955,7 @@ tr:hover td {
   background:
     linear-gradient(90deg, rgba(0, 0, 0, 0.78), rgba(0, 0, 0, 0.32) 46%, rgba(0, 0, 0, 0.18)),
     linear-gradient(180deg, rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.45)),
-    url("./assets/tailorahub-atelier-hero.png") center / cover no-repeat;
+    url("./assets/tailorahub-atelier-hero.webp") center / cover no-repeat;
   box-shadow: none;
 }
 
@@ -4278,7 +4278,7 @@ tr:hover td {
 .auth-visual-panel {
   background:
     linear-gradient(180deg, rgba(4, 4, 5, 0.18), rgba(4, 4, 5, 0.86)),
-    url("./assets/tailorahub-atelier-hero.png") center / cover no-repeat;
+    url("./assets/tailorahub-atelier-hero.webp") center / cover no-repeat;
 }
 
 .auth-form-panel {
@@ -4397,7 +4397,7 @@ tr:hover td {
   margin: -15px -15px 14px;
   background:
     linear-gradient(180deg, rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.76)),
-    url("./assets/tailorahub-atelier-hero.png") center 42% / cover no-repeat;
+    url("./assets/tailorahub-atelier-hero.webp") center 42% / cover no-repeat;
   border-bottom: 1px solid rgba(212, 175, 55, 0.22);
 }
 
@@ -4459,7 +4459,7 @@ tr:hover td {
     gap: 24px;
     background:
       linear-gradient(180deg, rgba(0, 0, 0, 0.28), rgba(0, 0, 0, 0.68) 52%, rgba(0, 0, 0, 0.85)),
-      url("./assets/tailorahub-atelier-hero.png") top center / cover no-repeat;
+      url("./assets/tailorahub-atelier-hero.webp") top center / cover no-repeat;
   }
 
   .ppt-home-topbar {

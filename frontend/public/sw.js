@@ -1,4 +1,4 @@
-const CACHE_NAME = "tailorahub-pwa-v7";
+const CACHE_NAME = "tailorahub-pwa-v8";
 const APP_SHELL = [
   "/",
   "/offline.html",
@@ -61,6 +61,17 @@ self.addEventListener("fetch", (event) => {
   }
 
   if (url.origin !== self.location.origin) return;
+
+  const isImmutableAsset = url.pathname.startsWith("/assets/") && /-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/.test(url.pathname);
+  if (isImmutableAsset) {
+    event.respondWith(
+      caches.match(request).then((cached) => cached || fetch(request).then((response) => {
+        if (response.ok) caches.open(CACHE_NAME).then((cache) => cache.put(request, response.clone()));
+        return response;
+      }))
+    );
+    return;
+  }
 
   event.respondWith(
     fetch(request)

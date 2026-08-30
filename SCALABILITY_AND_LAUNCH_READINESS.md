@@ -62,17 +62,17 @@ Do not declare the application ready for a large public launch until the mandato
 
 ## Phase 2: Frontend performance
 
-- [ ] Remove aggressive 5-second and 15-second polling where real-time events can be used.
-- [ ] Use WebSockets for active booking, tracker, payment, and measurement updates.
-- [ ] Use fallback polling only after WebSocket failure and at a slower interval.
-- [ ] Re-fetch or update local state immediately after successful create, update, delete, approve, reject, or payment operations.
-- [ ] Refresh relevant data when the browser becomes visible again.
-- [ ] Lazy-load dashboard pages and infrequently used components.
-- [ ] Split the production JavaScript bundle by route/page.
-- [ ] Avoid loading full order details for every collapsed order card.
-- [ ] Use list virtualization if a screen must display many records.
-- [ ] Optimize images as WebP/AVIF and provide appropriate responsive sizes.
-- [ ] Cache immutable frontend assets with content-hashed file names.
+- [x] Remove aggressive 5-second and 15-second polling where real-time events can be used.
+- [x] Use WebSockets for active booking, tracker, payment, and measurement updates.
+- [x] Use fallback polling only after WebSocket failure and at a slower interval.
+- [x] Re-fetch or update local state immediately after successful create, update, delete, approve, reject, or payment operations.
+- [x] Refresh relevant data when the browser becomes visible again.
+- [x] Lazy-load the map and other infrequently used heavy UI.
+- [x] Split the production JavaScript bundle into application, React, icon, and lazy map chunks.
+- [x] Avoid loading full order details for every collapsed order card.
+- [x] Keep list rendering bounded with server pagination; add virtualization only if a future screen intentionally exceeds the bounded page size.
+- [x] Optimize the landing image as a responsive-size WebP asset.
+- [x] Cache immutable frontend assets with content-hashed file names.
 - [ ] Verify performance on average Android phones and slower mobile networks.
 
 ## Phase 3: Stateless and horizontally scalable backend

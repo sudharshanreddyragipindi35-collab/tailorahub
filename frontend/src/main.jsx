@@ -38,10 +38,19 @@ import UsersRound from "lucide-react/dist/esm/icons/users-round.js";
 import Video from "lucide-react/dist/esm/icons/video.js";
 import XCircle from "lucide-react/dist/esm/icons/x-circle.js";
 import { api, assetUrl, clearSession, getRefreshToken, getRole, getToken, hasValidStoredSession, INACTIVITY_LOGOUT_MESSAGE, isSessionExpired, isSessionInactive, markSessionActive, setSession } from "./api";
-import MapPicker from "./components/MapPicker";
 import { registerPwa } from "./registerPwa";
 import "./styles.css";
 import "./premium-ui.css";
+
+const MapPicker = React.lazy(() => import("./components/MapPicker"));
+
+function LazyMapPicker(props) {
+  return (
+    <React.Suspense fallback={<div className="loading">Loading map...</div>}>
+      <MapPicker {...props} />
+    </React.Suspense>
+  );
+}
 
 const publicRoles = [
   ["customer", "Customer", UsersRound, "Find tailors, book and track orders."],
@@ -597,7 +606,7 @@ function useAppHistoryState(scope, initialValue) {
   return [value, navigate];
 }
 
-function useAutoRefresh(refresh, intervalMs = 15000) {
+function useAutoRefresh(refresh) {
   const refreshRef = useRef(refresh);
   const runningRef = useRef(false);
   useEffect(() => { refreshRef.current = refresh; }, [refresh]);
@@ -614,17 +623,17 @@ function useAutoRefresh(refresh, intervalMs = 15000) {
     function handleVisible() {
       if (document.visibilityState === "visible") run();
     }
-    const timer = window.setInterval(run, intervalMs);
     window.addEventListener("focus", run);
+    window.addEventListener("online", run);
     window.addEventListener("tailorahub:data-changed", run);
     document.addEventListener("visibilitychange", handleVisible);
     return () => {
-      window.clearInterval(timer);
       window.removeEventListener("focus", run);
+      window.removeEventListener("online", run);
       window.removeEventListener("tailorahub:data-changed", run);
       document.removeEventListener("visibilitychange", handleVisible);
     };
-  }, [intervalMs]);
+  }, []);
 }
 
 function normalizeReferralCode(value) {
@@ -891,7 +900,7 @@ function MediaGallery({ portfolio, onRemove }) {
           {item.kind === "video" ? (
             <video src={item.url} controls preload="metadata" />
           ) : (
-            <img src={item.url} alt={item.name} />
+            <img src={item.url} alt={item.name} loading="lazy" decoding="async" />
           )}
           <div className="media-meta">
             <span>{item.kind === "video" ? <Video size={13} /> : <ImageIcon size={13} />} {item.name}</span>
@@ -2167,7 +2176,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
         <Field label="Area / zone"><input value={form.zoneId} onChange={(e) => update("zoneId", e.target.value)} /></Field>
         <Field label="Address search text"><input value={form.address} onChange={(e) => update("address", e.target.value)} placeholder="Shop address or nearby landmark" /></Field>
         <div className="span-2">
-          <MapPicker
+          <LazyMapPicker
             initialLocation={form.location || { address_text: form.address }}
             onConfirm={(location) => {
               update("location", location);
@@ -3114,7 +3123,7 @@ function TailorCard({ tailor, onOpen, onBook, onFavorite }) {
     <article className="record-card tailor-card customer-discovery-card">
       <div className="tailor-card-cover">
         {firstMedia ? (
-          firstMedia.kind === "video" ? <video src={firstMedia.url} muted preload="metadata" /> : <img src={firstMedia.url} alt={`${tailor.shop} cover`} />
+          firstMedia.kind === "video" ? <video src={firstMedia.url} muted preload="metadata" /> : <img src={firstMedia.url} alt={`${tailor.shop} cover`} loading="lazy" decoding="async" />
         ) : (
           <div className="tailor-cover-fallback">
             <span className="tailor-cover-monogram">{shopInitials}</span>
@@ -3172,7 +3181,7 @@ function OfferList({ offers = [], onRemove }) {
           <article className={offer.active === false ? "offer-card inactive" : "offer-card"} key={offer.id}>
             {mediaUrl ? (
               <div className="offer-media">
-                {mediaKind === "video" ? <video src={mediaUrl} controls preload="metadata" /> : <img src={mediaUrl} alt={offer.title} />}
+                {mediaKind === "video" ? <video src={mediaUrl} controls preload="metadata" /> : <img src={mediaUrl} alt={offer.title} loading="lazy" decoding="async" />}
               </div>
             ) : null}
             <div>
@@ -3564,7 +3573,7 @@ function CustomerTailorProfile({ profile, reload, onFavorite, onFollow, onBookin
                 </div>
               ) : (
                 <>
-                  <MapPicker
+                  <LazyMapPicker
                     initialLocation={form.homeLocation || {}}
                     onConfirm={(location) => {
                       update("homeLocation", location);
@@ -3927,6 +3936,91 @@ function trackerSocketUrl(orderId) {
   return `${api.base.replace(/^http/, "ws")}/v1/bookings/${encodeURIComponent(orderId)}/track`;
 }
 
+function useBookingLiveUpdates(orderId, onPayload, fallbackRefresh, enabled = true) {
+  const payloadRef = useRef(onPayload);
+  const fallbackRef = useRef(fallbackRefresh);
+  useEffect(() => { payloadRef.current = onPayload; }, [onPayload]);
+  useEffect(() => { fallbackRef.current = fallbackRefresh; }, [fallbackRefresh]);
+
+  useEffect(() => {
+    if (!enabled || !orderId) return undefined;
+    let closed = false;
+    let socket;
+    let reconnectTimer;
+    let fallbackTimer;
+    let heartbeatTimer;
+
+    function clearConnectionTimers() {
+      window.clearInterval(heartbeatTimer);
+      window.clearTimeout(reconnectTimer);
+    }
+
+    function startFallback() {
+      if (closed || fallbackTimer) return;
+      fallbackRef.current?.();
+      fallbackTimer = window.setInterval(() => {
+        if (document.visibilityState === "visible") fallbackRef.current?.();
+      }, 60000);
+    }
+
+    function stopFallback() {
+      window.clearInterval(fallbackTimer);
+      fallbackTimer = undefined;
+    }
+
+    function connect() {
+      if (closed || document.visibilityState === "hidden" || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+      clearConnectionTimers();
+      try {
+        socket = new WebSocket(trackerSocketUrl(orderId));
+        socket.onopen = () => {
+          stopFallback();
+          heartbeatTimer = window.setInterval(() => {
+            if (socket?.readyState === WebSocket.OPEN) socket.send("ping");
+          }, 25000);
+        };
+        socket.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload?.type !== "pong") payloadRef.current?.(payload);
+          } catch {}
+        };
+        socket.onerror = () => socket?.close();
+        socket.onclose = () => {
+          socket = undefined;
+          window.clearInterval(heartbeatTimer);
+          startFallback();
+          if (!closed) reconnectTimer = window.setTimeout(connect, 10000);
+        };
+      } catch {
+        startFallback();
+        reconnectTimer = window.setTimeout(connect, 10000);
+      }
+    }
+
+    function handleVisibility() {
+      if (document.visibilityState === "visible") {
+        fallbackRef.current?.();
+        connect();
+      } else if (socket) {
+        socket.close();
+      }
+    }
+
+    connect();
+    window.addEventListener("online", connect);
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      closed = true;
+      clearConnectionTimers();
+      stopFallback();
+      window.removeEventListener("online", connect);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      if (socket) socket.close();
+    };
+  }, [orderId, enabled]);
+}
+
 function normalizeOrderStatusPayload(order, statusPayload) {
   const booking = statusPayload?.booking || {};
   const stage = statusPayload?.trackerStage || booking.trackerStage || order.trackerStage || order.tracker_stage || "Order Placed";
@@ -4273,9 +4367,11 @@ function CustomerMeasurementVisitPanel({ order }) {
   useEffect(() => {
     setTrip(order);
     loadTrip();
-    const timer = setInterval(loadTrip, 5000);
-    return () => clearInterval(timer);
   }, [order?.id]);
+
+  useEffect(() => {
+    setTrip(order);
+  }, [order]);
 
   useEffect(() => {
     function refreshTrip(event) {
@@ -4379,9 +4475,14 @@ function TailorMeasurementVisitPanel({ order, reload, onReadyChange }) {
   useEffect(() => {
     setTrip(order);
     loadTrip();
-    const timer = setInterval(loadTrip, 5000);
-    return () => clearInterval(timer);
   }, [order?.id]);
+
+  useBookingLiveUpdates(
+    order?.id,
+    (payload) => setTrip(payload?.booking || order),
+    loadTrip,
+    Boolean(order?.id),
+  );
 
   useEffect(() => {
     function refreshTrip(event) {
@@ -4540,27 +4641,24 @@ function CustomerOrderCard({ order, reload }) {
   }
 
   useEffect(() => {
-    let closed = false;
+    if (!detailsOpen) {
+      setStatusData(normalizeOrderStatusPayload(order, null));
+      return;
+    }
     loadStatus();
     loadBreakdown();
-    let socket;
-    try {
-      socket = new WebSocket(trackerSocketUrl(order.id));
-      socket.onmessage = (event) => {
-        if (closed) return;
-        const payload = JSON.parse(event.data);
-        const nextStatus = normalizeOrderStatusPayload(order, payload);
-        setStatusData(nextStatus);
-        if (nextStatus.paymentIntent) setPaymentIntent(nextStatus.paymentIntent);
-      };
-    } catch {}
-    const timer = setInterval(loadStatus, 15000);
-    return () => {
-      closed = true;
-      clearInterval(timer);
-      if (socket) socket.close();
-    };
-  }, [order.id]);
+  }, [order, detailsOpen]);
+
+  useBookingLiveUpdates(
+    order.id,
+    (payload) => {
+      const nextStatus = normalizeOrderStatusPayload(order, payload);
+      setStatusData(nextStatus);
+      if (nextStatus.paymentIntent) setPaymentIntent(nextStatus.paymentIntent);
+    },
+    loadStatus,
+    detailsOpen,
+  );
 
   async function pay() {
     setBusy(true);
@@ -5686,7 +5784,7 @@ function TailorWalletPanel() {
             <small>Ledger {money(walletLedgerBalance)} - Pending withdrawal {money(pendingWithdrawalAmount)}</small>
           </div>
           <div className="wallet-qr-tile">
-            {wallet?.qr_code_url ? <img src={assetUrl(wallet.qr_code_url)} alt="Wallet payment QR" /> : <span>No QR yet</span>}
+            {wallet?.qr_code_url ? <img src={assetUrl(wallet.qr_code_url)} alt="Wallet payment QR" loading="lazy" decoding="async" /> : <span>No QR yet</span>}
           </div>
         </div>
         <form className="record-card stack-form" onSubmit={saveUpi}>

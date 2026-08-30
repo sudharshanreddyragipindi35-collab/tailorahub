@@ -2566,6 +2566,8 @@ async def track_booking(websocket: WebSocket, booking_id: str) -> None:
     await tracker_connections.connect(booking_id, websocket)
     try:
         while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
+            message = await websocket.receive_text()
+            if message == "ping":
+                await websocket.send_json({"type": "pong"})
+    except (WebSocketDisconnect, RuntimeError):
         tracker_connections.disconnect(booking_id, websocket)

@@ -944,7 +944,7 @@ textarea:disabled {
   background:
     linear-gradient(90deg, rgba(9, 8, 7, 0.97) 0%, rgba(9, 8, 7, 0.82) 35%, rgba(9, 8, 7, 0.18) 70%, rgba(9, 8, 7, 0.42) 100%),
     linear-gradient(0deg, rgba(8, 7, 6, 0.9) 0%, transparent 52%),
-    url("./assets/tailorahub-atelier-hero.png") 64% center / cover no-repeat !important;
+    url("./assets/tailorahub-atelier-hero.webp") 64% center / cover no-repeat !important;
   box-shadow: none !important;
 }
 
@@ -1375,7 +1375,7 @@ textarea:disabled {
   background:
     linear-gradient(90deg, rgba(250, 247, 239, 0.98), rgba(250, 247, 239, 0.86) 41%, rgba(250, 247, 239, 0.16) 78%),
     linear-gradient(0deg, rgba(250, 247, 239, 0.92), transparent 52%),
-    url("./assets/tailorahub-atelier-hero.png") 64% center / cover no-repeat !important;
+    url("./assets/tailorahub-atelier-hero.webp") 64% center / cover no-repeat !important;
 }
 
 :root[data-theme="light"] .ppt-logo,
@@ -1465,7 +1465,7 @@ textarea:disabled {
   background:
     linear-gradient(180deg, rgba(9, 8, 7, 0.18), rgba(9, 8, 7, 0.9)),
     linear-gradient(90deg, rgba(9, 8, 7, 0.6), transparent 70%),
-    url("./assets/tailorahub-atelier-hero.png") 64% center / cover no-repeat !important;
+    url("./assets/tailorahub-atelier-hero.webp") 64% center / cover no-repeat !important;
 }
 
 .auth-visual-panel::before {
