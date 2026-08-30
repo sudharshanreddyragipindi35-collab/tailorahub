@@ -51,8 +51,10 @@ if not networks:
     raise SystemExit("ADMIN_ALLOWED_NETWORKS is empty")
 for network in networks:
     parsed = ipaddress.ip_network(network, strict=False)
-    if parsed.version != 4 or parsed.prefixlen != 32:
-        raise SystemExit("Every production admin allowlist entry must be an IPv4 /32")
+    is_exact_ipv4 = parsed.version == 4 and parsed.prefixlen == 32
+    is_exact_ipv6 = parsed.version == 6 and parsed.prefixlen == 128
+    if not (is_exact_ipv4 or is_exact_ipv6):
+        raise SystemExit("Every production admin allowlist entry must be an IPv4 /32 or IPv6 /128")
 
 environment["ADMIN_ALLOWED_NETWORKS"] = ",".join(networks)
 environment["ADMIN_TRUSTED_PROXY_NETWORKS"] = "127.0.0.1/32,::1/128,172.17.0.0/16"

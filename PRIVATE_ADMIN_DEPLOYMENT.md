@@ -32,11 +32,11 @@ ADMIN_TRUSTED_PROXY_NETWORKS=127.0.0.1/32,::1/128,YOUR_NGINX_OR_DOCKER_PROXY_CID
 Example:
 
 ```env
-ADMIN_ALLOWED_NETWORKS=203.0.113.25/32
+ADMIN_ALLOWED_NETWORKS=203.0.113.25/32,2001:db8::25/128
 ADMIN_TRUSTED_PROXY_NETWORKS=127.0.0.1/32,::1/128,172.16.0.0/12
 ```
 
-Use the narrowest real proxy network possible instead of the broad Docker example. Restart the backend container after changing the environment. An empty `ADMIN_ALLOWED_NETWORKS` disables the application-level IP check, so do not leave it empty in production.
+Use an exact IPv4 `/32` or IPv6 `/128` for each approved administrator connection. Mobile carrier addresses can change, so re-verify a mobile address after a network reconnect or use a fixed-egress VPN for reliable access. Use the narrowest real proxy network possible instead of the broad Docker example. Restart the backend container after changing the environment. An empty `ADMIN_ALLOWED_NETWORKS` disables the application-level IP check, so do not leave it empty in production.
 
 The following backend paths are protected by this setting:
 
@@ -50,13 +50,15 @@ The normal `/api/auth/login` endpoint no longer accepts the Admin role.
 
 In AWS Amplify, attach an AWS WAF web ACL to the TailoraHub app. The web ACL scope must be **CloudFront (Global)**.
 
-Create an IP set containing only the approved public IP/CIDR. Then create one custom rule named **BlockAdminOutsideApprovedIPs**:
+Create separate IPv4 and IPv6 IP sets containing only the approved exact addresses. Then configure these rules in order:
 
-- Statement: **AND**
-  - URI path starts with `/admin` (apply URL decode and lowercase text transformations)
-  - **NOT** source IP in the approved admin IP set
-- Action: **Block**
-- Priority: place this rule before general managed/rate-limit rules
+1. **AllowApprovedAdminIPs**
+   - URI path matches `/admin` or a child path (apply URL decode and lowercase text transformations).
+   - Source address is in the approved IPv4 **or** IPv6 IP set.
+   - Action: **Allow**.
+2. **BlockOtherAdminIPs**
+   - URI path matches `/admin` or a child path.
+   - Action: **Block**.
 
 Keep the web ACL default action as Allow so the customer and tailor site remains public. Enable WAF logging before launch and test from both the approved network and a mobile-data connection.
 

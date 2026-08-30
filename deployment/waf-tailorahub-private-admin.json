@@ -31,8 +31,19 @@
               }
             },
             {
-              "IPSetReferenceStatement": {
-                "ARN": "arn:aws:wafv2:us-east-1:495680546669:global/ipset/TailoraHubApprovedAdminIPv4/f19558a4-ca7e-41ce-84ff-a2ea6998deb3"
+              "OrStatement": {
+                "Statements": [
+                  {
+                    "IPSetReferenceStatement": {
+                      "ARN": "arn:aws:wafv2:us-east-1:495680546669:global/ipset/TailoraHubApprovedAdminIPv4/f19558a4-ca7e-41ce-84ff-a2ea6998deb3"
+                    }
+                  },
+                  {
+                    "IPSetReferenceStatement": {
+                      "ARN": "arn:aws:wafv2:us-east-1:495680546669:global/ipset/TailoraHubApprovedAdminIPv6/8619170d-05c7-4f66-90a1-68dd577b3f95"
+                    }
+                  }
+                ]
               }
             }
           ]
