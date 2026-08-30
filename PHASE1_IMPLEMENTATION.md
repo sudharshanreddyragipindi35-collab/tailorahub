@@ -25,13 +25,6 @@ DATABASE_SLOW_QUERY_MS=500
 
 Keep `pool size + overflow`, multiplied by the maximum number of backend processes/containers, below the database connection budget. Recalculate these values before enabling multiple containers.
 
-## Remaining AWS operations
+## Remaining work
 
-These require production infrastructure changes and verification; they are intentionally not marked complete by a local code change:
-
-1. Move database credentials to AWS Secrets Manager and inject `DATABASE_URL` at runtime.
-2. Enable and verify automated RDS backups.
-3. Restore a snapshot into an isolated database and document the result.
-4. Add RDS Proxy before scaling to multiple backend containers.
-5. Recalculate the total connection budget for the selected RDS instance and container count.
-6. Add opaque cursor pagination if measurements show deep offset pagination is needed.
+Deferred AWS operations are maintained in `PHASE1_PHASE2_PENDING.md`.

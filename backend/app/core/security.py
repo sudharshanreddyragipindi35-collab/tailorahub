@@ -43,3 +43,24 @@ def decode_access_token(token: str) -> dict:
 def decode_refresh_token(token: str) -> dict:
     settings = get_settings()
     return jwt.decode(token, settings.jwt_refresh_secret, algorithms=[settings.jwt_algorithm])
+
+
+def create_booking_ws_ticket(subject: str, booking_id: str) -> str:
+    settings = get_settings()
+    exp = datetime.now(timezone.utc) + timedelta(seconds=settings.realtime_ticket_seconds)
+    payload = {
+        "sub": subject,
+        "booking_id": booking_id,
+        "type": "booking_ws",
+        "jti": secrets.token_urlsafe(18),
+        "exp": exp,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=settings.jwt_algorithm)
+
+
+def decode_booking_ws_ticket(token: str) -> dict:
+    settings = get_settings()
+    payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
+    if payload.get("type") != "booking_ws" or not payload.get("booking_id") or not payload.get("sub"):
+        raise ValueError("Invalid booking WebSocket ticket")
+    return payload

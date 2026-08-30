@@ -28,6 +28,7 @@ class AppSettings(BaseSettings):
     database_statement_timeout_ms: int = Field(default=5000, ge=100, alias="DATABASE_STATEMENT_TIMEOUT_MS")
     database_slow_query_ms: int = Field(default=500, ge=1, alias="DATABASE_SLOW_QUERY_MS")
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
+    realtime_ticket_seconds: int = Field(default=120, ge=30, le=600, alias="REALTIME_TICKET_SECONDS")
     jwt_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(48), alias="JWT_SECRET")
     jwt_refresh_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(48), alias="JWT_REFRESH_SECRET")
     jwt_algorithm: str = "HS256"

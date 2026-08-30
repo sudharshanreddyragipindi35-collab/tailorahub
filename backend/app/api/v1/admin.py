@@ -16,6 +16,7 @@ from app.core.database import get_db
 from app.pagination import PageParams
 from app.qr import generate_wallet_qr
 from app.schemas.admin import PlatformSettingsIn
+from app.services.media_storage import get_media_storage
 
 
 router = APIRouter()
@@ -474,6 +475,7 @@ def _customer_node_from_row(row: dict) -> dict:
 
 def _dispute_payload(row: dict) -> dict:
     dispute_id = str(row["id"])
+    photo_url = get_media_storage().download_url(row.get("photo_url"))
     return {
         "id": dispute_id,
         "booking_id": row.get("booking_id"),
@@ -496,8 +498,8 @@ def _dispute_payload(row: dict) -> dict:
         "owner_name": row.get("owner_name"),
         "ownerName": row.get("owner_name"),
         "reason": row.get("reason"),
-        "photo_url": row.get("photo_url"),
-        "photoUrl": row.get("photo_url"),
+        "photo_url": photo_url,
+        "photoUrl": photo_url,
         "photo_name": row.get("photo_name"),
         "photoName": row.get("photo_name"),
         "photo_media_type": row.get("photo_media_type"),

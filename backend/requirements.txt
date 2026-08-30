@@ -15,6 +15,7 @@ qrcode==8.0
 Pillow==12.3.0
 python-multipart==0.0.31
 redis==5.2.1
+boto3==1.40.20
 APScheduler==3.11.0
 gunicorn==23.0.0
 httpx2==2.12.0

@@ -25,6 +25,4 @@
 
 ## Remaining measured validation
 
-Test the deployed production build on an average Android device under a throttled mobile connection and record Core Web Vitals. This is an environment/device validation step rather than an additional source-code change.
-
-Phase 1 AWS infrastructure items remain intentionally deferred as listed in `PHASE1_IMPLEMENTATION.md`.
+Deferred device and network validation is maintained in `PHASE1_PHASE2_PENDING.md`.

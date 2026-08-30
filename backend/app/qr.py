@@ -6,13 +6,11 @@ scanning it only ever reveals which wallet to credit, resolved server-side
 by the payment endpoint.
 """
 
-from pathlib import Path
+from io import BytesIO
 
 import qrcode
 
-from .settings import settings
-
-WALLET_QR_DIR = settings.base_dir / "uploads" / "wallets"
+from .services.media_storage import get_media_storage
 
 
 def wallet_payment_token(wallet_id: str) -> str:
@@ -20,9 +18,12 @@ def wallet_payment_token(wallet_id: str) -> str:
 
 
 def generate_wallet_qr(wallet_id: str) -> str:
-    """Writes uploads/wallets/{wallet_id}.png and returns its public URL path."""
-    WALLET_QR_DIR.mkdir(parents=True, exist_ok=True)
+    """Stores an opaque wallet QR through the configured media backend."""
     image = qrcode.make(wallet_payment_token(wallet_id))
-    target: Path = WALLET_QR_DIR / f"{wallet_id}.png"
-    image.save(target)
-    return f"/uploads/wallets/{wallet_id}.png"
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return get_media_storage().store_bytes(
+        f"wallets/{wallet_id}.png",
+        output.getvalue(),
+        "image/png",
+    )

@@ -77,19 +77,19 @@ Do not declare the application ready for a large public launch until the mandato
 
 ## Phase 3: Stateless and horizontally scalable backend
 
-- [ ] Make backend containers stateless.
-- [ ] Do not store required application state only in Python process memory.
-- [ ] Do not store permanent uploaded media on a container filesystem.
-- [ ] Store profile pictures, portfolio media, support attachments, and other uploads in Amazon S3.
-- [ ] Use validated presigned upload/download URLs where appropriate.
-- [ ] Serve public media through CloudFront.
-- [ ] Enforce file size, MIME type, extension, and authorization checks.
+- [x] Make production backend containers stateless through S3 media storage and a Redis real-time backplane.
+- [x] Do not store required application state only in Python process memory.
+- [x] Do not store permanent uploaded media on a production container filesystem.
+- [x] Store all currently supported profile, portfolio, offer, wallet QR, and dispute uploads in Amazon S3.
+- [x] Use validated, short-lived presigned upload/download URLs where appropriate.
+- [x] Serve public media through a configurable CloudFront media domain.
+- [x] Enforce file size, MIME type, file signature, object ownership, and authorization checks.
 
 ### Shared real-time events
 
-- [ ] Replace process-local-only WebSocket broadcasting with Redis/Valkey Pub/Sub or an equivalent shared event layer.
-- [ ] Ensure an event published by one backend container reaches clients connected to every other container.
-- [ ] Implement WebSocket reconnect, heartbeat, stale-connection cleanup, and authorization.
+- [x] Replace process-local-only WebSocket broadcasting with Redis/Valkey Pub/Sub.
+- [x] Ensure an event published by one backend instance reaches clients connected to another instance.
+- [x] Implement WebSocket reconnect, heartbeat, stale-connection cleanup, and short-lived booking-scoped authorization.
 - [ ] Verify WebSocket behaviour while ECS tasks are added, removed, or redeployed.
 
 ## Phase 4: Background processing

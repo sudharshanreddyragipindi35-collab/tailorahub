@@ -30,6 +30,7 @@ def env_int(name: str, default: int) -> int:
 
 class Settings:
     base_dir = BASE_DIR
+    app_env = env_value("APP_ENV", "development").lower()
     database_url = env_value(
         "DATABASE_URL",
         "postgresql+psycopg://tailorahub@localhost:5432/tailorahub_dev",
@@ -104,6 +105,19 @@ class Settings:
 
     maps_provider = env_value("MAPS_PROVIDER", "mock").lower()
     maps_api_key = env_value("MAPS_API_KEY")
+
+    media_storage_backend = env_value("MEDIA_STORAGE_BACKEND", "local").lower()
+    s3_media_bucket = env_value("S3_MEDIA_BUCKET")
+    s3_media_region = env_value("S3_MEDIA_REGION", "ap-south-1")
+    s3_media_endpoint_url = env_value("S3_MEDIA_ENDPOINT_URL")
+    s3_media_key_prefix = env_value("S3_MEDIA_KEY_PREFIX", "media").strip("/")
+    cloudfront_media_base_url = env_value("CLOUDFRONT_MEDIA_BASE_URL").rstrip("/")
+    s3_presign_ttl_seconds = env_int("S3_PRESIGN_TTL_SECONDS", 300)
+
+    realtime_backplane = env_value("REALTIME_BACKPLANE", "local").lower()
+    realtime_channel_prefix = env_value("REALTIME_CHANNEL_PREFIX", "tailorahub:booking")
+    realtime_ticket_seconds = env_int("REALTIME_TICKET_SECONDS", 120)
+    redis_url = env_value("REDIS_URL", "redis://localhost:6379/0")
 
 
 settings = Settings()

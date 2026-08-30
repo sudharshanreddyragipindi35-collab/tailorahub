@@ -3932,8 +3932,9 @@ function CustomerOrderGroup({ title, rows, emptyText, reload }) {
   );
 }
 
-function trackerSocketUrl(orderId) {
-  return `${api.base.replace(/^http/, "ws")}/v1/bookings/${encodeURIComponent(orderId)}/track`;
+function trackerSocketUrl(orderId, ticket) {
+  const query = new URLSearchParams({ ticket });
+  return `${api.base.replace(/^http/, "ws")}/v1/bookings/${encodeURIComponent(orderId)}/track?${query}`;
 }
 
 function useBookingLiveUpdates(orderId, onPayload, fallbackRefresh, enabled = true) {
@@ -3949,6 +3950,7 @@ function useBookingLiveUpdates(orderId, onPayload, fallbackRefresh, enabled = tr
     let reconnectTimer;
     let fallbackTimer;
     let heartbeatTimer;
+    let connecting = false;
 
     function clearConnectionTimers() {
       window.clearInterval(heartbeatTimer);
@@ -3968,11 +3970,14 @@ function useBookingLiveUpdates(orderId, onPayload, fallbackRefresh, enabled = tr
       fallbackTimer = undefined;
     }
 
-    function connect() {
-      if (closed || document.visibilityState === "hidden" || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+    async function connect() {
+      if (closed || connecting || document.visibilityState === "hidden" || socket?.readyState === WebSocket.OPEN || socket?.readyState === WebSocket.CONNECTING) return;
+      connecting = true;
       clearConnectionTimers();
       try {
-        socket = new WebSocket(trackerSocketUrl(orderId));
+        const ticketResponse = await api.bookingTrackTicket(orderId);
+        if (closed || document.visibilityState === "hidden") return;
+        socket = new WebSocket(trackerSocketUrl(orderId, ticketResponse.ticket));
         socket.onopen = () => {
           stopFallback();
           heartbeatTimer = window.setInterval(() => {
@@ -3995,6 +4000,8 @@ function useBookingLiveUpdates(orderId, onPayload, fallbackRefresh, enabled = tr
       } catch {
         startFallback();
         reconnectTimer = window.setTimeout(connect, 10000);
+      } finally {
+        connecting = false;
       }
     }
 
@@ -4341,6 +4348,14 @@ function getBrowserCoordinates({ required = false } = {}) {
       { enableHighAccuracy: true, timeout: 8000, maximumAge: 15000 }
     );
   });
+}
+
+async function uploadToPresignedPost(plan, file) {
+  const form = new FormData();
+  Object.entries(plan.fields || {}).forEach(([key, value]) => form.append(key, value));
+  form.append("file", file);
+  const response = await fetch(plan.uploadUrl, { method: "POST", body: form });
+  if (!response.ok) throw new Error("The direct media upload failed. Please try again.");
 }
 
 function notifyBookingPanels(bookingId) {
@@ -5927,8 +5942,14 @@ function TailorMediaPanel({ tailor, reload }) {
       if (file.size > 5 * 1024 * 1024) {
         throw new Error("Profile picture must be 5 MB or smaller");
       }
-      const dataUrl = await readFileAsDataUrl(file);
-      await api.uploadTailorProfileImage({ name: file.name, mediaType: file.type, dataUrl });
+      const upload = await api.presignTailorProfileImage({ name: file.name, mediaType: file.type, sizeBytes: file.size });
+      if (upload.mode === "direct") {
+        await uploadToPresignedPost(upload, file);
+        await api.completeTailorProfileImage({ name: file.name, mediaType: file.type, objectKey: upload.objectKey });
+      } else {
+        const dataUrl = await readFileAsDataUrl(file);
+        await api.uploadTailorProfileImage({ name: file.name, mediaType: file.type, dataUrl });
+      }
       setMessage("Profile picture updated and visible to customers.");
       await reload();
     } catch (err) {
@@ -5967,8 +5988,14 @@ function TailorMediaPanel({ tailor, reload }) {
         if (file.size > 15 * 1024 * 1024) {
           throw new Error("Each upload must be 15 MB or smaller");
         }
-        const dataUrl = await readFileAsDataUrl(file);
-        await api.uploadTailorMedia({ name: file.name, mediaType: file.type, dataUrl });
+        const upload = await api.presignTailorMedia({ name: file.name, mediaType: file.type, sizeBytes: file.size });
+        if (upload.mode === "direct") {
+          await uploadToPresignedPost(upload, file);
+          await api.completeTailorMedia({ name: file.name, mediaType: file.type, objectKey: upload.objectKey });
+        } else {
+          const dataUrl = await readFileAsDataUrl(file);
+          await api.uploadTailorMedia({ name: file.name, mediaType: file.type, dataUrl });
+        }
       }
       setMessage("Media uploaded and visible to customers.");
       await reload();

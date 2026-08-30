@@ -39,14 +39,17 @@ from .security import (
 )
 from .settings import settings
 from .tasks.scheduler import configure_jobs, scheduler
+from .services.media_storage import MediaStorageError, get_media_storage, validate_file_signature
+from .services.tracker_service import tracker_connections
 
 
 UPLOADS_DIR = settings.base_dir / "uploads"
-TAILOR_MEDIA_DIR = UPLOADS_DIR / "tailors"
-TAILOR_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+media_storage = get_media_storage()
 
 app = FastAPI(title="TailoraHub API", version="1.0.0")
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+if settings.media_storage_backend == "local":
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins + ["http://localhost:3000", "http://127.0.0.1:5173"],
@@ -345,6 +348,18 @@ class TailorProfileImageUpload(BaseModel):
     name: str
     mediaType: str
     dataUrl: str
+
+
+class TailorMediaPresign(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    mediaType: str
+    sizeBytes: int = Field(gt=0)
+
+
+class TailorMediaComplete(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    mediaType: str
+    objectKey: str = Field(min_length=1, max_length=500)
 
 
 class TailorOfferCreate(BaseModel):
@@ -1003,6 +1018,10 @@ def decode_data_url(data_url: str, media_type: str, max_bytes: int) -> bytes:
         raise HTTPException(400, "Uploaded file is empty")
     if len(raw) > max_bytes:
         raise HTTPException(413, "Uploaded file is too large")
+    try:
+        validate_file_signature(raw, media_type)
+    except MediaStorageError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return raw
 
 
@@ -1011,26 +1030,17 @@ def delete_uploaded_media_file(entry: str) -> None:
         item = json.loads(entry)
     except (TypeError, json.JSONDecodeError):
         return
-    url = str(item.get("url") or "")
-    if not url.startswith("/uploads/"):
-        return
-    target = (settings.base_dir / Path(*url.lstrip("/").split("/"))).resolve()
     try:
-        target.relative_to(UPLOADS_DIR.resolve())
-    except ValueError:
-        return
-    target.unlink(missing_ok=True)
+        media_storage.delete_url(str(item.get("url") or ""))
+    except MediaStorageError:
+        pass
 
 
 def delete_uploaded_url(url: str | None) -> None:
-    if not url or not str(url).startswith("/uploads/"):
-        return
-    target = (settings.base_dir / Path(*str(url).lstrip("/").split("/"))).resolve()
     try:
-        target.relative_to(UPLOADS_DIR.resolve())
-    except ValueError:
-        return
-    target.unlink(missing_ok=True)
+        media_storage.delete_url(url)
+    except MediaStorageError:
+        pass
 
 
 def audit(db: Session, admin: dict, action: str, target_type: str, target_id: str | None, target_name: str | None, reason: str | None = None, meta: dict | None = None) -> None:
@@ -1366,7 +1376,17 @@ def seed_demo_tailors(db: Session) -> None:
 
 
 @app.on_event("startup")
-def startup() -> None:
+async def startup() -> None:
+    if settings.app_env == "production":
+        if settings.media_storage_backend != "s3":
+            raise RuntimeError("Production requires MEDIA_STORAGE_BACKEND=s3")
+        if not settings.cloudfront_media_base_url:
+            raise RuntimeError("Production requires CLOUDFRONT_MEDIA_BASE_URL")
+        if settings.realtime_backplane != "redis":
+            raise RuntimeError("Production requires REALTIME_BACKPLANE=redis")
+        if "localhost" in settings.redis_url or "127.0.0.1" in settings.redis_url:
+            raise RuntimeError("Production REDIS_URL must point to the shared Redis/Valkey service")
+    await tracker_connections.start()
     if settings.auto_migrate:
         run_schema()
     db = next(db_session())
@@ -1381,7 +1401,8 @@ def startup() -> None:
 
 
 @app.on_event("shutdown")
-def shutdown() -> None:
+async def shutdown() -> None:
+    await tracker_connections.stop()
     if scheduler.running:
         scheduler.shutdown(wait=False)
 
@@ -1389,7 +1410,13 @@ def shutdown() -> None:
 @app.get("/api/health")
 def health(db: Session = Depends(db_session)):
     now = fetch_one(db, "SELECT now() AS now")
-    return {"ok": True, "db": "connected", "serverTime": now["now"]}
+    return {
+        "ok": True,
+        "db": "connected",
+        "serverTime": now["now"],
+        "mediaStorage": settings.media_storage_backend,
+        "realtime": tracker_connections.status,
+    }
 
 
 @app.get("/api/reference")
@@ -2591,15 +2618,15 @@ def upload_tailor_media(body: TailorMediaUpload, user: dict = Depends(tailor_use
     raw = decode_data_url(body.dataUrl, body.mediaType, MAX_MEDIA_BYTES)
 
     media_id = uid("media")
-    folder = TAILOR_MEDIA_DIR / tailor["id"]
-    folder.mkdir(parents=True, exist_ok=True)
-    target = folder / f"{media_id}{ext}"
-    target.write_bytes(raw)
-    url = f"/uploads/tailors/{tailor['id']}/{target.name}"
+    object_key = f"tailors/{tailor['id']}/portfolio/{media_id}{ext}"
+    try:
+        url = media_storage.store_bytes(object_key, raw, body.mediaType)
+    except MediaStorageError as exc:
+        raise HTTPException(503, "Media storage is temporarily unavailable") from exc
     entry = json.dumps(
         {
             "id": media_id,
-            "name": body.name[:120] or target.name,
+            "name": body.name[:120] or f"{media_id}{ext}",
             "type": body.mediaType,
             "kind": kind,
             "url": url,
@@ -2619,6 +2646,57 @@ def upload_tailor_media(body: TailorMediaUpload, user: dict = Depends(tailor_use
     return as_tailor(updated)
 
 
+@app.post("/api/tailor/media/presign")
+def presign_tailor_media(body: TailorMediaPresign, user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    tailor = get_tailor_for_user(db, user)
+    portfolio = tailor.get("portfolio") or []
+    if len(portfolio) >= MAX_PORTFOLIO_ITEMS:
+        raise HTTPException(409, f"Maximum {MAX_PORTFOLIO_ITEMS} portfolio items are allowed")
+    media_kind(body.mediaType)
+    ext = MEDIA_EXTENSIONS.get(body.mediaType)
+    if not ext:
+        raise HTTPException(400, "Unsupported photo/video format")
+    if body.sizeBytes > MAX_MEDIA_BYTES:
+        raise HTTPException(413, "Uploaded file is too large")
+    object_key = f"tailors/{tailor['id']}/portfolio/{uid('media')}{ext}"
+    try:
+        return media_storage.create_presigned_upload(object_key, body.mediaType, MAX_MEDIA_BYTES)
+    except MediaStorageError as exc:
+        raise HTTPException(503, "Direct media upload is temporarily unavailable") from exc
+
+
+@app.post("/api/tailor/media/complete", status_code=201)
+def complete_tailor_media(body: TailorMediaComplete, user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    tailor = get_tailor_for_user(db, user)
+    portfolio = list(tailor.get("portfolio") or [])
+    if len(portfolio) >= MAX_PORTFOLIO_ITEMS:
+        raise HTTPException(409, f"Maximum {MAX_PORTFOLIO_ITEMS} portfolio items are allowed")
+    kind = media_kind(body.mediaType)
+    expected_prefix = f"tailors/{tailor['id']}/portfolio/"
+    if not body.objectKey.startswith(expected_prefix):
+        raise HTTPException(403, "This upload does not belong to the signed-in tailor")
+    try:
+        url = media_storage.validate_uploaded_object(body.objectKey, body.mediaType, MAX_MEDIA_BYTES)
+    except MediaStorageError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    entry = json.dumps(
+        {
+            "id": Path(body.objectKey).stem,
+            "name": body.name[:120],
+            "type": body.mediaType,
+            "kind": kind,
+            "url": url,
+            "uploadedAt": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    portfolio.append(entry)
+    db.execute(text("UPDATE tailors SET portfolio=:portfolio WHERE id=:id"), {"id": tailor["id"], "portfolio": portfolio})
+    notify_tailor_followers(db, tailor["id"], f"New {kind} from {tailor['shop']}", f"{tailor['shop']} posted a new {kind}: {body.name[:80]}.")
+    db.commit()
+    updated = fetch_one(db, "SELECT t.*, u.phone, u.email FROM tailors t JOIN users u ON u.id=t.user_id WHERE t.id=:id", {"id": tailor["id"]})
+    return as_tailor(updated)
+
+
 @app.post("/api/tailor/profile-image")
 def upload_tailor_profile_image(body: TailorProfileImageUpload, user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
     tailor = get_tailor_for_user(db, user)
@@ -2628,12 +2706,48 @@ def upload_tailor_profile_image(body: TailorProfileImageUpload, user: dict = Dep
     if ext not in {".jpg", ".png", ".webp", ".gif"}:
         raise HTTPException(400, "Unsupported profile image format")
     raw = decode_data_url(body.dataUrl, body.mediaType, MAX_PROFILE_IMAGE_BYTES)
-    folder = TAILOR_MEDIA_DIR / tailor["id"]
-    folder.mkdir(parents=True, exist_ok=True)
     image_id = uid("dp")
-    target = folder / f"{image_id}{ext}"
-    target.write_bytes(raw)
-    url = f"/uploads/tailors/{tailor['id']}/{target.name}"
+    object_key = f"tailors/{tailor['id']}/profile/{image_id}{ext}"
+    try:
+        url = media_storage.store_bytes(object_key, raw, body.mediaType)
+    except MediaStorageError as exc:
+        raise HTTPException(503, "Media storage is temporarily unavailable") from exc
+    delete_uploaded_url(tailor.get("profile_image"))
+    db.execute(text("UPDATE tailors SET profile_image=:url WHERE id=:id"), {"id": tailor["id"], "url": url})
+    db.commit()
+    updated = fetch_one(db, "SELECT t.*, u.phone, u.email FROM tailors t JOIN users u ON u.id=t.user_id WHERE t.id=:id", {"id": tailor["id"]})
+    return as_tailor(updated)
+
+
+@app.post("/api/tailor/profile-image/presign")
+def presign_tailor_profile_image(body: TailorMediaPresign, user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    tailor = get_tailor_for_user(db, user)
+    if not body.mediaType.startswith("image/"):
+        raise HTTPException(400, "Only image files are allowed for profile picture")
+    ext = MEDIA_EXTENSIONS.get(body.mediaType)
+    if ext not in {".jpg", ".png", ".webp", ".gif"}:
+        raise HTTPException(400, "Unsupported profile image format")
+    if body.sizeBytes > MAX_PROFILE_IMAGE_BYTES:
+        raise HTTPException(413, "Uploaded file is too large")
+    object_key = f"tailors/{tailor['id']}/profile/{uid('dp')}{ext}"
+    try:
+        return media_storage.create_presigned_upload(object_key, body.mediaType, MAX_PROFILE_IMAGE_BYTES)
+    except MediaStorageError as exc:
+        raise HTTPException(503, "Direct profile upload is temporarily unavailable") from exc
+
+
+@app.post("/api/tailor/profile-image/complete")
+def complete_tailor_profile_image(body: TailorMediaComplete, user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    tailor = get_tailor_for_user(db, user)
+    if not body.mediaType.startswith("image/"):
+        raise HTTPException(400, "Only image files are allowed for profile picture")
+    expected_prefix = f"tailors/{tailor['id']}/profile/"
+    if not body.objectKey.startswith(expected_prefix):
+        raise HTTPException(403, "This upload does not belong to the signed-in tailor")
+    try:
+        url = media_storage.validate_uploaded_object(body.objectKey, body.mediaType, MAX_PROFILE_IMAGE_BYTES)
+    except MediaStorageError as exc:
+        raise HTTPException(400, str(exc)) from exc
     delete_uploaded_url(tailor.get("profile_image"))
     db.execute(text("UPDATE tailors SET profile_image=:url WHERE id=:id"), {"id": tailor["id"], "url": url})
     db.commit()
@@ -2679,11 +2793,11 @@ def create_tailor_offer(body: TailorOfferCreate, user: dict = Depends(tailor_use
         if not ext:
             raise HTTPException(400, "Unsupported offer media format")
         raw = decode_data_url(body.dataUrl, body.mediaType, MAX_MEDIA_BYTES)
-        folder = TAILOR_MEDIA_DIR / tailor["id"]
-        folder.mkdir(parents=True, exist_ok=True)
-        target = folder / f"{offer_id}{ext}"
-        target.write_bytes(raw)
-        media_url = f"/uploads/tailors/{tailor['id']}/{target.name}"
+        object_key = f"tailors/{tailor['id']}/offers/{offer_id}{ext}"
+        try:
+            media_url = media_storage.store_bytes(object_key, raw, body.mediaType)
+        except MediaStorageError as exc:
+            raise HTTPException(503, "Media storage is temporarily unavailable") from exc
         media_type = body.mediaType
     db.execute(
         text(

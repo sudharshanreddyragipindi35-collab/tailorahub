@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from urllib import error as urllib_error, request as urllib_request
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -24,11 +24,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_customer, get_current_tailor, get_current_user
 from app.api.v1.otp import OTP_TTL_MINUTES, OtpFlowError, issue_otp, verify_otp
 from app.core.config import get_settings
+from app.core.security import create_booking_ws_ticket, decode_booking_ws_ticket
 from app.core.database import get_db
 from app.pagination import PageParams
 from app.emailer import send_email
 from app.qr import generate_wallet_qr
 from app.services.tracker_service import tracker_connections
+from app.services.media_storage import MediaStorageError, get_media_storage, validate_file_signature
 from app.services.booking_rules import APP_TIMEZONE, BookingRuleError, calculate_booking, zoned_slot
 
 
@@ -55,6 +57,12 @@ DEFAULT_PLATFORM_SETTINGS = {
     "gst_percentage": Decimal("18.00"),
     "platform_fee_percentage": Decimal("2.00"),
 }
+DISPUTE_IMAGE_EXTENSIONS = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+}
+MAX_DISPUTE_IMAGE_BYTES = 8 * 1024 * 1024
 
 
 class BookingCreateIn(BaseModel):
@@ -1084,6 +1092,7 @@ async def tracker_status_payload(db: AsyncSession, order: dict, viewer: dict | N
 
 def dispute_payload(row: dict) -> dict:
     dispute_id = str(row["id"])
+    photo_url = get_media_storage().download_url(row.get("photo_url"))
     return {
         "id": dispute_id,
         "booking_id": row.get("booking_id"),
@@ -1091,8 +1100,8 @@ def dispute_payload(row: dict) -> dict:
         "customer_id": row.get("customer_id"),
         "customerId": row.get("customer_id"),
         "reason": row.get("reason"),
-        "photo_url": row.get("photo_url"),
-        "photoUrl": row.get("photo_url"),
+        "photo_url": photo_url,
+        "photoUrl": photo_url,
         "photo_name": row.get("photo_name"),
         "photoName": row.get("photo_name"),
         "photo_media_type": row.get("photo_media_type"),
@@ -2385,25 +2394,58 @@ async def raise_booking_dispute(
     )
     if existing:
         raise HTTPException(409, "A dispute is already open for this booking")
-    result = await db.execute(
-        text(
-            """
-            INSERT INTO disputes
-              (id,booking_id,customer_id,reason,photo_url,photo_name,photo_media_type,status,refund_amount,created_at,updated_at)
-            VALUES
-              (gen_random_uuid(),:booking_id,:customer_id,:reason,:photo_url,:photo_name,:photo_media_type,'open',0,now(),now())
-            RETURNING *
-            """
-        ),
-        {
-            "booking_id": booking_id,
-            "customer_id": customer["id"],
-            "reason": body.reason.strip(),
-            "photo_url": body.photo_url,
-            "photo_name": body.photo_name,
-            "photo_media_type": body.photo_media_type,
-        },
-    )
+    photo_reference = None
+    if body.photo_url or body.photo_name or body.photo_media_type:
+        if not body.photo_url or not body.photo_name or not body.photo_media_type:
+            raise HTTPException(400, "Dispute photo requires a file name, media type, and file data")
+        media_type = body.photo_media_type.lower()
+        extension = DISPUTE_IMAGE_EXTENSIONS.get(media_type)
+        if not extension:
+            raise HTTPException(400, "Dispute photo must be JPEG, PNG, or WebP")
+        prefix = f"data:{media_type};base64,"
+        if not body.photo_url.startswith(prefix):
+            raise HTTPException(400, "Invalid dispute photo data")
+        try:
+            raw_photo = base64.b64decode(body.photo_url[len(prefix):], validate=True)
+            if not raw_photo or len(raw_photo) > MAX_DISPUTE_IMAGE_BYTES:
+                raise ValueError("invalid size")
+            validate_file_signature(raw_photo, media_type)
+        except (ValueError, MediaStorageError) as exc:
+            raise HTTPException(400, "Dispute photo content is invalid or too large") from exc
+        object_key = f"private/disputes/{customer['id']}/{uuid.uuid4().hex}{extension}"
+        try:
+            photo_reference = await asyncio.to_thread(
+                get_media_storage().store_private_bytes,
+                object_key,
+                raw_photo,
+                media_type,
+            )
+        except MediaStorageError as exc:
+            raise HTTPException(503, "Dispute attachment storage is temporarily unavailable") from exc
+    try:
+        result = await db.execute(
+            text(
+                """
+                INSERT INTO disputes
+                  (id,booking_id,customer_id,reason,photo_url,photo_name,photo_media_type,status,refund_amount,created_at,updated_at)
+                VALUES
+                  (gen_random_uuid(),:booking_id,:customer_id,:reason,:photo_url,:photo_name,:photo_media_type,'open',0,now(),now())
+                RETURNING *
+                """
+            ),
+            {
+                "booking_id": booking_id,
+                "customer_id": customer["id"],
+                "reason": body.reason.strip(),
+                "photo_url": photo_reference,
+                "photo_name": body.photo_name,
+                "photo_media_type": body.photo_media_type,
+            },
+        )
+    except Exception:
+        if photo_reference:
+            await asyncio.to_thread(get_media_storage().delete_url, photo_reference)
+        raise
     dispute = dict(result.mappings().first())
     await db.execute(text("UPDATE orders SET dispute_raised=TRUE, status='disputed' WHERE id=:id"), {"id": booking_id})
     await add_history(db, booking_id, "disputed", "Customer raised a dispute", "customer")
@@ -2561,8 +2603,29 @@ async def measurement_done(
     return {"booking": public_booking(updated), "message": "Measurement marked done."}
 
 
+@router.post("/{booking_id}/track-ticket")
+async def create_track_ticket(
+    booking_id: str,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await get_accessible_order(db, booking_id, user)
+    settings = get_settings()
+    return {
+        "ticket": create_booking_ws_ticket(str(user["id"]), booking_id),
+        "expiresIn": settings.realtime_ticket_seconds,
+    }
+
+
 @router.websocket("/{booking_id}/track")
-async def track_booking(websocket: WebSocket, booking_id: str) -> None:
+async def track_booking(websocket: WebSocket, booking_id: str, ticket: str | None = Query(default=None)) -> None:
+    try:
+        claims = decode_booking_ws_ticket(ticket or "")
+        if str(claims.get("booking_id")) != str(booking_id):
+            raise ValueError("Ticket is scoped to a different booking")
+    except Exception:
+        await websocket.close(code=4401, reason="Valid booking tracker ticket required")
+        return
     await tracker_connections.connect(booking_id, websocket)
     try:
         while True:

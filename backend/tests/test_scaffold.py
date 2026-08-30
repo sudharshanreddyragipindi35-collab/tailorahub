@@ -1,6 +1,7 @@
 import asyncio
 import inspect
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -20,8 +21,11 @@ from app.api.v1.bookings import (
 )
 from app.api.v1 import bookings as bookings_module
 from app.core.config import get_settings
+from app.core.security import create_booking_ws_ticket, decode_booking_ws_ticket
 from app.main import app
 from app.schema_models import SchemaBase
+from app.services.media_storage import MediaStorage, MediaStorageError, validate_file_signature
+from app.services.tracker_service import TrackerConnectionManager
 
 
 def test_v1_router_has_health_route():
@@ -53,6 +57,7 @@ def test_v1_router_has_health_route():
     assert "/customers/me/referral-count" in paths
     assert "/bookings" in paths
     assert "/bookings/{booking_id}/status" in paths
+    assert "/bookings/{booking_id}/track-ticket" in paths
     assert "/bookings/{booking_id}/payment-breakdown" in paths
     assert "/bookings/{booking_id}/stage" in paths
     assert "/bookings/{booking_id}/pay" in paths
@@ -111,11 +116,118 @@ def test_booking_tracker_websocket_replies_to_heartbeat(monkeypatch):
     websocket = FakeWebSocket()
     monkeypatch.setattr(bookings_module, "tracker_connections", connections)
 
-    asyncio.run(track_booking(websocket, "ORD-PHASE2"))
+    ticket = create_booking_ws_ticket("phase2-test-user", "ORD-PHASE2")
+    asyncio.run(track_booking(websocket, "ORD-PHASE2", ticket))
 
     assert websocket.sent == [{"type": "pong"}]
     assert connections.booking_id == "ORD-PHASE2"
     assert connections.disconnected is True
+
+
+def test_booking_tracker_ticket_is_short_lived_and_booking_scoped():
+    ticket = create_booking_ws_ticket("user-1", "booking-1")
+    payload = decode_booking_ws_ticket(ticket)
+
+    assert payload["sub"] == "user-1"
+    assert payload["booking_id"] == "booking-1"
+    assert payload["type"] == "booking_ws"
+    remaining = payload["exp"] - int(datetime.now(timezone.utc).timestamp())
+    assert 0 < remaining <= 600
+
+
+def test_booking_tracker_rejects_missing_ticket():
+    class FakeWebSocket:
+        def __init__(self):
+            self.closed = None
+
+        async def close(self, **kwargs):
+            self.closed = kwargs
+
+    websocket = FakeWebSocket()
+    asyncio.run(track_booking(websocket, "booking-1", None))
+
+    assert websocket.closed["code"] == 4401
+
+
+def test_tracker_backplane_delivers_remote_events_and_ignores_its_own():
+    class FakeWebSocket:
+        def __init__(self):
+            self.sent = []
+
+        async def send_json(self, payload):
+            self.sent.append(payload)
+
+    async def exercise():
+        manager = TrackerConnectionManager(backplane="local")
+        websocket = FakeWebSocket()
+        manager._rooms["booking-1"].add(websocket)
+        await manager._handle_backplane_message('{"source":"other","bookingId":"booking-1","payload":{"status":"ready"}}')
+        await manager._handle_backplane_message(
+            '{"source":"' + manager.instance_id + '","bookingId":"booking-1","payload":{"status":"duplicate"}}'
+        )
+        return websocket.sent
+
+    assert asyncio.run(exercise()) == [{"status": "ready"}]
+
+
+def test_local_media_storage_uses_bounded_keys_and_deletes(monkeypatch, tmp_path):
+    from app import settings as settings_module
+
+    monkeypatch.setattr(settings_module.settings, "base_dir", tmp_path)
+    monkeypatch.setattr(settings_module.settings, "media_storage_backend", "local")
+    storage = MediaStorage()
+
+    url = storage.store_bytes("tailors/t-1/profile/photo.webp", b"image-bytes", "image/webp")
+    assert url == "/uploads/tailors/t-1/profile/photo.webp"
+    assert (tmp_path / "uploads" / "tailors" / "t-1" / "profile" / "photo.webp").read_bytes() == b"image-bytes"
+    storage.delete_url(url)
+    assert not (tmp_path / "uploads" / "tailors" / "t-1" / "profile" / "photo.webp").exists()
+
+    with pytest.raises(MediaStorageError):
+        storage.store_bytes("../escape.webp", b"bad", "image/webp")
+
+
+def test_s3_presign_enforces_type_size_and_validates_file_signature(monkeypatch, tmp_path):
+    from app import settings as settings_module
+
+    class FakeS3:
+        def __init__(self):
+            self.deleted = []
+
+        def generate_presigned_post(self, **kwargs):
+            self.presign = kwargs
+            return {"url": "https://upload.example.test", "fields": {"key": kwargs["Key"]}}
+
+        def head_object(self, **kwargs):
+            return {"ContentLength": 12, "ContentType": "image/webp"}
+
+        def get_object(self, **kwargs):
+            return {"Body": BytesIO(b"RIFF\x04\x00\x00\x00WEBP")}
+
+        def delete_object(self, **kwargs):
+            self.deleted.append(kwargs)
+
+    monkeypatch.setattr(settings_module.settings, "base_dir", tmp_path)
+    monkeypatch.setattr(settings_module.settings, "media_storage_backend", "local")
+    storage = MediaStorage()
+    fake = FakeS3()
+    storage.backend = "s3"
+    storage.bucket = "tailorahub-media"
+    storage.region = "ap-south-1"
+    storage.key_prefix = "media"
+    storage.public_base_url = "https://media.tailorahub.com"
+    storage._client = fake
+
+    plan = storage.create_presigned_upload("tailors/t-1/portfolio/photo.webp", "image/webp", 1024)
+    assert plan["mode"] == "direct"
+    assert ["content-length-range", 1, 1024] in fake.presign["Conditions"]
+    assert {"Content-Type": "image/webp"} in fake.presign["Conditions"]
+    assert storage.validate_uploaded_object("tailors/t-1/portfolio/photo.webp", "image/webp", 1024) == (
+        "https://media.tailorahub.com/media/tailors/t-1/portfolio/photo.webp"
+    )
+    validate_file_signature(b"\x89PNG\r\n\x1a\nmore", "image/png")
+    with pytest.raises(MediaStorageError):
+        validate_file_signature(b"not-an-image", "image/png")
 
 
 def test_large_collection_routes_expose_bounded_pagination():
