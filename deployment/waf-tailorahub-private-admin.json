@@ -1,0 +1,86 @@
+{
+  "Name": "TailoraHubPrivateAdmin",
+  "Scope": "CLOUDFRONT",
+  "DefaultAction": {
+    "Allow": {}
+  },
+  "Description": "Keep the TailoraHub public site available while restricting /admin to approved IP addresses.",
+  "Rules": [
+    {
+      "Name": "AllowApprovedAdminIPs",
+      "Priority": 0,
+      "Statement": {
+        "AndStatement": {
+          "Statements": [
+            {
+              "RegexMatchStatement": {
+                "RegexString": "^/admin(/.*)?$",
+                "FieldToMatch": {
+                  "UriPath": {}
+                },
+                "TextTransformations": [
+                  {
+                    "Priority": 0,
+                    "Type": "URL_DECODE"
+                  },
+                  {
+                    "Priority": 1,
+                    "Type": "LOWERCASE"
+                  }
+                ]
+              }
+            },
+            {
+              "IPSetReferenceStatement": {
+                "ARN": "arn:aws:wafv2:us-east-1:495680546669:global/ipset/TailoraHubApprovedAdminIPv4/f19558a4-ca7e-41ce-84ff-a2ea6998deb3"
+              }
+            }
+          ]
+        }
+      },
+      "Action": {
+        "Allow": {}
+      },
+      "VisibilityConfig": {
+        "SampledRequestsEnabled": true,
+        "CloudWatchMetricsEnabled": true,
+        "MetricName": "TailoraHubAllowApprovedAdminIPs"
+      }
+    },
+    {
+      "Name": "BlockOtherAdminIPs",
+      "Priority": 1,
+      "Statement": {
+        "RegexMatchStatement": {
+          "RegexString": "^/admin(/.*)?$",
+          "FieldToMatch": {
+            "UriPath": {}
+          },
+          "TextTransformations": [
+            {
+              "Priority": 0,
+              "Type": "URL_DECODE"
+            },
+            {
+              "Priority": 1,
+              "Type": "LOWERCASE"
+            }
+          ]
+        }
+      },
+      "Action": {
+        "Block": {}
+      },
+      "VisibilityConfig": {
+        "SampledRequestsEnabled": true,
+        "CloudWatchMetricsEnabled": true,
+        "MetricName": "TailoraHubBlockOtherAdminIPs"
+      }
+    }
+  ],
+  "VisibilityConfig": {
+    "SampledRequestsEnabled": true,
+    "CloudWatchMetricsEnabled": true,
+    "MetricName": "TailoraHubPrivateAdmin"
+  }
+}

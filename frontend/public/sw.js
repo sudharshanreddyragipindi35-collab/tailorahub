@@ -1,4 +1,4 @@
-const CACHE_NAME = "tailorahub-pwa-v6";
+const CACHE_NAME = "tailorahub-pwa-v7";
 const APP_SHELL = [
   "/",
   "/offline.html",
@@ -38,6 +38,10 @@ self.addEventListener("fetch", (event) => {
   if (!isHttp || isApiRequest || isExternalMapAsset) {
     return;
   }
+
+  // The private admin portal must always pass through the network access layer.
+  // Never serve an old authenticated admin shell from a service-worker cache.
+  if (url.origin === self.location.origin && /^\/admin(?:\/|$)/i.test(url.pathname)) return;
 
   if (request.mode === "navigate") {
     event.respondWith(

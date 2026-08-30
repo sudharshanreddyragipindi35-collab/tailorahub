@@ -43,11 +43,16 @@ import { registerPwa } from "./registerPwa";
 import "./styles.css";
 import "./premium-ui.css";
 
-const roles = [
+const publicRoles = [
   ["customer", "Customer", UsersRound, "Find tailors, book and track orders."],
   ["tailor", "Tailor", Scissors, "Manage bookings, services and earnings."],
-  ["admin", "Admin", Shield, "Review and manage platform operations."],
 ];
+const adminRole = ["admin", "Admin", Shield, "Review and manage platform operations."];
+const roles = [...publicRoles, adminRole];
+
+function isAdminPortalPath(pathname = window.location.pathname) {
+  return /^\/admin(?:\/|$)/i.test(pathname);
+}
 
 const languageOptions = [
   ["en", "English", "EN"],
@@ -460,7 +465,7 @@ function roleFromAuthenticatedUser(storedRole, user) {
 function replaceWithRoleLanding(roleName) {
   const defaultView = ROLE_DEFAULT_VIEWS[roleName];
   const url = new URL(window.location.href);
-  url.pathname = "/";
+  url.pathname = roleName === "admin" ? "/admin" : "/";
   url.search = "";
   url.hash = "";
   if (defaultView) url.searchParams.set("view", defaultView);
@@ -899,6 +904,7 @@ function MediaGallery({ portfolio, onRemove }) {
 }
 
 function App() {
+  const adminPortal = isAdminPortalPath();
   const [referralEntry, setReferralEntry] = useState(() => readReferralEntry());
   const [role, setRole] = useState("");
   const [signedIn, setSignedIn] = useState(false);
@@ -933,6 +939,9 @@ function App() {
         const me = await api.me();
         const restoredRole = roleFromAuthenticatedUser(getRole(), me?.user);
         if (!restoredRole) throw new Error("Authenticated account has no supported role");
+        if ((restoredRole === "admin") !== adminPortal) {
+          throw new Error("This session belongs to a different TailoraHub portal");
+        }
         if (!cancelled) {
           validateRestoredRoute(restoredRole);
           setRole(restoredRole);
@@ -946,7 +955,7 @@ function App() {
     }
     restoreAuthentication();
     return () => { cancelled = true; };
-  }, [referralEntry]);
+  }, [adminPortal, referralEntry]);
 
   useEffect(() => {
     if (!referralEntry) return;
@@ -1003,8 +1012,24 @@ function App() {
     window.localStorage.setItem("tailorahub-language", language);
   }, [language]);
 
+  useEffect(() => {
+    document.title = adminPortal ? "TailoraHub Private Admin" : "TailoraHub";
+    let robots = document.querySelector('meta[name="robots"]');
+    if (!robots) {
+      robots = document.createElement("meta");
+      robots.name = "robots";
+      document.head.appendChild(robots);
+    }
+    robots.content = adminPortal ? "noindex, nofollow, noarchive" : "index, follow";
+  }, [adminPortal]);
+
   function handleAuth(res, selectedRole) {
     const nextRole = res.role || selectedRole;
+    if ((nextRole === "admin") !== adminPortal) {
+      clearSession();
+      setAuthNotice(adminPortal ? "Only an administrator can use this private portal." : "Administrator access is available only through the private admin portal.");
+      return;
+    }
     clearNavigationState();
     replaceWithRoleLanding(nextRole);
     setSession(res.token || res.access_token, nextRole, res.refreshToken || res.refresh_token);
@@ -1022,17 +1047,18 @@ function App() {
     if (refresh) await api.logoutSession(refresh).catch(() => {});
     clearSession();
     clearNavigationState();
-    window.history.replaceState({}, "", "/");
+    window.history.replaceState({}, "", adminPortal ? "/admin" : "/");
     setSignedIn(false);
     setRole("");
   }
 
   let content;
   if (authInitializing) content = <main className="app-shell"><section className="panel"><p>Restoring your secure session...</p></section></main>;
-  else if (!signedIn) content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={referralEntry} sessionMessage={authNotice} />;
-  else if (role === "customer") content = <CustomerApp onLogout={logout} />;
-  else if (role === "tailor") content = <TailorApp onLogout={logout} />;
-  else content = <AdminApp onLogout={logout} />;
+  else if (!signedIn) content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={referralEntry} sessionMessage={authNotice} adminPortal={adminPortal} />;
+  else if (!adminPortal && role === "customer") content = <CustomerApp onLogout={logout} />;
+  else if (!adminPortal && role === "tailor") content = <TailorApp onLogout={logout} />;
+  else if (adminPortal && role === "admin") content = <AdminApp onLogout={logout} />;
+  else content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={null} sessionMessage="Use the correct TailoraHub portal for this account." adminPortal={adminPortal} />;
 
   return <LanguageContext.Provider value={languageValue}>{content}</LanguageContext.Provider>;
 }
@@ -1163,10 +1189,10 @@ function LuxuryRoleCard({ role, active, onSelect }) {
   );
 }
 
-function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEntry, sessionMessage = "" }) {
+function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEntry, sessionMessage = "", adminPortal = false }) {
   const t = useT();
-  const [authStage, setAuthStage] = useAppHistoryState("authStage", "home");
-  const [selectedRole, setSelectedRole] = useState("customer");
+  const [authStage, setAuthStage] = useAppHistoryState("authStage", adminPortal ? "auth" : "home");
+  const [selectedRole, setSelectedRole] = useState(adminPortal ? "admin" : "customer");
   const [mode, setMode] = useState("login");
   const [tailorLoginMode, setTailorLoginMode] = useState("password");
   const [wizardStep, setWizardStep] = useState(0);
@@ -1414,7 +1440,9 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
           await submitCustomerLogin();
           return;
         }
-        const res = await api.login(selectedRole, form.identifier, form.password);
+        const res = selectedRole === "admin"
+          ? await api.adminLogin(form.identifier, form.password)
+          : await api.login(selectedRole, form.identifier, form.password);
         onAuth(res, selectedRole);
         return;
       }
@@ -1797,7 +1825,11 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   const tailorReadyToSubmit = tailorWizardSteps.every((_, index) => !stepError(index));
   const strength = passwordScore(form.password);
   const referralLockedRole = referralEntry?.code ? (referralEntry.role === "tailor" ? "tailor" : "customer") : "";
-  const authRoles = referralLockedRole ? roles.filter(([id]) => id === referralLockedRole) : roles;
+  const authRoles = adminPortal
+    ? [adminRole]
+    : referralLockedRole
+      ? publicRoles.filter(([id]) => id === referralLockedRole)
+      : publicRoles;
   const selectedRoleDetails = roles.find(([id]) => id === selectedRole) || roles[0];
   const selectedRoleLabel = t(`role.${selectedRoleDetails[0]}.label`, selectedRoleDetails[1]);
   const selectedRoleText = t(`role.${selectedRoleDetails[0]}.description`, selectedRoleDetails[3]);
@@ -2149,7 +2181,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
     );
   }
 
-  if (authStage === "home") {
+  if (authStage === "home" && !adminPortal) {
     return (
       <main className="login-shell luxury-home-shell">
         <section className="luxury-home">
@@ -2192,7 +2224,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
                 <small>{t("home.chooseRole", "Choose your space")}</small>
               </div>
               <div className="role-grid luxury-role-grid" aria-label={t("home.chooseRole", "Choose role")}>
-                {roles.map((role) => (
+                {publicRoles.map((role) => (
                   <LuxuryRoleCard key={role[0]} role={role} active={selectedRole === role[0]} onSelect={chooseRole} />
                 ))}
               </div>
@@ -2213,14 +2245,16 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
           <h2>{t("auth.accessTitle", `${selectedRoleLabel} access`, { role: selectedRoleLabel })}</h2>
           <p>{selectedRoleText}</p>
           <div className="visual-metrics">
-            <span><b>3</b> {t("common.roles", "roles")}</span>
+            <span><b>{adminPortal ? "Private" : "2"}</b> {adminPortal ? "access" : t("common.roles", "roles")}</span>
             <span><b>Live</b> {t("common.orders", "orders")}</span>
             <span><b>OTP</b> secured</span>
           </div>
         </div>
         <div className="auth-form-panel">
           <div className="auth-back-row">
-            {referralLockedRole ? (
+            {adminPortal ? (
+              <span className="referral-lock-note"><Shield size={15} /> Private administrator portal</span>
+            ) : referralLockedRole ? (
               <span className="referral-lock-note">{selectedRoleLabel} referral signup</span>
             ) : (
               <button type="button" className="text-link back-link" onClick={backToHome}><ChevronLeft size={16} /> {t("auth.roleSelection", "Role selection")}</button>
@@ -2233,15 +2267,17 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
               <p>{mode === "login" ? t("auth.loginSubtitle", `${selectedRoleLabel} login`, { role: selectedRoleLabel }) : t("auth.registrationSubtitle", `${selectedRoleLabel} registration`, { role: selectedRoleLabel })}</p>
             </div>
           </div>
-          <div className="role-grid compact-role-grid">
-            {authRoles.map((role) => (
-              <LuxuryRoleCard key={role[0]} role={role} active={selectedRole === role[0]} onSelect={(roleId) => {
-                if (referralLockedRole) return;
-                setSelectedRole(roleId);
-                setMode("login");
-              }} />
-            ))}
-          </div>
+          {!adminPortal ? (
+            <div className="role-grid compact-role-grid">
+              {authRoles.map((role) => (
+                <LuxuryRoleCard key={role[0]} role={role} active={selectedRole === role[0]} onSelect={(roleId) => {
+                  if (referralLockedRole) return;
+                  setSelectedRole(roleId);
+                  setMode("login");
+                }} />
+              ))}
+            </div>
+          ) : null}
           <div className="segmented">
             {!referralLockedRole ? <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>{t("common.login", "Login")}</button> : null}
             {selectedRole !== "admin" ? <button type="button" className={mode === "register" ? "active" : ""} onClick={() => setMode("register")}>{t("common.register", "Register")}</button> : null}

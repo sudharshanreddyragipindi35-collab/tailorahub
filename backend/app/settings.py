@@ -48,6 +48,16 @@ class Settings:
     admin_password = env_value("ADMIN_PASSWORD", _RUNTIME_ADMIN_PASSWORD)
     admin_email = env_value("ADMIN_EMAIL", "admin@tailorahub.com")
     admin_phone = env_value("ADMIN_PHONE", "9840099999")
+    admin_allowed_networks = [
+        value.strip()
+        for value in env_value("ADMIN_ALLOWED_NETWORKS").split(",")
+        if value.strip()
+    ]
+    admin_trusted_proxy_networks = [
+        value.strip()
+        for value in env_value("ADMIN_TRUSTED_PROXY_NETWORKS", "127.0.0.1/32,::1/128").split(",")
+        if value.strip()
+    ]
 
     sms_provider = env_value("SMS_PROVIDER", "mock").lower()
     sms_api_key = env_value("SMS_API_KEY")

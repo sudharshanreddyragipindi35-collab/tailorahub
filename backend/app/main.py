@@ -1,5 +1,6 @@
 from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
+import ipaddress
 import json
 from pathlib import Path
 import re
@@ -8,10 +9,11 @@ import string
 import uuid
 
 import jwt
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -52,6 +54,57 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _configured_networks(values: list[str], setting_name: str) -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    networks = []
+    for value in values:
+        try:
+            networks.append(ipaddress.ip_network(value, strict=False))
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid {setting_name} entry: {value}") from exc
+    return networks
+
+
+ADMIN_ALLOWED_NETWORKS = _configured_networks(settings.admin_allowed_networks, "ADMIN_ALLOWED_NETWORKS")
+ADMIN_TRUSTED_PROXY_NETWORKS = _configured_networks(settings.admin_trusted_proxy_networks, "ADMIN_TRUSTED_PROXY_NETWORKS")
+
+
+def _ip_in_networks(value: str, networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network]) -> bool:
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return False
+    return any(address.version == network.version and address in network for network in networks)
+
+
+def _request_client_ip(request: Request) -> str:
+    peer = request.client.host if request.client else ""
+    if not _ip_in_networks(peer, ADMIN_TRUSTED_PROXY_NETWORKS):
+        return peer
+    forwarded = [part.strip() for part in request.headers.get("x-forwarded-for", "").split(",") if part.strip()]
+    for candidate in reversed(forwarded):
+        if not _ip_in_networks(candidate, ADMIN_TRUSTED_PROXY_NETWORKS):
+            return candidate
+    return peer
+
+
+@app.middleware("http")
+async def restrict_admin_network(request: Request, call_next):
+    path = request.url.path.rstrip("/")
+    is_admin_request = (
+        path == "/api/auth/admin/login"
+        or path.startswith("/api/admin/")
+        or path == "/api/admin"
+        or path.startswith("/api/v1/admin/")
+        or path == "/api/v1/admin"
+    )
+    if is_admin_request and ADMIN_ALLOWED_NETWORKS:
+        client_ip = _request_client_ip(request)
+        if not _ip_in_networks(client_ip, ADMIN_ALLOWED_NETWORKS):
+            return JSONResponse(status_code=403, content={"detail": "Administrator access is not available from this network."})
+    return await call_next(request)
+
 app.include_router(api_router, prefix="/api/v1")
 bearer = HTTPBearer(auto_error=False)
 
@@ -1361,7 +1414,7 @@ def role_login(body: RoleLogin, db: Session = Depends(db_session)):
     if role not in {"customer", "tailor", "admin"}:
         raise HTTPException(400, "Choose customer, tailor or admin")
     if role == "admin":
-        return admin_login(AdminLogin(username=body.identifier, password=body.password), db)
+        raise HTTPException(403, "Use the private administrator login endpoint")
 
     ident = body.identifier.strip().lower()
     phone = clean_phone(ident)

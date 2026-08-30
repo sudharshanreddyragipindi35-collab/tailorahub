@@ -6942,12 +6942,31 @@ input[readonly] {
 }
 
 /* Keep the role chooser concise on short and narrow screens. */
-.home-role-panel .luxury-role-card { min-height: 116px !important; padding: 15px !important; }
+.home-role-panel .luxury-role-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+  gap: 14px !important;
+}
+.home-role-panel .luxury-role-card {
+  min-height: 122px !important;
+  padding: 17px 20px !important;
+}
 .home-role-panel .luxury-role-card > span:not(.role-card-icon):not(.role-divider):not(.role-arrow) {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+@media (max-width: 700px) {
+  .home-role-panel .luxury-role-grid {
+    grid-template-columns: 1fr !important;
+    gap: 10px !important;
+  }
+
+  .home-role-panel .luxury-role-card {
+    min-height: 92px !important;
+    padding: 14px 15px !important;
+  }
 }
 
 @media (max-width: 1120px) {
