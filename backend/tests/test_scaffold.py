@@ -17,6 +17,7 @@ from app.api.v1.bookings import (
     verify_delivery_otp,
 )
 from app.core.config import get_settings
+from app.main import app
 from app.schema_models import SchemaBase
 
 
@@ -76,6 +77,22 @@ def test_v1_router_has_health_route():
 
 def test_settings_uses_asyncpg_url():
     assert get_settings().async_database_url.startswith("postgresql+asyncpg://")
+
+
+def test_large_collection_routes_expose_bounded_pagination():
+    schema = app.openapi()
+    for path in (
+        "/api/customer/bookings",
+        "/api/tailor/dashboard",
+        "/api/admin/orders",
+        "/api/v1/customers/nearby-tailors",
+        "/api/v1/admin/payment-intents",
+    ):
+        parameters = {item["name"]: item for item in schema["paths"][path]["get"]["parameters"]}
+        assert parameters["limit"]["schema"]["default"] == 50
+        assert parameters["limit"]["schema"]["maximum"] == 100
+        assert parameters["offset"]["schema"]["default"] == 0
+        assert parameters["offset"]["schema"]["minimum"] == 0
 
 
 def test_schema_models_registered():

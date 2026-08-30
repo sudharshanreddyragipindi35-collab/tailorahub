@@ -11,8 +11,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 
 from app.api.v1 import bookings as bookings_module, otp as otp_module
-from app.main import app
+from app import main as main_module
 from app.settings import settings
+
+
+app = main_module.app
 
 
 def _engine_or_skip():
@@ -179,6 +182,10 @@ def _cleanup_flow_data(engine, phone: str, email: str, username: str) -> None:
 
 def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(monkeypatch):
     engine = _engine_or_skip()
+    # This test validates the three-role workflow, not production network policy.
+    # Network restriction behavior is covered independently and remains enabled
+    # whenever ADMIN_ALLOWED_NETWORKS is configured in a running environment.
+    monkeypatch.setattr(main_module, "ADMIN_ALLOWED_NETWORKS", [])
     monkeypatch.setattr(otp_module.secrets, "randbelow", lambda upper_bound: 123456)
     gateway_secret = "integration-secret"
     monkeypatch.setattr(bookings_module, "razorpay_credentials", lambda: ("rzp_test_integration", gateway_secret))

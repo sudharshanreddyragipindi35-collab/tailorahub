@@ -34,26 +34,26 @@ Do not declare the application ready for a large public launch until the mandato
 
 ## Phase 1: API and database performance
 
-- [ ] Add server-side pagination to every potentially large collection.
-- [ ] Paginate customer orders.
-- [ ] Paginate tailor orders and booking requests.
-- [ ] Paginate tailor search and browse results.
-- [ ] Paginate notifications and updates.
-- [ ] Paginate reviews, wallet transactions, waiting-list records, support tickets, and admin lists.
+- [x] Add server-side pagination to every potentially large collection (default 50, maximum 100; bounded detail/export collections).
+- [x] Paginate customer orders.
+- [x] Paginate tailor orders and booking requests.
+- [x] Paginate tailor search and browse results.
+- [x] Paginate notifications and updates.
+- [x] Paginate reviews, wallet transactions, waiting-list records, support tickets, and admin lists.
 - [ ] Prefer cursor pagination for records ordered by date or ID.
-- [ ] Never return an unlimited collection from a production endpoint.
-- [ ] Return summary records in list endpoints and load full details only when opened.
-- [ ] Review PostgreSQL query plans for the most frequently used endpoints.
-- [ ] Add compound indexes that match real customer-order, tailor-order, slot, payment, and notification queries.
-- [ ] Remove repeated per-row count queries and other N+1 query patterns.
-- [ ] Configure slow-query logging and investigate queries exceeding the agreed threshold.
-- [ ] Archive or expire old operational data when appropriate.
+- [x] Never return an unlimited collection from a production endpoint.
+- [x] Return summary records in list endpoints and load full details only when opened.
+- [x] Review PostgreSQL query plans for the most frequently used endpoints (repeatable read-only check: `backend/scripts/check_phase1_query_plans.py`).
+- [x] Add compound indexes that match real customer-order, tailor-order, slot, payment, notification, review, and support queries.
+- [x] Remove repeated per-row count queries and other N+1 query patterns.
+- [x] Configure slow-query logging at a configurable threshold (`DATABASE_SLOW_QUERY_MS`, default 500 ms).
+- [x] Archive or expire old operational data when appropriate (expired OTP and refresh-session cleanup).
 - [ ] Consider table partitioning only when measured table growth justifies it.
 
 ### Database connection management
 
-- [ ] Consolidate application database access around a clearly managed engine/session strategy.
-- [ ] Configure connection pool size, maximum overflow, connection timeout, query timeout, and pool recycle.
+- [x] Consolidate application database access around explicitly configured sync/async engine and session lifecycles.
+- [x] Configure connection pool size, maximum overflow, connection timeout, query timeout, and pool recycle.
 - [ ] Use RDS Proxy when multiple backend containers are enabled.
 - [ ] Keep total application connections safely below the PostgreSQL connection limit.
 - [ ] Store database credentials in AWS Secrets Manager, not source files or images.

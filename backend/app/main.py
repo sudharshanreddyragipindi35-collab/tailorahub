@@ -24,6 +24,7 @@ from .api.v1.bookings import create_razorpay_order, require_razorpay_credentials
 from .db import db_session, fetch_all, fetch_one, run_schema
 from .emailer import send_email
 from .integrations import aadhaar_kyc_service, maps_service, payment_service, sms_service
+from .pagination import PageParams
 from .qr import generate_wallet_qr
 from .core.security import create_refresh_token, decode_refresh_token
 from .security import (
@@ -809,9 +810,18 @@ def notify_and_email(db: Session, to_ref: str, email: str | None, title: str, bo
 
 
 def notify_tailor_followers(db: Session, tailor_id: str, title: str, body: str) -> None:
-    followers = fetch_all(db, "SELECT customer_id FROM tailor_followers WHERE tailor_id=:tid", {"tid": tailor_id})
-    for follower in followers:
-        notify(db, "user:" + follower["customer_id"], title, body)
+    db.execute(
+        text(
+            """
+            INSERT INTO notifications (id,to_ref,channel,title,body)
+            SELECT 'n_' || replace(gen_random_uuid()::text,'-',''),
+                   'user:' || customer_id,'in_app',:title,:body
+            FROM tailor_followers
+            WHERE tailor_id=:tid
+            """
+        ),
+        {"tid": tailor_id, "title": title, "body": body},
+    )
 
 
 def customer_tailor_summary(db: Session, tailor_id: str, customer_id: str) -> dict:
@@ -838,7 +848,7 @@ def customer_tailor_summary(db: Session, tailor_id: str, customer_id: str) -> di
 def support_ticket_payload(db: Session, ticket: dict) -> dict:
     messages = fetch_all(
         db,
-        "SELECT * FROM support_messages WHERE ticket_id=:id ORDER BY created_at",
+        "SELECT * FROM support_messages WHERE ticket_id=:id ORDER BY created_at LIMIT 500",
         {"id": ticket["id"]},
     )
     return {**ticket, "messages": messages}
@@ -900,7 +910,7 @@ def create_support_ticket(db: Session, user: dict, role: str, body: SupportTicke
     return support_ticket_payload(db, ticket)
 
 
-def user_support_tickets(db: Session, user: dict, role: str) -> list[dict]:
+def user_support_tickets(db: Session, user: dict, role: str, page: PageParams) -> list[dict]:
     return fetch_all(
         db,
         """SELECT st.*, u.name AS requester_name, u.email AS requester_email, u.phone AS requester_phone, o.code AS order_code,
@@ -909,8 +919,9 @@ def user_support_tickets(db: Session, user: dict, role: str) -> list[dict]:
         JOIN users u ON u.id=st.requester_id
         LEFT JOIN orders o ON o.id=st.order_id
         WHERE st.requester_id=:uid AND st.requester_role=:role
-        ORDER BY st.last_activity_at DESC""",
-        {"uid": user["id"], "role": role},
+        ORDER BY st.last_activity_at DESC
+        LIMIT :limit OFFSET :offset""",
+        {"uid": user["id"], "role": role, **page.sql},
     )
 
 
@@ -1804,16 +1815,23 @@ def register(body: RegisterIn, db: Session = Depends(db_session)):
 
 
 @app.get("/api/tailors")
-def public_tailors(db: Session = Depends(db_session)):
+def public_tailors(page: PageParams = Depends(PageParams), db: Session = Depends(db_session)):
     rows = fetch_all(
         db,
-        """SELECT t.*, u.phone, u.email, COALESCE(min(s.price),0)::int AS starting_price,
-        (SELECT count(*) FROM orders o WHERE o.tailor_id=t.id AND o.status NOT IN ('COMPLETED','CANCELLED'))::int AS active_orders
+        """WITH order_counts AS (
+          SELECT tailor_id, count(*) FILTER (WHERE status NOT IN ('COMPLETED','CANCELLED'))::int AS active_orders
+          FROM orders GROUP BY tailor_id
+        )
+        SELECT t.*, u.phone, u.email, COALESCE(min(s.price),0)::int AS starting_price,
+        COALESCE(oc.active_orders,0)::int AS active_orders
         FROM tailors t JOIN users u ON u.id=t.user_id
         LEFT JOIN tailor_services s ON s.tailor_id=t.id AND s.active
+        LEFT JOIN order_counts oc ON oc.tailor_id=t.id
         WHERE t.approval_status='APPROVED' AND t.account_status='ACTIVE' AND t.deleted_at IS NULL
-        GROUP BY t.id, u.phone, u.email
-        ORDER BY t.featured DESC, t.rating DESC""",
+        GROUP BY t.id, u.phone, u.email, oc.active_orders
+        ORDER BY t.featured DESC, t.rating DESC
+        LIMIT :limit OFFSET :offset""",
+        page.sql,
     )
     return [as_tailor(r) for r in rows]
 
@@ -1825,30 +1843,43 @@ def customer_tailors(
     availability: str | None = None,
     minRating: float = 0,
     maxPrice: int = 0,
+    page: PageParams = Depends(PageParams),
     customer: dict = Depends(customer_user),
     db: Session = Depends(db_session),
 ):
     rows = fetch_all(
         db,
         """
+        WITH order_counts AS (
+          SELECT tailor_id, count(*) FILTER (WHERE status NOT IN ('COMPLETED','CANCELLED'))::int AS active_orders
+          FROM orders GROUP BY tailor_id
+        ), favorite_counts AS (
+          SELECT tailor_id, count(*)::int AS favorite_count FROM customer_favorite_tailors GROUP BY tailor_id
+        ), follower_counts AS (
+          SELECT tailor_id, count(*)::int AS follower_count FROM tailor_followers GROUP BY tailor_id
+        )
         SELECT t.*, u.phone, u.email, COALESCE(min(s.price),0)::int AS starting_price,
-        (SELECT count(*) FROM orders o WHERE o.tailor_id=t.id AND o.status NOT IN ('COMPLETED','CANCELLED'))::int AS active_orders,
-        (SELECT count(*) FROM customer_favorite_tailors cf WHERE cf.tailor_id=t.id)::int AS favorite_count,
-        (SELECT count(*) FROM tailor_followers tf WHERE tf.tailor_id=t.id)::int AS follower_count,
+        COALESCE(oc.active_orders,0)::int AS active_orders,
+        COALESCE(fc.favorite_count,0)::int AS favorite_count,
+        COALESCE(flc.follower_count,0)::int AS follower_count,
         EXISTS(SELECT 1 FROM customer_favorite_tailors cf WHERE cf.tailor_id=t.id AND cf.customer_id=:customer_id) AS favorited_by_me,
         EXISTS(SELECT 1 FROM tailor_followers tf WHERE tf.tailor_id=t.id AND tf.customer_id=:customer_id) AS followed_by_me
         FROM tailors t
         JOIN users u ON u.id=t.user_id
         LEFT JOIN tailor_services s ON s.tailor_id=t.id AND s.active
+        LEFT JOIN order_counts oc ON oc.tailor_id=t.id
+        LEFT JOIN favorite_counts fc ON fc.tailor_id=t.id
+        LEFT JOIN follower_counts flc ON flc.tailor_id=t.id
         WHERE t.approval_status='APPROVED'
           AND t.account_status='ACTIVE'
           AND t.deleted_at IS NULL
           AND (CAST(:availability AS text) IS NULL OR t.availability=CAST(:availability AS text))
           AND (:needle='' OR lower(t.shop) LIKE :like OR lower(t.owner_name) LIKE :like OR lower(t.zone_id) LIKE :like OR lower(coalesce(t.shop_address,'')) LIKE :like OR lower(array_to_string(t.expertise,',')) LIKE :like OR (:needle IN ('chennai','madras') AND t.zone_id IN ('tnagar','annanagar','adyar','velachery','mylapore')))
           AND (:service='' OR lower(coalesce(s.name,'') || ' ' || coalesce(s.garment_id,'') || ' ' || array_to_string(t.expertise,',')) LIKE :service_like)
-        GROUP BY t.id, u.phone, u.email
+        GROUP BY t.id, u.phone, u.email, oc.active_orders, fc.favorite_count, flc.follower_count
         HAVING (:min_rating=0 OR t.rating >= :min_rating) AND (:max_price=0 OR COALESCE(min(s.price),0) <= :max_price)
         ORDER BY t.featured DESC, t.rating DESC, t.created DESC
+        LIMIT :limit OFFSET :offset
         """,
         {
             "needle": q.strip().lower(),
@@ -1859,6 +1890,7 @@ def customer_tailors(
             "min_rating": minRating,
             "max_price": maxPrice,
             "customer_id": customer["id"],
+            **page.sql,
         },
     )
     return [as_tailor(r) for r in rows]
@@ -1867,44 +1899,56 @@ def customer_tailors(
 @app.get("/api/customer/tailors/{tailor_id}")
 def customer_tailor_profile(tailor_id: str, customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
     tailor = customer_tailor_summary(db, tailor_id, customer["id"])
-    services = fetch_all(db, "SELECT * FROM tailor_services WHERE tailor_id=:id AND active ORDER BY price", {"id": tailor_id})
+    services = fetch_all(db, "SELECT * FROM tailor_services WHERE tailor_id=:id AND active ORDER BY price LIMIT 100", {"id": tailor_id})
     reviews = fetch_all(
         db,
         """SELECT r.*, u.name AS customer_name FROM reviews r JOIN users u ON u.id=r.customer_id
-        WHERE r.tailor_id=:id AND r.hidden=FALSE ORDER BY r.ts DESC""",
+        WHERE r.tailor_id=:id AND r.hidden=FALSE ORDER BY r.ts DESC LIMIT 100""",
         {"id": tailor_id},
     )
     offers = fetch_all(
         db,
         """SELECT * FROM tailor_offers
         WHERE tailor_id=:id AND active=TRUE AND (expires_at IS NULL OR expires_at >= CURRENT_DATE)
-        ORDER BY created_at DESC""",
+        ORDER BY created_at DESC LIMIT 50""",
         {"id": tailor_id},
     )
     return {"tailor": tailor, "services": services, "reviews": reviews, "offers": [as_offer(o) for o in offers]}
 
 
 @app.get("/api/customer/favorites")
-def customer_favorites(customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
+def customer_favorites(page: PageParams = Depends(PageParams), customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
     rows = fetch_all(
         db,
-        """SELECT t.*, u.phone, u.email, COALESCE(min(s.price),0)::int AS starting_price,
-        (SELECT count(*) FROM orders o WHERE o.tailor_id=t.id AND o.status NOT IN ('COMPLETED','CANCELLED'))::int AS active_orders,
-        (SELECT count(*) FROM customer_favorite_tailors cf2 WHERE cf2.tailor_id=t.id)::int AS favorite_count,
-        (SELECT count(*) FROM tailor_followers tf WHERE tf.tailor_id=t.id)::int AS follower_count,
+        """WITH order_counts AS (
+          SELECT tailor_id, count(*) FILTER (WHERE status NOT IN ('COMPLETED','CANCELLED'))::int AS active_orders
+          FROM orders GROUP BY tailor_id
+        ), favorite_counts AS (
+          SELECT tailor_id, count(*)::int AS favorite_count FROM customer_favorite_tailors GROUP BY tailor_id
+        ), follower_counts AS (
+          SELECT tailor_id, count(*)::int AS follower_count FROM tailor_followers GROUP BY tailor_id
+        )
+        SELECT t.*, u.phone, u.email, COALESCE(min(s.price),0)::int AS starting_price,
+        COALESCE(oc.active_orders,0)::int AS active_orders,
+        COALESCE(fc.favorite_count,0)::int AS favorite_count,
+        COALESCE(flc.follower_count,0)::int AS follower_count,
         TRUE AS favorited_by_me,
         EXISTS(SELECT 1 FROM tailor_followers tf WHERE tf.tailor_id=t.id AND tf.customer_id=:customer_id) AS followed_by_me
         FROM customer_favorite_tailors cf
         JOIN tailors t ON t.id=cf.tailor_id
         JOIN users u ON u.id=t.user_id
         LEFT JOIN tailor_services s ON s.tailor_id=t.id AND s.active
+        LEFT JOIN order_counts oc ON oc.tailor_id=t.id
+        LEFT JOIN favorite_counts fc ON fc.tailor_id=t.id
+        LEFT JOIN follower_counts flc ON flc.tailor_id=t.id
         WHERE cf.customer_id=:customer_id
           AND t.approval_status='APPROVED'
           AND t.account_status='ACTIVE'
           AND t.deleted_at IS NULL
-        GROUP BY t.id, u.phone, u.email, cf.created_at
-        ORDER BY cf.created_at DESC""",
-        {"customer_id": customer["id"]},
+        GROUP BY t.id, u.phone, u.email, cf.created_at, oc.active_orders, fc.favorite_count, flc.follower_count
+        ORDER BY cf.created_at DESC
+        LIMIT :limit OFFSET :offset""",
+        {"customer_id": customer["id"], **page.sql},
     )
     return [as_tailor(r) for r in rows]
 
@@ -2059,7 +2103,7 @@ def create_booking_request(body: BookingCreate, customer: dict = Depends(custome
 
 
 @app.get("/api/customer/bookings")
-def customer_bookings(customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
+def customer_bookings(page: PageParams = Depends(PageParams), customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
     requests = fetch_all(
         db,
         """SELECT br.*, r.code AS requirement_code, r.service_name, r.quantity, r.preferred_date, r.measurement_mode,
@@ -2069,14 +2113,16 @@ def customer_bookings(customer: dict = Depends(customer_user), db: Session = Dep
         JOIN tailors t ON t.id=br.tailor_id
         LEFT JOIN tailor_services s ON s.id=br.service_id
         WHERE r.customer_id=:uid
-        ORDER BY br.ts DESC""",
-        {"uid": customer["id"]},
+        ORDER BY br.ts DESC
+        LIMIT :limit OFFSET :offset""",
+        {"uid": customer["id"], **page.sql},
     )
     orders = fetch_all(
         db,
         """SELECT o.*, t.shop, t.owner_name FROM orders o JOIN tailors t ON t.id=o.tailor_id
-        WHERE o.customer_id=:uid ORDER BY o.ts DESC""",
-        {"uid": customer["id"]},
+        WHERE o.customer_id=:uid ORDER BY o.ts DESC
+        LIMIT :limit OFFSET :offset""",
+        {"uid": customer["id"], **page.sql},
     )
     notifications = fetch_all(db, "SELECT * FROM notifications WHERE to_ref=:ref ORDER BY ts DESC LIMIT 50", {"ref": "user:" + customer["id"]})
     return {"requests": requests, "orders": orders, "notifications": notifications}
@@ -2105,14 +2151,14 @@ def customer_order_timeline(order_id: str, customer: dict = Depends(customer_use
     order = fetch_one(db, "SELECT * FROM orders WHERE id=:id AND customer_id=:uid", {"id": order_id, "uid": customer["id"]})
     if not order:
         raise HTTPException(404, "Order not found")
-    history = fetch_all(db, "SELECT * FROM order_status_history WHERE order_id=:id ORDER BY ts", {"id": order_id})
-    charges = fetch_all(db, "SELECT * FROM additional_charges WHERE order_id=:id ORDER BY ts", {"id": order_id})
+    history = fetch_all(db, "SELECT * FROM order_status_history WHERE order_id=:id ORDER BY ts LIMIT 500", {"id": order_id})
+    charges = fetch_all(db, "SELECT * FROM additional_charges WHERE order_id=:id ORDER BY ts LIMIT 200", {"id": order_id})
     return {"order": order, "history": history, "charges": charges}
 
 
 @app.get("/api/customer/support/tickets")
-def customer_support_tickets(customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
-    return user_support_tickets(db, customer, "customer")
+def customer_support_tickets(page: PageParams = Depends(PageParams), customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
+    return user_support_tickets(db, customer, "customer", page)
 
 
 @app.post("/api/customer/support/tickets", status_code=201)
@@ -2285,10 +2331,10 @@ def update_tailor_location(body: LocationIn, user: dict = Depends(tailor_user), 
 
 
 @app.get("/api/tailor/me/services")
-def list_my_services(user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+def list_my_services(page: PageParams = Depends(PageParams), user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
     """Tailor's own view (file 11) -- includes inactive services, unlike the public endpoint below."""
     tailor = get_tailor_for_user(db, user)
-    rows = fetch_all(db, "SELECT * FROM tailor_services WHERE tailor_id=:tid ORDER BY created_at DESC NULLS LAST", {"tid": tailor["id"]})
+    rows = fetch_all(db, "SELECT * FROM tailor_services WHERE tailor_id=:tid ORDER BY created_at DESC NULLS LAST LIMIT :limit OFFSET :offset", {"tid": tailor["id"], **page.sql})
     return [as_tailor_service(r) for r in rows]
 
 
@@ -2364,16 +2410,16 @@ def delete_my_service(service_id: str, user: dict = Depends(tailor_user), db: Se
 
 
 @app.get("/api/tailors/{tailor_id}/services")
-def public_tailor_services(tailor_id: str, db: Session = Depends(db_session)):
+def public_tailor_services(tailor_id: str, page: PageParams = Depends(PageParams), db: Session = Depends(db_session)):
     """Public/customer-facing (file 11) -- active services only, viewed before booking."""
-    rows = fetch_all(db, "SELECT * FROM tailor_services WHERE tailor_id=:tid AND is_active=TRUE ORDER BY name", {"tid": tailor_id})
+    rows = fetch_all(db, "SELECT * FROM tailor_services WHERE tailor_id=:tid AND is_active=TRUE ORDER BY name LIMIT :limit OFFSET :offset", {"tid": tailor_id, **page.sql})
     return [as_tailor_service(r) for r in rows]
 
 
 @app.get("/api/tailor/dashboard")
-def tailor_dashboard(user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+def tailor_dashboard(page: PageParams = Depends(PageParams), user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
     tailor = get_tailor_for_user(db, user)
-    services = fetch_all(db, "SELECT * FROM tailor_services WHERE tailor_id=:tid ORDER BY active DESC, price", {"tid": tailor["id"]})
+    services = fetch_all(db, "SELECT * FROM tailor_services WHERE tailor_id=:tid ORDER BY active DESC, price LIMIT 100", {"tid": tailor["id"]})
     requests = fetch_all(
         db,
         """SELECT br.*, r.code AS requirement_code, r.service_name, r.quantity, r.requirements, r.preferred_date,
@@ -2387,8 +2433,9 @@ def tailor_dashboard(user: dict = Depends(tailor_user), db: Session = Depends(db
         JOIN users u ON u.id=r.customer_id
         LEFT JOIN tailor_services s ON s.id=br.service_id
         WHERE br.tailor_id=:tid
-        ORDER BY br.ts DESC""",
-        {"tid": tailor["id"]},
+        ORDER BY br.ts DESC
+        LIMIT :limit OFFSET :offset""",
+        {"tid": tailor["id"], **page.sql},
     )
     orders = fetch_all(
         db,
@@ -2404,8 +2451,9 @@ def tailor_dashboard(user: dict = Depends(tailor_user), db: Session = Depends(db
         JOIN users u ON u.id=o.customer_id
         LEFT JOIN booking_requirements r ON r.id=o.requirement_id
         WHERE o.tailor_id=:tid
-        ORDER BY o.ts DESC""",
-        {"tid": tailor["id"]},
+        ORDER BY o.ts DESC
+        LIMIT :limit OFFSET :offset""",
+        {"tid": tailor["id"], **page.sql},
     )
     stats = fetch_one(
         db,
@@ -2675,8 +2723,8 @@ def deactivate_tailor_offer(offer_id: str, user: dict = Depends(tailor_user), db
 
 
 @app.get("/api/tailor/support/tickets")
-def tailor_support_tickets(user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
-    return user_support_tickets(db, user, "tailor")
+def tailor_support_tickets(page: PageParams = Depends(PageParams), user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    return user_support_tickets(db, user, "tailor", page)
 
 
 @app.post("/api/tailor/support/tickets", status_code=201)
@@ -2975,19 +3023,19 @@ def admin_metrics(_: dict = Depends(admin_user), db: Session = Depends(db_sessio
 
 
 @app.get("/api/admin/customers")
-def admin_customers(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
-    rows = fetch_all(db, "SELECT * FROM users WHERE 'customer'=ANY(roles) AND NOT 'admin'=ANY(roles) ORDER BY joined DESC")
+def admin_customers(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
+    rows = fetch_all(db, "SELECT * FROM users WHERE 'customer'=ANY(roles) AND NOT 'admin'=ANY(roles) ORDER BY joined DESC LIMIT :limit OFFSET :offset", page.sql)
     return [as_public_user(r) for r in rows]
 
 
 @app.get("/api/admin/tailors")
-def admin_tailors(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
-    rows = fetch_all(db, "SELECT t.*, u.phone, u.email FROM tailors t JOIN users u ON u.id=t.user_id ORDER BY t.created DESC")
+def admin_tailors(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
+    rows = fetch_all(db, "SELECT t.*, u.phone, u.email FROM tailors t JOIN users u ON u.id=t.user_id ORDER BY t.created DESC LIMIT :limit OFFSET :offset", page.sql)
     return [as_tailor(r) for r in rows]
 
 
 @app.get("/api/admin/booking-requests")
-def admin_booking_requests(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
+def admin_booking_requests(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
     return fetch_all(
         db,
         """SELECT br.*, r.code AS requirement_code, r.service_name, r.quantity, r.preferred_date, r.measurement_mode,
@@ -2996,7 +3044,9 @@ def admin_booking_requests(_: dict = Depends(admin_user), db: Session = Depends(
         JOIN booking_requirements r ON r.id=br.requirement_id
         JOIN users cu ON cu.id=r.customer_id
         JOIN tailors t ON t.id=br.tailor_id
-        ORDER BY br.ts DESC""",
+        ORDER BY br.ts DESC
+        LIMIT :limit OFFSET :offset""",
+        page.sql,
     )
 
 
@@ -3151,8 +3201,8 @@ def delete_tailor(tailor_id: str, reason: str = Query("Admin deletion"), admin: 
 
 
 @app.get("/api/admin/orders")
-def admin_orders(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
-    return fetch_all(db, "SELECT o.*, cu.name AS customer_name, t.shop FROM orders o JOIN users cu ON cu.id=o.customer_id JOIN tailors t ON t.id=o.tailor_id ORDER BY o.ts DESC")
+def admin_orders(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
+    return fetch_all(db, "SELECT o.*, cu.name AS customer_name, t.shop FROM orders o JOIN users cu ON cu.id=o.customer_id JOIN tailors t ON t.id=o.tailor_id ORDER BY o.ts DESC LIMIT :limit OFFSET :offset", page.sql)
 
 
 @app.patch("/api/admin/orders/{order_id}")
@@ -3185,7 +3235,7 @@ def cancel_order(order_id: str, reason: str = "Cancelled by admin", admin: dict 
 
 
 @app.get("/api/admin/payments")
-def admin_payments(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
+def admin_payments(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
     return fetch_all(
         db,
         """
@@ -3200,13 +3250,15 @@ def admin_payments(_: dict = Depends(admin_user), db: Session = Depends(db_sessi
         FROM payments p
         JOIN orders o ON o.id=p.order_id
         ORDER BY p.ts DESC
+        LIMIT :limit OFFSET :offset
         """,
+        page.sql,
     )
 
 
 @app.get("/api/admin/reviews")
-def admin_reviews(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
-    return fetch_all(db, "SELECT r.*, cu.name AS customer_name, t.shop FROM reviews r JOIN users cu ON cu.id=r.customer_id JOIN tailors t ON t.id=r.tailor_id ORDER BY r.ts DESC")
+def admin_reviews(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
+    return fetch_all(db, "SELECT r.*, cu.name AS customer_name, t.shop FROM reviews r JOIN users cu ON cu.id=r.customer_id JOIN tailors t ON t.id=r.tailor_id ORDER BY r.ts DESC LIMIT :limit OFFSET :offset", page.sql)
 
 
 @app.patch("/api/admin/reviews/{review_id}")
@@ -3222,12 +3274,12 @@ def patch_review(review_id: str, body: ReviewPatch, admin: dict = Depends(admin_
 
 
 @app.get("/api/admin/complaints")
-def admin_complaints(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
-    return fetch_all(db, "SELECT c.*, u.name AS raiser_name, o.code AS order_code FROM complaints c JOIN users u ON u.id=c.raised_by LEFT JOIN orders o ON o.id=c.order_id ORDER BY c.ts DESC")
+def admin_complaints(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
+    return fetch_all(db, "SELECT c.*, u.name AS raiser_name, o.code AS order_code FROM complaints c JOIN users u ON u.id=c.raised_by LEFT JOIN orders o ON o.id=c.order_id ORDER BY c.ts DESC LIMIT :limit OFFSET :offset", page.sql)
 
 
 @app.get("/api/admin/support-tickets")
-def admin_support_tickets(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
+def admin_support_tickets(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
     tickets = fetch_all(
         db,
         """SELECT st.*, u.name AS requester_name, u.email AS requester_email, u.phone AS requester_phone, o.code AS order_code,
@@ -3238,10 +3290,10 @@ def admin_support_tickets(_: dict = Depends(admin_user), db: Session = Depends(d
         ORDER BY
           CASE st.priority WHEN 'URGENT' THEN 1 WHEN 'HIGH' THEN 2 WHEN 'NORMAL' THEN 3 ELSE 4 END,
           CASE st.status WHEN 'OPEN' THEN 1 WHEN 'PENDING' THEN 2 WHEN 'WAITING_ON_CUSTOMER' THEN 3 WHEN 'RESOLVED' THEN 4 ELSE 5 END,
-          st.last_activity_at DESC"""
+          st.last_activity_at DESC
+        LIMIT :limit OFFSET :offset""",
+        page.sql,
     )
-    for ticket in tickets:
-        ticket["messages"] = fetch_all(db, "SELECT * FROM support_messages WHERE ticket_id=:id ORDER BY created_at", {"id": ticket["id"]})
     return tickets
 
 
@@ -3325,5 +3377,5 @@ def patch_complaint(complaint_id: str, body: ComplaintPatch, admin: dict = Depen
 
 
 @app.get("/api/admin/audit")
-def admin_audit(_: dict = Depends(admin_user), db: Session = Depends(db_session)):
-    return fetch_all(db, "SELECT * FROM audit_logs ORDER BY ts DESC LIMIT 300")
+def admin_audit(page: PageParams = Depends(PageParams), _: dict = Depends(admin_user), db: Session = Depends(db_session)):
+    return fetch_all(db, "SELECT * FROM audit_logs ORDER BY ts DESC LIMIT :limit OFFSET :offset", page.sql)

@@ -17,6 +17,7 @@ from app.api.v1.otp import is_recently_verified, normalize_target
 from app.api.v1.session_tokens import create_token_pair
 from app.core.database import get_db
 from app.integrations import aadhaar_kyc_service
+from app.pagination import PageParams
 from app.qr import generate_wallet_qr
 from app.schemas.services import TailorServiceIn, TailorServicePatchIn
 from app.schemas.tailors import TailorAadhaarVerifyIn, TailorAvailabilityCheckIn, TailorLocationIn, TailorRegisterIn
@@ -351,6 +352,7 @@ async def update_my_fixed_location(
 
 @router.get("/me/services")
 async def list_my_services(
+    page: PageParams = Depends(PageParams),
     tailor: dict = Depends(get_current_tailor),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
@@ -361,15 +363,17 @@ async def list_my_services(
             FROM tailor_services
             WHERE tailor_id=:tailor_id
             ORDER BY COALESCE(is_active, active) DESC, category NULLS LAST, service_name NULLS LAST, name
+            LIMIT :limit OFFSET :offset
             """
         ),
-        {"tailor_id": tailor["id"]},
+        {"tailor_id": tailor["id"], **page.sql},
     )
     return [public_tailor_service(dict(row)) for row in rows.mappings().all()]
 
 
 @router.get("/me/waiting-list")
 async def my_waiting_list(
+    page: PageParams = Depends(PageParams),
     tailor: dict = Depends(get_current_tailor),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
@@ -405,9 +409,10 @@ async def my_waiting_list(
             WHERE o.tailor_id=:tailor_id
               AND upper(o.status) IN ('WAITING_LIST','WAITLISTED','PENDING_APPROVAL')
             ORDER BY o.ts ASC
+            LIMIT :limit OFFSET :offset
             """
         ),
-        {"tailor_id": tailor["id"]},
+        {"tailor_id": tailor["id"], **page.sql},
     )
     rows = []
     for row in result.mappings().all():
@@ -539,7 +544,7 @@ async def delete_my_service(
 
 
 @router.get("/{tailor_id}/services")
-async def public_tailor_services(tailor_id: str, db: AsyncSession = Depends(get_db)) -> list[dict]:
+async def public_tailor_services(tailor_id: str, page: PageParams = Depends(PageParams), db: AsyncSession = Depends(get_db)) -> list[dict]:
     tailor = await fetch_one(
         db,
         "SELECT id FROM tailors WHERE (id=:tailor_id OR tailor_id::text=:tailor_id) AND deleted_at IS NULL LIMIT 1",
@@ -555,9 +560,10 @@ async def public_tailor_services(tailor_id: str, db: AsyncSession = Depends(get_
             WHERE tailor_id=:tailor_id
               AND COALESCE(is_active, active)=TRUE
             ORDER BY category NULLS LAST, price, service_name NULLS LAST, name
+            LIMIT :limit OFFSET :offset
             """
         ),
-        {"tailor_id": tailor["id"]},
+        {"tailor_id": tailor["id"], **page.sql},
     )
     return [public_tailor_service(dict(row)) for row in rows.mappings().all()]
 

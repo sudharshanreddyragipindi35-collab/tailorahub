@@ -927,3 +927,14 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 );
 CREATE INDEX IF NOT EXISTS withdrawal_requests_tailor_idx ON withdrawal_requests(tailor_id, requested_at DESC);
 CREATE INDEX IF NOT EXISTS withdrawal_requests_status_idx ON withdrawal_requests(status, requested_at DESC);
+
+-- Phase 1 collection-query indexes. These mirror Alembic revision
+-- 20260830_0006 so AUTO_MIGRATE local environments receive the same tuning.
+CREATE INDEX IF NOT EXISTS orders_customer_ts_idx ON orders(customer_id, ts DESC);
+CREATE INDEX IF NOT EXISTS orders_tailor_status_ts_idx ON orders(tailor_id, status, ts DESC);
+CREATE INDEX IF NOT EXISTS booking_requests_tailor_status_ts_idx ON booking_requests(tailor_id, status, ts DESC);
+CREATE INDEX IF NOT EXISTS booking_requirements_customer_ts_idx ON booking_requirements(customer_id, ts DESC);
+CREATE INDEX IF NOT EXISTS payments_status_ts_idx ON payments(status, ts DESC);
+CREATE INDEX IF NOT EXISTS reviews_tailor_hidden_ts_idx ON reviews(tailor_id, hidden, ts DESC);
+CREATE INDEX IF NOT EXISTS support_tickets_requester_activity_idx ON support_tickets(requester_id, requester_role, last_activity_at DESC);
+CREATE INDEX IF NOT EXISTS complaints_status_ts_idx ON complaints(status, ts DESC);

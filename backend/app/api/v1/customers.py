@@ -14,6 +14,7 @@ from app.api.deps import get_current_customer
 from app.api.v1.otp import is_recently_verified, normalize_target
 from app.api.v1.session_tokens import create_token_pair
 from app.core.database import get_db
+from app.pagination import PageParams
 from app.schemas.customers import CustomerAvailabilityCheckIn, CustomerRegisterIn
 from app.security import hash_password
 
@@ -226,6 +227,7 @@ async def nearby_tailors(
     latitude: float = Query(..., ge=-90, le=90),
     longitude: float = Query(..., ge=-180, le=180),
     radius_km: float = Query(50, ge=1, le=100),
+    page: PageParams = Depends(PageParams),
     customer: dict = Depends(get_current_customer),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
@@ -272,9 +274,10 @@ async def nearby_tailors(
             FROM located_tailors
             WHERE distance_km <= :radius
             ORDER BY distance_km ASC, rating DESC, computed_experience_display DESC
+            LIMIT :limit OFFSET :offset
             """
         ),
-        {"latitude": latitude, "longitude": longitude, "radius": radius},
+        {"latitude": latitude, "longitude": longitude, "radius": radius, **page.sql},
     )
     return [public_nearby_tailor(dict(row)) for row in result.mappings().all()]
 

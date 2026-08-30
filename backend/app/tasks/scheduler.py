@@ -14,7 +14,21 @@ async def recalculate_tailor_experience() -> None:
 
 
 async def cleanup_expired_otps() -> None:
-    """Future job: remove expired OTP rows from Redis/PostgreSQL."""
+    """Remove expired short-lived security records after a small audit window."""
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            text("DELETE FROM otp_verifications WHERE expires_at < now() - INTERVAL '1 day'")
+        )
+        await db.execute(
+            text(
+                """
+                DELETE FROM refresh_sessions
+                WHERE expires_at < now() - INTERVAL '7 days'
+                   OR (revoked_at IS NOT NULL AND revoked_at < now() - INTERVAL '7 days')
+                """
+            )
+        )
+        await db.commit()
 
 
 async def reconcile_wallets() -> None:

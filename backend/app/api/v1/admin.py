@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_admin
 from app.core.database import get_db
+from app.pagination import PageParams
 from app.qr import generate_wallet_qr
 from app.schemas.admin import PlatformSettingsIn
 
@@ -105,11 +106,12 @@ async def update_finance_settings(
 async def finance_wallet(
     date_from: date | None = Query(default=None, alias="dateFrom"),
     date_to: date | None = Query(default=None, alias="dateTo"),
+    page: PageParams = Depends(PageParams),
     _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     wallet = await _ensure_admin_wallet(db)
-    totals, transactions = await _admin_wallet_transactions(db, date_from, date_to)
+    totals, transactions = await _admin_wallet_transactions(db, date_from, date_to, page.limit, page.offset)
     await db.commit()
     return _admin_wallet_payload(wallet, totals, transactions)
 
@@ -121,7 +123,7 @@ async def finance_wallet_export(
     _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
-    _, transactions = await _admin_wallet_transactions(db, date_from, date_to)
+    _, transactions = await _admin_wallet_transactions(db, date_from, date_to, 5000, 0)
     output = StringIO()
     writer = csv.writer(output)
     writer.writerow(["id", "type", "amount", "order_code", "source_booking_id", "tailor", "customer", "created_at"])
@@ -145,6 +147,7 @@ async def finance_wallet_export(
 
 @router.get("/payment-intents")
 async def payment_intents(
+    page: PageParams = Depends(PageParams),
     _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
@@ -168,8 +171,10 @@ async def payment_intents(
             ORDER BY
               CASE pi.status WHEN 'pending' THEN 1 WHEN 'verified' THEN 2 WHEN 'expired' THEN 3 ELSE 4 END,
               pi.created_at DESC
+            LIMIT :limit OFFSET :offset
             """
-        )
+        ),
+        page.sql,
     )
     await db.commit()
     return [_payment_intent_admin_payload(dict(row)) for row in result.mappings().all()]
@@ -311,6 +316,7 @@ async def reject_payment_intent(
 
 @router.get("/withdrawal-requests")
 async def withdrawal_requests(
+    page: PageParams = Depends(PageParams),
     _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
@@ -333,8 +339,10 @@ async def withdrawal_requests(
             ORDER BY
               CASE wr.status WHEN 'pending_admin_review' THEN 1 WHEN 'approved' THEN 2 ELSE 3 END,
               wr.requested_at DESC
+            LIMIT :limit OFFSET :offset
             """
-        )
+        ),
+        page.sql,
     )
     return [_withdrawal_request_payload(dict(row)) for row in result.mappings().all()]
 
@@ -590,8 +598,8 @@ async def _admin_wallet_ledger_balance(db: AsyncSession) -> Decimal:
     return money_decimal(row["balance"] if row else 0)
 
 
-async def _admin_wallet_transactions(db: AsyncSession, date_from: date | None, date_to: date | None) -> tuple[dict, list[dict]]:
-    params = {"date_from": date_from, "date_to": date_to}
+async def _admin_wallet_transactions(db: AsyncSession, date_from: date | None, date_to: date | None, limit: int, offset: int) -> tuple[dict, list[dict]]:
+    params = {"date_from": date_from, "date_to": date_to, "limit": limit, "offset": offset}
     totals_result = await db.execute(
         text(
             """
@@ -621,6 +629,7 @@ async def _admin_wallet_transactions(db: AsyncSession, date_from: date | None, d
             WHERE (CAST(:date_from AS date) IS NULL OR awt.created_at::date >= CAST(:date_from AS date))
               AND (CAST(:date_to AS date) IS NULL OR awt.created_at::date <= CAST(:date_to AS date))
             ORDER BY awt.created_at DESC
+            LIMIT :limit OFFSET :offset
             """
         ),
         params,
@@ -853,6 +862,7 @@ async def _withdrawal_request_for_update(db: AsyncSession, request_id: str) -> d
 @router.get("/referrals/tree/{tailor_id}")
 async def referral_tree(
     tailor_id: str,
+    max_nodes: int = Query(default=500, alias="maxNodes", ge=1, le=2000),
     _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -936,9 +946,10 @@ async def referral_tree(
               joined_at
             FROM referral_tree
             ORDER BY depth, shop, owner_name
+            LIMIT :max_nodes
             """
         ),
-        {"root_uuid": root_uuid},
+        {"root_uuid": root_uuid, "max_nodes": max_nodes},
     )
     rows = [dict(row) for row in result.mappings().all()]
     nodes: dict[str, dict] = {}
@@ -975,6 +986,7 @@ async def referral_tree(
 @router.get("/customer-referrals/tree/{customer_id}")
 async def customer_referral_tree(
     customer_id: str,
+    max_nodes: int = Query(default=500, alias="maxNodes", ge=1, le=2000),
     _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -1060,9 +1072,10 @@ async def customer_referral_tree(
               joined_at
             FROM referral_tree
             ORDER BY depth, name
+            LIMIT :max_nodes
             """
         ),
-        {"root_uuid": root_uuid},
+        {"root_uuid": root_uuid, "max_nodes": max_nodes},
     )
     rows = [dict(row) for row in result.mappings().all()]
     nodes: dict[str, dict] = {}
@@ -1098,6 +1111,7 @@ async def customer_referral_tree(
 
 @router.get("/disputes")
 async def dispute_queue(
+    page: PageParams = Depends(PageParams),
     _: dict = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
@@ -1126,8 +1140,10 @@ async def dispute_queue(
                 ELSE 4
               END,
               d.created_at DESC
+            LIMIT :limit OFFSET :offset
             """
-        )
+        ),
+        page.sql,
     )
     return [_dispute_payload(dict(row)) for row in result.mappings().all()]
 

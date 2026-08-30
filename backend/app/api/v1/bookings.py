@@ -25,6 +25,7 @@ from app.api.deps import get_current_customer, get_current_tailor, get_current_u
 from app.api.v1.otp import OTP_TTL_MINUTES, OtpFlowError, issue_otp, verify_otp
 from app.core.config import get_settings
 from app.core.database import get_db
+from app.pagination import PageParams
 from app.emailer import send_email
 from app.qr import generate_wallet_qr
 from app.services.tracker_service import tracker_connections
@@ -1039,6 +1040,7 @@ async def tracker_status_payload(db: AsyncSession, order: dict, viewer: dict | N
             FROM order_status_history
             WHERE order_id=:order_id
             ORDER BY ts ASC
+            LIMIT 500
             """
         ),
         {"order_id": order["id"]},
@@ -2417,6 +2419,7 @@ async def raise_booking_dispute(
 
 @router.get("/tailors/me/waiting-list")
 async def my_waiting_list(
+    page: PageParams = Depends(PageParams),
     tailor: dict = Depends(get_current_tailor),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
@@ -2429,9 +2432,10 @@ async def my_waiting_list(
             JOIN tailors t ON t.id=o.tailor_id
             WHERE o.tailor_id=:tailor_id AND upper(o.status) IN ('WAITING_LIST','WAITLISTED','PENDING_APPROVAL')
             ORDER BY o.ts ASC
+            LIMIT :limit OFFSET :offset
             """
         ),
-        {"tailor_id": tailor["id"]},
+        {"tailor_id": tailor["id"], **page.sql},
     )
     return [public_booking(dict(row)) for row in result.mappings().all()]
 

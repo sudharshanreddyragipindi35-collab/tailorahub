@@ -21,6 +21,12 @@ class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", env_ignore_empty=True, extra="ignore")
 
     database_url: str = Field(default="postgresql+psycopg://tailorahub@localhost:5432/tailorahub_dev", alias="DATABASE_URL")
+    database_pool_size: int = Field(default=10, ge=1, alias="DATABASE_POOL_SIZE")
+    database_max_overflow: int = Field(default=10, ge=0, alias="DATABASE_MAX_OVERFLOW")
+    database_pool_timeout_seconds: int = Field(default=30, ge=1, alias="DATABASE_POOL_TIMEOUT_SECONDS")
+    database_pool_recycle_seconds: int = Field(default=1800, ge=30, alias="DATABASE_POOL_RECYCLE_SECONDS")
+    database_statement_timeout_ms: int = Field(default=5000, ge=100, alias="DATABASE_STATEMENT_TIMEOUT_MS")
+    database_slow_query_ms: int = Field(default=500, ge=1, alias="DATABASE_SLOW_QUERY_MS")
     redis_url: str = Field(default="redis://localhost:6379/0", alias="REDIS_URL")
     jwt_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(48), alias="JWT_SECRET")
     jwt_refresh_secret: str = Field(default_factory=lambda: secrets.token_urlsafe(48), alias="JWT_REFRESH_SECRET")

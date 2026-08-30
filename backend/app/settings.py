@@ -34,6 +34,12 @@ class Settings:
         "DATABASE_URL",
         "postgresql+psycopg://tailorahub@localhost:5432/tailorahub_dev",
     )
+    database_pool_size = env_int("DATABASE_POOL_SIZE", 10)
+    database_max_overflow = env_int("DATABASE_MAX_OVERFLOW", 10)
+    database_pool_timeout_seconds = env_int("DATABASE_POOL_TIMEOUT_SECONDS", 30)
+    database_pool_recycle_seconds = env_int("DATABASE_POOL_RECYCLE_SECONDS", 1800)
+    database_statement_timeout_ms = env_int("DATABASE_STATEMENT_TIMEOUT_MS", 5000)
+    database_slow_query_ms = env_int("DATABASE_SLOW_QUERY_MS", 500)
     jwt_secret = env_value("JWT_SECRET", _RUNTIME_JWT_SECRET)
     jwt_refresh_secret = env_value("JWT_REFRESH_SECRET", _RUNTIME_JWT_REFRESH_SECRET)
     jwt_algorithm = "HS256"
