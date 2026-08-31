@@ -36,6 +36,7 @@ backend/uploads/
 frontend/uploads/
 *.log
 backend/email-outbox.log
+load-test-results/
 
 # Deploy archives and generated bundles
 *.zip

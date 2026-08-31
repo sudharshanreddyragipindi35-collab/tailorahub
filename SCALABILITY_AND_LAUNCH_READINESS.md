@@ -221,6 +221,14 @@ The initial sizes below are starting hypotheses and must be adjusted using load-
 
 ## Phase 10: Load and resilience testing
 
+### Source implementation
+
+- [x] Add guarded k6 suites for public, customer, tailor, private admin, authentication/refresh, booking/idempotency, notifications, media, WebSocket, and sandbox payment paths.
+- [x] Add smoke, 50, 100, 250, 500, 1,000, spike, and configurable soak profiles.
+- [x] Enforce initial error-rate, check-rate, read-p95, and write-p95 thresholds in the executable test harness.
+- [x] Require explicit approval for remote targets, synthetic writes, and sandbox payment traffic.
+- [x] Add a repeatable runner, ignored JSON result output, and an ordered resilience/capacity runbook.
+
 ### Required test scenarios
 
 - [ ] Authentication and session refresh.

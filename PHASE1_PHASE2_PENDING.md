@@ -1,4 +1,4 @@
-# Phase 1 through Phase 9 pending items
+# Phase 1 through Phase 10 pending items
 
 This file is the single backlog for production-account work and measured validation intentionally deferred while implementation continues.
 
@@ -120,3 +120,23 @@ The Phase 8 source implementation, deployment order, alarms, and operational pro
 10. Complete an independent pre-launch application/infrastructure security review and remediate all critical/high findings before public launch. Repeat after material authentication, payment, KYC, storage, network, or authorization changes.
 
 The Phase 9 source controls and production release gate are documented in `PHASE9_IMPLEMENTATION.md`, `SECURITY.md`, and `DATA_RETENTION_AND_DELETION.md`.
+
+## Phase 10: measured load, resilience, and capacity validation
+
+1. Provision or confirm a production-like staging environment with the same ALB, minimum two ECS web tasks, RDS Proxy/RDS class, Redis, SQS workers, S3/CloudFront, WAF, and Phase 8 monitoring topology intended for release.
+2. Create isolated synthetic customer, tailor, admin, booking, service, media, notification, and payment-sandbox fixtures. Confirm no real personal data or payment method is used.
+3. Install k6 on an approved load generator, verify it has at least 20% spare CPU plus sufficient network/file-descriptor capacity, and retain the generator measurements with each result.
+4. Run functional smoke suites for public, customer, tailor, admin, authentication/refresh, booking/idempotency, notifications, media, WebSocket, stage update, and sandbox payment paths.
+5. Run 50, 100, 250, 500, and 1,000 concurrent-user profiles in sequence. Stop on the first threshold/alarm failure, tune from evidence, and rerun before advancing.
+6. Continue toward 5,000 concurrent users only after every preceding profile passes and the approved capacity target requires it; use distributed generation if one host becomes the bottleneck.
+7. Run a sudden 50-to-500-user spike and a soak of at least four hours. Confirm stable ECS CPU/memory/restarts, ALB latency/errors, RDS CPU/connections/locks, Redis memory/evictions, and SQS age/backlog/DLQ.
+8. Reconcile database, payment, notification, and background-job records after concurrent/replayed writes and prove there are zero duplicate booking, payment, notification, or scheduler actions.
+9. Run the WebSocket suite across all backend replicas while replacing one ECS task and during a rolling deployment; record reconnects, missed events, and user-visible errors.
+10. Run private admin reports separately through an approved `/32` source network and confirm the public network still receives `403` without bypassing application or WAF restrictions.
+11. Execute a controlled unhealthy-task replacement and verify automatic recovery, minimum healthy capacity, alarm delivery, and no complete outage.
+12. Execute the approved RDS failover plus isolated snapshot restore drill; record recovery time, data checks, application retry behaviour, and restore evidence.
+13. Confirm API/business errors below 1%, read p95 below 500 ms, write p95 below 1 second excluding measured provider latency, normal RDS CPU below about 70%, and connections below 70-80% of the approved safe budget.
+14. Tune ECS sizing/autoscaling/cooldowns, database queries/indexes/pool budget, Redis capacity, SQS concurrency, WAF/rate limits, and alarms only from measured results; rerun affected profiles after every material change.
+15. Produce a reviewed, secret-free Phase 10 result report for the exact immutable release image and obtain launch approval from the named engineering/operations owners.
+
+The guarded Phase 10 source harness, inputs, execution order, and acceptance gate are documented in `PHASE10_IMPLEMENTATION.md` and `load-tests/README.md`.
