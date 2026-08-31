@@ -15,7 +15,7 @@ Run the safe local smoke test:
 .\deployment\phase10-run-load-test.ps1 -Suite public-read -Profile smoke
 ```
 
-Profiles are `smoke` (one user for 30 seconds), `baseline` (50), `normal` (100), `growth` (250), `release` (500), `high` (1,000), `spike`, and `soak`. `SOAK_VUS` and `SOAK_DURATION` override the soak defaults of 100 users and four hours.
+Profiles are `smoke` (one user held for 30 seconds, plus ramp up/down), `baseline` (50), `normal` (100), `growth` (250), `release` (500), `high` (1,000), `spike`, and `soak`. `SOAK_VUS` and `SOAK_DURATION` override the soak defaults of 100 users and four hours.
 
 ## Runtime inputs
 

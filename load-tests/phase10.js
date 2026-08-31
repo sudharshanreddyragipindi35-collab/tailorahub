@@ -27,7 +27,11 @@ const suiteFunctions = {
 };
 
 const profiles = {
-  smoke: [{ duration: "30s", target: 1 }],
+  smoke: [
+    { duration: "5s", target: 1 },
+    { duration: "30s", target: 1 },
+    { duration: "5s", target: 0 },
+  ],
   baseline: [
     { duration: "30s", target: 50 },
     { duration: "2m", target: 50 },

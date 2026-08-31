@@ -14,6 +14,7 @@ def test_phase10_harness_has_progressive_profiles_and_release_thresholds():
     assert '"http_req_duration{operation:read}": ["p(95)<500"]' in source
     assert '"http_req_duration{operation:write}": ["p(95)<1000"]' in source
     assert 'iterations: ["count>0"]' in source
+    assert '{ duration: "30s", target: 1 }' in source
 
 
 def test_phase10_harness_covers_required_suites_and_fails_closed():
