@@ -19,7 +19,13 @@ Amazon SES with an ECS IAM task role is recommended for the TailoraHub domain:
 
 ```dotenv
 EMAIL_PROVIDER=ses
-EMAIL_FROM_ADDRESS=TailoraHub <no-reply@your-domain.com>
+EMAIL_FROM_ADDRESS=TailoraHub <noreply@tailorahub.com>
+EMAIL_FROM_DEFAULT=TailoraHub <noreply@tailorahub.com>
+EMAIL_FROM_VERIFY=TailoraHub Verify <verify@tailorahub.com>
+EMAIL_FROM_BOOKINGS=TailoraHub Bookings <bookings@tailorahub.com>
+EMAIL_FROM_SUPPORT=TailoraHub Support <support@tailorahub.com>
+EMAIL_FROM_PAYMENTS=TailoraHub Payments <payments@tailorahub.com>
+EMAIL_FROM_ADMIN=TailoraHub Admin <admin@tailorahub.com>
 AWS_SES_REGION=ap-south-1
 ```
 
@@ -30,7 +36,7 @@ SendGrid alternative:
 ```dotenv
 EMAIL_PROVIDER=sendgrid
 EMAIL_API_KEY=add-in-production-secret-store
-EMAIL_FROM_ADDRESS=no-reply@your-domain.com
+EMAIL_FROM_ADDRESS=noreply@tailorahub.com
 ```
 
 SMTP alternative variables already exist: `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_STARTTLS`, `SMTP_USER`, and `SMTP_PASS`.

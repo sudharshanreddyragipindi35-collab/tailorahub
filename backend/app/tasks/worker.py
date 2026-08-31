@@ -22,7 +22,7 @@ _running = True
 def _handle_email(payload: dict) -> dict:
     from app.integrations import email_service
 
-    result = email_service().send(payload["to"], payload["subject"], payload["body"])
+    result = email_service().send(payload["to"], payload["subject"], payload["body"], payload.get("purpose", "default"))
     if not result.get("ok"):
         return {**result, "terminalFailure": True, "reason": result.get("reason") or "email_delivery_failed"}
     return result

@@ -128,7 +128,7 @@ async def send_withdrawal_otp(db: AsyncSession, tailor: dict) -> dict:
         await db.rollback()
         raise HTTPException(exc.status_code, exc.message)
     if is_email:
-        delivery = send_email(target, "Your TailoraHub withdrawal OTP", f"Your withdrawal OTP is {code}. It is valid for {OTP_TTL_MINUTES} minutes.")
+        delivery = send_email(target, "Your TailoraHub withdrawal OTP", f"Your withdrawal OTP is {code}. It is valid for {OTP_TTL_MINUTES} minutes.", purpose="payments")
         mock_mode = delivery.get("mode") == "mock"
     else:
         delivery = sms_service().send_otp(target, code)

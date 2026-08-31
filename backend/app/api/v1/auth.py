@@ -190,7 +190,7 @@ async def send_code(db: AsyncSession, row: dict, purpose: str, prefer_email: boo
         raise HTTPException(exc.status_code, exc.message)
 
     if is_email:
-        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {OTP_TTL_MINUTES} minutes.")
+        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {OTP_TTL_MINUTES} minutes.", purpose="verify")
         mock_mode = delivery.get("mode") == "mock"
     else:
         delivery = sms_service().send_otp(target, code)
@@ -215,7 +215,7 @@ async def send_customer_code(db: AsyncSession, row: dict, purpose: str, prefer_e
         raise HTTPException(exc.status_code, exc.message)
 
     if is_email:
-        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {OTP_TTL_MINUTES} minutes.")
+        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {OTP_TTL_MINUTES} minutes.", purpose="verify")
         mock_mode = delivery.get("mode") == "mock"
     else:
         delivery = sms_service().send_otp(target, code)

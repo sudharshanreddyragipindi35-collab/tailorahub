@@ -1561,7 +1561,7 @@ async def start_measurement_trip(
     )
     await notify(db, "user:" + order["customer_id"], "TRHB measurement arrival OTP", customer_message, booking_id)
     if order.get("customer_email"):
-        send_email(order["customer_email"], "TRHB measurement arrival OTP", customer_message)
+        send_email(order["customer_email"], "TRHB measurement arrival OTP", customer_message, purpose="bookings")
     await db.commit()
     updated = await fetch_booking_detail(db, booking_id)
     await broadcast_measurement_trip(db, booking_id, updated)
@@ -2371,7 +2371,7 @@ async def send_delivery_otp(
     await add_history(db, booking_id, "Out for Delivery", "Delivery OTP sent to customer", "tailor")
     await notify(db, "user:" + order["customer_id"], "TailoraHub handover OTP", f"Your handover OTP for order {order['code']} is {code}. It is valid for {OTP_TTL_MINUTES} minutes.", booking_id)
     if order.get("email"):
-        send_email(order["email"], "TailoraHub handover OTP", f"Your handover OTP for order {order['code']} is {code}. It is valid for {OTP_TTL_MINUTES} minutes.")
+        send_email(order["email"], "TailoraHub handover OTP", f"Your handover OTP for order {order['code']} is {code}. It is valid for {OTP_TTL_MINUTES} minutes.", purpose="bookings")
     await db.commit()
     updated = await fetch_one(
         db,

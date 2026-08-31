@@ -81,8 +81,17 @@ class Settings:
 
     email_provider = env_value("EMAIL_PROVIDER", "mock").lower()
     email_api_key = env_value("EMAIL_API_KEY")
-    email_from_address = env_value("EMAIL_FROM_ADDRESS", env_value("EMAIL_FROM", "TailoraHub <no-reply@tailorahub.com>"))
+    # Keep the transport account and visible sender addresses separate.  A
+    # provider may require each alias to be verified before it can be used.
+    email_from_address = env_value("EMAIL_FROM_ADDRESS", env_value("EMAIL_FROM", "TailoraHub <noreply@tailorahub.com>"))
     email_from = email_from_address
+    email_reply_to = env_value("EMAIL_REPLY_TO")
+    email_from_default = env_value("EMAIL_FROM_DEFAULT", email_from_address)
+    email_from_verify = env_value("EMAIL_FROM_VERIFY", "TailoraHub Verify <verify@tailorahub.com>")
+    email_from_bookings = env_value("EMAIL_FROM_BOOKINGS", "TailoraHub Bookings <bookings@tailorahub.com>")
+    email_from_support = env_value("EMAIL_FROM_SUPPORT", "TailoraHub Support <support@tailorahub.com>")
+    email_from_payments = env_value("EMAIL_FROM_PAYMENTS", "TailoraHub Payments <payments@tailorahub.com>")
+    email_from_admin = env_value("EMAIL_FROM_ADMIN", "TailoraHub Admin <admin@tailorahub.com>")
     smtp_host = env_value("SMTP_HOST")
     smtp_port = env_int("SMTP_PORT", 587)
     smtp_secure = env_bool("SMTP_SECURE", False)

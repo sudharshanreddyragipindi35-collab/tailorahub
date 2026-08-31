@@ -1073,9 +1073,9 @@ function App() {
 }
 
 const tailorWizardSteps = [
-  "Aadhaar",
   "Mobile",
   "Email",
+  "Aadhaar",
   "Experience",
   "Password",
   "Terms",
@@ -1365,8 +1365,8 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   function syncError(key, value, nextForm = form) {
     if (key === "phone") return isValidIndianPhone(value) ? "" : "Enter a valid 10-digit Indian mobile number";
     if (key === "email") return selectedRole === "customer" && !value ? "" : isValidEmail(value) ? "" : "Enter a valid email address";
-    if (key === "aadhaarNumber") return isValidAadhaar(value) ? "" : "Enter a valid Aadhaar number";
-    if (key === "name") return value.trim().length >= 2 ? "" : selectedRole === "customer" ? "Enter your full name" : "Enter the name exactly as on Aadhaar";
+    if (key === "aadhaarNumber") return !value ? "" : isValidAadhaar(value) ? "" : "Enter a valid Aadhaar number";
+    if (key === "name") return value.trim().length >= 2 ? "" : "Enter your full name";
     if (key === "dob") return value ? "" : "DOB is required";
     if (key === "username") return value.trim().length >= 4 ? "" : "Username must be at least 4 characters";
     if (key === "years") return value !== "" && Number(value) >= 0 ? "" : "Experience level is required";
@@ -1463,7 +1463,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
           phone_number: cleanDigits(form.phone),
           email: form.email,
           dob: form.dob,
-          aadhaar_number: cleanDigits(form.aadhaarNumber),
+          aadhaar_number: cleanDigits(form.aadhaarNumber) || undefined,
           gender: form.gender || undefined,
           username: form.username,
           password: form.password,
@@ -1782,19 +1782,23 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
 
   function stepError(index) {
     if (index === 0) {
-      if (!form.name.trim() || !form.dob || !isValidAadhaar(form.aadhaarNumber)) return "Complete and verify Aadhaar details";
-      if (fieldErrors.name || fieldErrors.dob || fieldErrors.aadhaarNumber) return fieldErrors.name || fieldErrors.dob || fieldErrors.aadhaarNumber;
-      if (!aadhaarVerified) return "Verify Aadhaar before continuing";
-    }
-    if (index === 1) {
       if (!isValidIndianPhone(form.phone)) return "Enter a valid 10-digit mobile number";
       if (fieldErrors.phone) return fieldErrors.phone;
       if (!otpState.phoneVerified) return "Verify your mobile number";
     }
-    if (index === 2) {
+    if (index === 1) {
       if (!isValidEmail(form.email)) return "Enter a valid email address";
       if (fieldErrors.email) return fieldErrors.email;
       if (!otpState.emailVerified) return "Verify your email";
+    }
+    if (index === 2) {
+      const aadhaar = cleanDigits(form.aadhaarNumber);
+      if (!form.name.trim()) return "Enter your full name";
+      if (!form.dob) return "Enter your date of birth";
+      if (fieldErrors.name || fieldErrors.dob) return fieldErrors.name || fieldErrors.dob;
+      if (aadhaar && !isValidAadhaar(aadhaar)) return "Enter a valid 12-digit Aadhaar number or leave it blank";
+      if (fieldErrors.aadhaarNumber) return fieldErrors.aadhaarNumber;
+      if (aadhaar && !aadhaarVerified) return "Verify Aadhaar or leave it blank for now";
     }
     if (index === 3) {
       if (!form.shop.trim()) return "Enter shop name";
@@ -2067,25 +2071,25 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   }
 
   function renderTailorStep() {
-    if (wizardStep === 0) {
+    if (wizardStep === 2) {
       return (
         <div className="wizard-grid">
-          <Field label="Aadhaar number" error={fieldErrors.aadhaarNumber} success={fieldSuccess.aadhaarNumber || (checking.aadhaarNumber ? "Checking..." : "")}>
-            <input value={form.aadhaarNumber} onChange={(e) => update("aadhaarNumber", e.target.value)} onBlur={() => checkAvailability("aadhaar", form.aadhaarNumber)} inputMode="numeric" maxLength={12} placeholder="12 digits" readOnly={aadhaarVerified} />
+          <Field label="Aadhaar number (optional for now)" error={fieldErrors.aadhaarNumber} hint="You can leave this blank and complete verification later." success={fieldSuccess.aadhaarNumber || (checking.aadhaarNumber ? "Checking..." : "")}>
+            <input value={form.aadhaarNumber} onChange={(e) => update("aadhaarNumber", e.target.value)} onBlur={() => checkAvailability("aadhaar", form.aadhaarNumber)} inputMode="numeric" maxLength={12} placeholder="12 digits (optional)" readOnly={aadhaarVerified} />
           </Field>
-          <Field label="Full name" error={fieldErrors.name} hint="Must match Aadhaar name">
+          <Field label="Full name" error={fieldErrors.name} hint={form.aadhaarNumber ? "Must match Aadhaar name when provided" : "Enter your legal name"}>
             <input value={form.name} onChange={(e) => update("name", e.target.value)} readOnly={aadhaarVerified} />
           </Field>
           <Field label="Date of birth" error={fieldErrors.dob}>
             <input value={form.dob} onChange={(e) => update("dob", e.target.value)} type="date" readOnly={aadhaarVerified} />
           </Field>
           <div className="span-2 inline-actions">
-            <button type="button" className="secondary-btn" onClick={verifyAadhaar} disabled={busy || aadhaarVerified}>{aadhaarVerified ? "Aadhaar Verified" : "Verify eKYC"}</button>
+            <button type="button" className="secondary-btn" onClick={verifyAadhaar} disabled={busy || aadhaarVerified || !isValidAadhaar(form.aadhaarNumber)}>{aadhaarVerified ? "Aadhaar Verified" : "Verify eKYC (optional)"}</button>
           </div>
         </div>
       );
     }
-    if (wizardStep === 1) {
+    if (wizardStep === 0) {
       return (
         <div className="wizard-grid">
           <Field label="Mobile number" error={fieldErrors.phone} success={otpState.phoneVerified ? "Mobile number verified" : fieldSuccess.phone || (checking.phone ? "Checking..." : "")}>
@@ -2101,7 +2105,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
         </div>
       );
     }
-    if (wizardStep === 2) {
+    if (wizardStep === 1) {
       return (
         <div className="wizard-grid">
           <Field label="Email" error={fieldErrors.email} success={otpState.emailVerified ? "Email verified" : fieldSuccess.email || (checking.email ? "Checking..." : "")}>

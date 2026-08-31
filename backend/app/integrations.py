@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.message import EmailMessage
+from email.utils import parseaddr
 import base64
 import json
 from pathlib import Path
@@ -28,28 +29,47 @@ class IntegrationResult:
 
 
 class EmailService:
-    def send(self, to_email: str, subject: str, body: str) -> dict:
+    def send(self, to_email: str, subject: str, body: str, purpose: str = "default") -> dict:
         raise NotImplementedError
 
 
+def _sender_for(purpose: str) -> str:
+    return {
+        "verify": settings.email_from_verify,
+        "bookings": settings.email_from_bookings,
+        "support": settings.email_from_support,
+        "payments": settings.email_from_payments,
+        "admin": settings.email_from_admin,
+    }.get((purpose or "default").lower(), settings.email_from_default)
+
+
+def _sender_parts(sender: str) -> tuple[str, str]:
+    """Return provider-safe address and optional display name."""
+    name, address = parseaddr(sender)
+    return address or sender, name
+
+
 class MockEmailService(EmailService):
-    def send(self, to_email: str, subject: str, body: str) -> dict:
+    def send(self, to_email: str, subject: str, body: str, purpose: str = "default") -> dict:
         outbox = Path(settings.email_outbox)
         outbox.parent.mkdir(parents=True, exist_ok=True)
         with outbox.open("a", encoding="utf-8") as f:
             f.write("\n--- " + datetime.now(timezone.utc).isoformat() + " ---\n")
             f.write("To: " + to_email + "\n")
+            f.write("From: " + _sender_for(purpose) + "\n")
             f.write("Subject: " + subject + "\n\n")
             f.write(body + "\n")
         return IntegrationResult(True, "mock", "mock", {"delivered": False, "via": "outbox", "file": str(outbox)}).as_dict()
 
 
 class SmtpEmailService(EmailService):
-    def send(self, to_email: str, subject: str, body: str) -> dict:
+    def send(self, to_email: str, subject: str, body: str, purpose: str = "default") -> dict:
         msg = EmailMessage()
-        msg["From"] = settings.email_from_address
+        msg["From"] = _sender_for(purpose)
         msg["To"] = to_email
         msg["Subject"] = subject
+        if settings.email_reply_to:
+            msg["Reply-To"] = settings.email_reply_to
         msg.set_content(body)
         def deliver() -> None:
             if settings.smtp_secure:
@@ -71,7 +91,9 @@ class SmtpEmailService(EmailService):
 
 
 class ApiEmailService(EmailService):
-    def send(self, to_email: str, subject: str, body: str) -> dict:
+    def send(self, to_email: str, subject: str, body: str, purpose: str = "default") -> dict:
+        sender = _sender_for(purpose)
+        sender_email, sender_name = _sender_parts(sender)
         if settings.email_provider == "ses":
             try:
                 import boto3
@@ -90,7 +112,7 @@ class ApiEmailService(EmailService):
                     "ses",
                     "send_email",
                     lambda: client.send_email(
-                        FromEmailAddress=settings.email_from_address,
+                        FromEmailAddress=sender,
                         Destination={"ToAddresses": [to_email]},
                         Content={"Simple": {"Subject": {"Data": subject}, "Body": {"Text": {"Data": body}}}},
                     ),
@@ -104,7 +126,7 @@ class ApiEmailService(EmailService):
                 return IntegrationResult(False, "sendgrid", "not_configured", {"delivered": False, "reason": "EMAIL_API_KEY is required"}).as_dict()
             payload = {
                 "personalizations": [{"to": [{"email": to_email}]}],
-                "from": {"email": settings.email_from_address},
+                "from": {"email": sender_email, **({"name": sender_name} if sender_name else {})},
                 "subject": subject,
                 "content": [{"type": "text/plain", "value": body}],
             }

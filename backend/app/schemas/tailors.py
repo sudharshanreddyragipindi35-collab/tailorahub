@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from .common import OrmModel
 
@@ -20,7 +20,9 @@ class TailorRegisterIn(BaseModel):
     email: EmailStr
     gender: str | None = Field(default=None, max_length=30)
     dob: date
-    aadhaar_number: str = Field(min_length=12, max_length=12)
+    # Temporarily optional during phased onboarding; supplied values remain
+    # fully validated and KYC-verified by the registration route.
+    aadhaar_number: str | None = Field(default=None, min_length=12, max_length=12)
     username: str = Field(min_length=4, max_length=80)
     password: str = Field(min_length=8)
     confirm_password: str | None = Field(default=None, min_length=8)
@@ -36,6 +38,11 @@ class TailorRegisterIn(BaseModel):
     bio: str | None = None
     expertise: list[str] = Field(default_factory=list)
     services: list["TailorRegisterServiceIn"] = Field(default_factory=list)
+
+    @field_validator("aadhaar_number", mode="before")
+    @classmethod
+    def blank_aadhaar_is_optional(cls, value):
+        return None if value is None or not str(value).strip() else value
 
 
 class TailorRegisterServiceIn(BaseModel):

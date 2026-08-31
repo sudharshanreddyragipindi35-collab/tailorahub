@@ -888,7 +888,7 @@ def notify(db: Session, to_ref: str, title: str, body: str, order_id: str | None
 def notify_and_email(db: Session, to_ref: str, email: str | None, title: str, body: str, order_id: str | None = None) -> None:
     notify(db, to_ref, title, body, order_id)
     if email:
-        send_email(email, title, body)
+        send_email(email, title, body, purpose="bookings" if order_id else "default")
 
 
 def notify_tailor_followers(db: Session, tailor_id: str, title: str, body: str) -> None:
@@ -1601,7 +1601,7 @@ def request_otp(body: OtpRequest, db: Session = Depends(db_session)):
         db.rollback()
         raise HTTPException(429 if exc.code == "cooldown" else 400, exc.message)
     user = fetch_one(db, "SELECT id FROM users WHERE lower(email)=:email AND status <> 'DELETED'", {"email": email})
-    delivery = send_email(email, "Your TailoraHub OTP", f"Your TailoraHub OTP is {code}. It is valid for {otp.OTP_TTL_MINUTES} minutes.")
+    delivery = send_email(email, "Your TailoraHub OTP", f"Your TailoraHub OTP is {code}. It is valid for {otp.OTP_TTL_MINUTES} minutes.", purpose="verify")
     response = {"sent": True, "registered": bool(user), "channel": "email", "delivery": delivery}
     if delivery.get("mode") == "mock":
         response["devOtp"] = code
@@ -1644,7 +1644,7 @@ def send_purpose_otp(body: OtpSendIn, db: Session = Depends(db_session)):
         raise HTTPException(429 if exc.code == "cooldown" else 400, exc.message)
     db.commit()
     if is_email:
-        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {otp.OTP_TTL_MINUTES} minutes.")
+        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {otp.OTP_TTL_MINUTES} minutes.", purpose="verify")
         mock_mode = delivery.get("mode") == "mock"
     else:
         delivery = sms_service().send_otp(clean_phone(target), code)
@@ -1802,20 +1802,23 @@ def register(body: RegisterIn, db: Session = Depends(db_session)):
             if fetch_one(db, "SELECT 1 FROM tailors WHERE lower(username)=:u", {"u": username.lower()}):
                 raise HTTPException(400, "This username is taken.")
             aadhaar = (body.aadhaarNumber or "").strip()
-            if not is_valid_aadhaar_format(aadhaar):
+            if aadhaar and not is_valid_aadhaar_format(aadhaar):
                 raise HTTPException(400, "Enter a valid 12-digit Aadhaar number")
             if not body.dob:
                 raise HTTPException(400, "Date of birth is required")
-            aadhaar_hash = hash_aadhaar(aadhaar)
-            if fetch_one(db, "SELECT 1 FROM tailors WHERE aadhaar_number_hash=:h", {"h": aadhaar_hash}):
+            aadhaar_hash = hash_aadhaar(aadhaar) if aadhaar else None
+            if aadhaar_hash and fetch_one(db, "SELECT 1 FROM tailors WHERE aadhaar_number_hash=:h", {"h": aadhaar_hash}):
                 raise HTTPException(400, "This Aadhaar number is already registered.")
             if not otp.is_recently_verified(db, phone, "registration_phone"):
                 raise HTTPException(400, "Verify your mobile number first")
             if not otp.is_recently_verified(db, body.email.lower(), "registration_email"):
                 raise HTTPException(400, "Verify your email first")
-            kyc = aadhaar_kyc_service().verify(aadhaar, body.name.strip())
-            if not kyc.get("verified"):
-                raise HTTPException(400, kyc.get("reason") or "Aadhaar verification failed")
+            aadhaar_verified = False
+            if aadhaar:
+                kyc = aadhaar_kyc_service().verify(aadhaar, body.name.strip())
+                if not kyc.get("verified"):
+                    raise HTTPException(400, kyc.get("reason") or "Aadhaar verification failed")
+                aadhaar_verified = True
 
             referred_by_tailor_id = None
             if body.referralCode:
@@ -1833,7 +1836,7 @@ def register(body: RegisterIn, db: Session = Depends(db_session)):
                         experience_years_base,stitching_since_date,terms_accepted,terms_accepted_at,referral_code,referred_by_tailor_id
                     ) VALUES (
                         :id,:user_id,:shop,:owner,:zone,:address,:lat,:lng,:profile_image,:expertise,:years,:working_hours,:bio,:portfolio,CAST(:docs AS jsonb),
-                        :full_name,:phone_number,:email,:username,:dob,:aadhaar_hash,:aadhaar_encrypted,TRUE,
+                        :full_name,:phone_number,:email,:username,:dob,:aadhaar_hash,:aadhaar_encrypted,:aadhaar_verified,
                         :experience_base,:stitching_since,TRUE,now(),:referral_code,:referred_by
                     )"""
                 ),
@@ -1852,14 +1855,15 @@ def register(body: RegisterIn, db: Session = Depends(db_session)):
                     "working_hours": body.workingHours or "10:00-20:00",
                     "bio": body.bio,
                     "portfolio": body.portfolio,
-                    "docs": json.dumps(docs),
+                    "docs": json.dumps({**docs, "aadhaarVerified": aadhaar_verified}),
                     "full_name": body.name.strip(),
                     "phone_number": phone,
                     "email": body.email.lower(),
                     "username": username,
                     "dob": body.dob,
                     "aadhaar_hash": aadhaar_hash,
-                    "aadhaar_encrypted": encrypt_aadhaar(aadhaar),
+                    "aadhaar_encrypted": encrypt_aadhaar(aadhaar) if aadhaar else None,
+                    "aadhaar_verified": aadhaar_verified,
                     "experience_base": body.experienceYearsBase or 0,
                     "stitching_since": body.stitchingSinceDate,
                     "referral_code": generate_tailor_referral_code(db),

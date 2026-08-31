@@ -573,13 +573,13 @@ async def register_tailor(body: TailorRegisterIn, db: AsyncSession = Depends(get
     phone = clean_phone(body.phone_number)
     email = str(body.email).lower()
     username = body.username.strip()
-    aadhaar = body.aadhaar_number.strip()
+    aadhaar = (body.aadhaar_number or "").strip()
     full_name = body.full_name.strip()
     gender = (body.gender or "").strip() or None
 
     if not PHONE_RE.fullmatch(phone):
         raise HTTPException(400, "Enter a valid 10-digit mobile number")
-    if not is_valid_aadhaar_format(aadhaar):
+    if aadhaar and not is_valid_aadhaar_format(aadhaar):
         raise HTTPException(400, "Enter a valid 12-digit Aadhaar number")
     if body.confirm_password is not None and body.password != body.confirm_password:
         raise HTTPException(400, "Password and confirm password must match")
@@ -592,7 +592,10 @@ async def register_tailor(body: TailorRegisterIn, db: AsyncSession = Depends(get
     if not body.address_text or body.latitude is None or body.longitude is None:
         raise HTTPException(400, "Confirm your fixed shop location")
 
-    for field, value in {"phone": phone, "email": email, "aadhaar": aadhaar, "username": username}.items():
+    duplicate_fields = {"phone": phone, "email": email, "username": username}
+    if aadhaar:
+        duplicate_fields["aadhaar"] = aadhaar
+    for field, value in duplicate_fields.items():
         message = await duplicate_message(db, field, value)
         if message:
             raise HTTPException(400, message)
@@ -604,17 +607,21 @@ async def register_tailor(body: TailorRegisterIn, db: AsyncSession = Depends(get
     if not await is_recently_verified(db, email_target, "registration_email"):
         raise HTTPException(400, "Verify your email first")
 
-    kyc = aadhaar_kyc_service().verify(aadhaar, full_name)
-    if not kyc.get("verified"):
-        raise HTTPException(400, kyc.get("reason") or "Aadhaar verification failed")
-    kyc_name = kyc.get("fullName")
-    if kyc_name and normalize_name(kyc_name) != normalize_name(full_name):
-        raise HTTPException(400, "Full name must match Aadhaar name")
-    returned_dob = kyc_dob(kyc.get("dob"))
-    if returned_dob and returned_dob != body.dob:
-        raise HTTPException(400, "DOB must match Aadhaar record")
+    aadhaar_verified = False
+    kyc = {}
+    if aadhaar:
+        kyc = aadhaar_kyc_service().verify(aadhaar, full_name)
+        if not kyc.get("verified"):
+            raise HTTPException(400, kyc.get("reason") or "Aadhaar verification failed")
+        kyc_name = kyc.get("fullName")
+        if kyc_name and normalize_name(kyc_name) != normalize_name(full_name):
+            raise HTTPException(400, "Full name must match Aadhaar name")
+        returned_dob = kyc_dob(kyc.get("dob"))
+        if returned_dob and returned_dob != body.dob:
+            raise HTTPException(400, "DOB must match Aadhaar record")
+        aadhaar_verified = True
 
-    aadhaar_hash = hash_aadhaar(aadhaar)
+    aadhaar_hash = hash_aadhaar(aadhaar) if aadhaar else None
     referral_code = (body.referral_code or "").strip().upper() or None
     referred_by_tailor_id = None
     if referral_code:
@@ -664,7 +671,7 @@ async def register_tailor(body: TailorRegisterIn, db: AsyncSession = Depends(get
                     referral_code,referred_by_tailor_id,status,approval_status,verified,account_status
                   ) VALUES (
                     :id,:user_id,:shop,:owner,:zone_id,:address,:lat,:lng,CAST(:expertise AS text[]),:years,:bio,CAST(:documents AS jsonb),
-                    :full_name,:phone,:email,:username,:dob,:aadhaar_hash,:aadhaar_encrypted,TRUE,
+                    :full_name,:phone,:email,:username,:dob,:aadhaar_hash,:aadhaar_encrypted,:aadhaar_verified,
                     :password_hash,:experience_years,:stitching_since,TRUE,now(),
                     :referral_code,:referred_by,'active','PENDING_APPROVAL',FALSE,'ACTIVE'
                   )
@@ -682,14 +689,15 @@ async def register_tailor(body: TailorRegisterIn, db: AsyncSession = Depends(get
                 "expertise": expertise,
                 "years": years_int,
                 "bio": body.bio,
-                "documents": json.dumps({"aadhaarVerified": True, "gender": gender}),
+                "documents": json.dumps({"aadhaarVerified": aadhaar_verified, "gender": gender}),
                 "full_name": full_name,
                 "phone": phone,
                 "email": email,
                 "username": username,
                 "dob": body.dob,
                 "aadhaar_hash": aadhaar_hash,
-                "aadhaar_encrypted": encrypt_aadhaar(aadhaar),
+                "aadhaar_encrypted": encrypt_aadhaar(aadhaar) if aadhaar else None,
+                "aadhaar_verified": aadhaar_verified,
                 "password_hash": hash_password(body.password),
                 "experience_years": body.experience_years_base,
                 "stitching_since": body.stitching_since_date,
