@@ -121,6 +121,22 @@ class Settings:
     realtime_ticket_seconds = env_int("REALTIME_TICKET_SECONDS", 120)
     redis_url = env_value("REDIS_URL", "redis://localhost:6379/0")
 
+    traffic_store_backend = env_value("TRAFFIC_STORE_BACKEND", "memory").lower()
+    public_cache_ttl_seconds = env_int("PUBLIC_CACHE_TTL_SECONDS", 60)
+    rate_limit_enabled = env_bool("RATE_LIMIT_ENABLED", True)
+    rate_limit_general_per_minute = env_int("RATE_LIMIT_GENERAL_PER_MINUTE", 300)
+    rate_limit_auth_per_minute = env_int("RATE_LIMIT_AUTH_PER_MINUTE", 10)
+    rate_limit_otp_per_minute = env_int("RATE_LIMIT_OTP_PER_MINUTE", 5)
+    rate_limit_payment_per_minute = env_int("RATE_LIMIT_PAYMENT_PER_MINUTE", 10)
+    rate_limit_upload_per_minute = env_int("RATE_LIMIT_UPLOAD_PER_MINUTE", 20)
+    max_request_body_bytes = env_int("MAX_REQUEST_BODY_BYTES", 2 * 1024 * 1024)
+    max_upload_request_bytes = env_int("MAX_UPLOAD_REQUEST_BYTES", 25 * 1024 * 1024)
+    client_ip_trusted_proxy_networks = [
+        value.strip()
+        for value in env_value("CLIENT_IP_TRUSTED_PROXY_NETWORKS", "127.0.0.1/32,::1/128").split(",")
+        if value.strip()
+    ]
+
     service_role = env_value("SERVICE_ROLE", "web").lower()
     task_queue_backend = env_value("TASK_QUEUE_BACKEND", "inline").lower()
     sqs_task_queue_url = env_value("SQS_TASK_QUEUE_URL")

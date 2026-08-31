@@ -1,4 +1,4 @@
-# Phase 1, Phase 2, Phase 3, and Phase 4 pending items
+# Phase 1 through Phase 5 pending items
 
 This file is the single backlog for production-account work and measured validation intentionally deferred while implementation continues.
 
@@ -42,3 +42,16 @@ The Phase 3 source implementation and required environment variables are documen
 6. Force one safe test job to exceed its retry limit and confirm it reaches the DLQ with no duplicate delivery.
 
 The Phase 4 implementation and provider-variable templates are documented in `PHASE4_IMPLEMENTATION.md`.
+
+## Phase 5: AWS traffic protection and measured tuning
+
+1. Set `TRAFFIC_STORE_BACKEND=redis` and point `REDIS_URL` at the shared ElastiCache/Valkey endpoint.
+2. Set `CLIENT_IP_TRUSTED_PROXY_NETWORKS` to only the actual ALB/VPC proxy CIDRs, then verify the application records the real public client IP.
+3. Deploy `deployment/phase5-waf-cloudformation.yml` against the production backend ALB.
+4. Associate a CloudFront-scope WAF web ACL with the public Amplify/CloudFront frontend where the selected Amplify plan and region support it.
+5. Exercise login, OTP, payment, upload, and ordinary API limits and confirm clear `429` responses and `Retry-After` headers.
+6. Send an oversized normal request and upload and confirm both are rejected with `413` before endpoint processing.
+7. Verify cache `HIT`/`MISS` behaviour and invalidation while requests alternate between at least two backend tasks.
+8. Review CloudWatch/WAF samples after representative traffic and tune limits without weakening OTP, authentication, payment, or upload protection.
+
+The Phase 5 source implementation and environment-variable templates are documented in `PHASE5_IMPLEMENTATION.md`.

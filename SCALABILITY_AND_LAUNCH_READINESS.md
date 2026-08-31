@@ -117,15 +117,16 @@ Move operations that do not need to block the user request into SQS-backed worke
 
 ## Phase 5: Caching and traffic protection
 
-- [ ] Use ElastiCache Redis/Valkey for safe short-lived caching.
-- [ ] Cache frequently viewed, slowly changing tailor summaries and service data.
-- [ ] Invalidate or refresh cached values after updates.
-- [ ] Do not cache user-private responses under shared keys.
-- [ ] Add API rate limiting by IP and authenticated user.
-- [ ] Apply strict limits to login, registration, forgot-password, OTP, payment, and upload endpoints.
+- [x] Use ElastiCache Redis/Valkey for safe short-lived caching (source complete; AWS provisioning remains in the pending backlog).
+- [x] Cache frequently viewed, slowly changing tailor summaries and service data.
+- [x] Invalidate or refresh cached values after updates.
+- [x] Do not cache user-private responses under shared keys.
+- [x] Add API rate limiting by IP and authenticated user.
+- [x] Apply strict limits to login, registration, forgot-password, OTP, payment, and upload endpoints.
 - [ ] Add AWS WAF managed protection and rate-based rules.
-- [ ] Return clear `429 Too Many Requests` responses when a limit is reached.
-- [ ] Add request body and upload size limits.
+- [x] Prepare an AWS WAF managed-protection and rate-rule deployment template.
+- [x] Return clear `429 Too Many Requests` responses when a limit is reached.
+- [x] Add request body and upload size limits.
 
 ## Phase 6: External integrations and failure isolation
 

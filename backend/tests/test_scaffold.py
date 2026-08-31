@@ -7,6 +7,14 @@ from pathlib import Path
 import pytest
 from fastapi import HTTPException, WebSocketDisconnect
 from sqlalchemy import text
+from app.middleware.traffic import (
+    MemoryTrafficStore,
+    TrafficProtectionMiddleware,
+    classify_rate_limit,
+    is_public_cache_path,
+    should_cache,
+    should_invalidate_public_cache,
+)
 
 from app.api.v1 import api_router
 from app.api.v1.admin import verify_payment_intent
@@ -280,6 +288,120 @@ def test_web_container_does_not_run_scheduler_or_migrations_from_docker_cmd():
     assert "migration) exec alembic upgrade head" in dockerfile
     assert "configure_jobs" not in main_source
     assert "scheduler.start" not in main_source
+
+
+def test_phase5_cache_allowlist_never_includes_private_responses():
+    assert is_public_cache_path("/api/reference")
+    assert is_public_cache_path("/api/tailors")
+    assert is_public_cache_path("/api/tailors/t-1/services")
+    assert is_public_cache_path("/api/v1/tailors/t-1/services")
+    assert not is_public_cache_path("/api/customer/tailors")
+    assert not should_cache(
+        {"method": "GET", "path": "/api/tailors"},
+        {"authorization": "Bearer private-token"},
+    )
+    assert should_invalidate_public_cache("PATCH", "/api/tailor/me")
+    assert not should_invalidate_public_cache("GET", "/api/tailors")
+
+
+def test_phase5_strict_routes_have_lower_limits():
+    general = classify_rate_limit("/api/reference")
+    otp = classify_rate_limit("/api/v1/otp/send")
+    auth = classify_rate_limit("/api/v1/auth/login")
+    payment = classify_rate_limit("/api/v1/bookings/id/pay")
+    upload = classify_rate_limit("/api/tailor/media")
+    assert general[0] == "general"
+    assert otp[0] == "otp" and otp[1] < general[1]
+    assert auth[0] == "auth" and auth[1] < general[1]
+    assert payment[0] == "payment" and payment[1] < general[1]
+    assert upload[0] == "upload" and upload[1] < general[1]
+
+
+@pytest.mark.asyncio
+async def test_phase5_public_cache_hits_without_recalling_application(monkeypatch):
+    monkeypatch.setattr("app.middleware.traffic.settings.rate_limit_enabled", False)
+    calls = []
+
+    async def downstream(scope, receive, send):
+        calls.append(scope["path"])
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", b"application/json")]})
+        await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+    middleware = TrafficProtectionMiddleware(downstream, store=MemoryTrafficStore())
+    scope = {
+        "type": "http", "method": "GET", "path": "/api/reference", "query_string": b"",
+        "headers": [], "client": ("127.0.0.1", 5000),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    responses = []
+
+    async def send(message):
+        responses.append(message)
+
+    await middleware(scope, receive, send)
+    await middleware(scope, receive, send)
+    assert calls == ["/api/reference"]
+    starts = [message for message in responses if message["type"] == "http.response.start"]
+    assert any((b"x-cache", b"MISS") in message["headers"] for message in starts)
+    assert any((b"x-cache", b"HIT") in message["headers"] for message in starts)
+
+
+@pytest.mark.asyncio
+async def test_phase5_rejects_oversized_declared_body(monkeypatch):
+    monkeypatch.setattr("app.middleware.traffic.settings.rate_limit_enabled", False)
+    monkeypatch.setattr("app.middleware.traffic.settings.max_request_body_bytes", 10)
+    called = False
+
+    async def downstream(scope, receive, send):
+        nonlocal called
+        called = True
+
+    middleware = TrafficProtectionMiddleware(downstream, store=MemoryTrafficStore())
+    scope = {
+        "type": "http", "method": "POST", "path": "/api/v1/auth/login", "query_string": b"",
+        "headers": [(b"content-length", b"11")], "client": ("127.0.0.1", 5000),
+    }
+    responses = []
+
+    async def send(message):
+        responses.append(message)
+
+    await middleware(scope, lambda: None, send)
+    assert called is False
+    assert responses[0]["status"] == 413
+
+
+@pytest.mark.asyncio
+async def test_phase5_rate_limit_returns_429_and_retry_after(monkeypatch):
+    monkeypatch.setattr("app.middleware.traffic.settings.rate_limit_enabled", True)
+    monkeypatch.setattr("app.middleware.traffic.settings.rate_limit_otp_per_minute", 1)
+
+    async def downstream(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}"})
+
+    middleware = TrafficProtectionMiddleware(downstream, store=MemoryTrafficStore())
+    scope = {
+        "type": "http", "method": "GET", "path": "/api/v1/otp/scaffold", "query_string": b"",
+        "headers": [], "client": ("203.0.113.20", 5000),
+    }
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    responses = []
+
+    async def send(message):
+        responses.append(message)
+
+    await middleware(scope, receive, send)
+    await middleware(scope, receive, send)
+    starts = [message for message in responses if message["type"] == "http.response.start"]
+    limited = next(message for message in starts if message["status"] == 429)
+    assert any(key == b"retry-after" for key, _ in limited["headers"])
 
 
 def test_large_collection_routes_expose_bounded_pagination():

@@ -41,6 +41,7 @@ from .settings import settings
 from .services.media_storage import MediaStorageError, get_media_storage, validate_file_signature
 from .services.tracker_service import tracker_connections
 from .tasks.queue import enqueue_task
+from .middleware.traffic import TrafficProtectionMiddleware
 
 
 UPLOADS_DIR = settings.base_dir / "uploads"
@@ -50,6 +51,7 @@ app = FastAPI(title="TailoraHub API", version="1.0.0")
 if settings.media_storage_backend == "local":
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+app.add_middleware(TrafficProtectionMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins + ["http://localhost:3000", "http://127.0.0.1:5173"],
@@ -1396,6 +1398,8 @@ async def startup() -> None:
             raise RuntimeError("Production requires CLOUDFRONT_MEDIA_BASE_URL")
         if settings.realtime_backplane != "redis":
             raise RuntimeError("Production requires REALTIME_BACKPLANE=redis")
+        if settings.traffic_store_backend != "redis":
+            raise RuntimeError("Production requires TRAFFIC_STORE_BACKEND=redis for shared caching and rate limits")
         if "localhost" in settings.redis_url or "127.0.0.1" in settings.redis_url:
             raise RuntimeError("Production REDIS_URL must point to the shared Redis/Valkey service")
     await tracker_connections.start()
@@ -1423,6 +1427,11 @@ def health(db: Session = Depends(db_session)):
         "serverTime": now["now"],
         "mediaStorage": settings.media_storage_backend,
         "realtime": tracker_connections.status,
+        "trafficProtection": {
+            "store": settings.traffic_store_backend,
+            "rateLimiting": settings.rate_limit_enabled,
+            "publicCacheTtlSeconds": settings.public_cache_ttl_seconds,
+        },
     }
 
 

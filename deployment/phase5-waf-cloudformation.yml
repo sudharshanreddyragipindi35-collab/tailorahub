@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: TailoraHub Phase 5 regional WAF protection for the public backend ALB.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+  TargetResourceArn:
+    Type: String
+    Description: ARN of the internet-facing Application Load Balancer.
+  RequestsPerFiveMinutesPerIp:
+    Type: Number
+    Default: 2000
+    MinValue: 100
+
+Resources:
+  PublicApiWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub tailorahub-${EnvironmentName}-public-api
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub tailorahub-${EnvironmentName}-public-api
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: AwsCommonRules
+          Priority: 10
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-common-rules
+            SampledRequestsEnabled: true
+        - Name: AwsKnownBadInputs
+          Priority: 20
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-known-bad-inputs
+            SampledRequestsEnabled: true
+        - Name: AwsIpReputation
+          Priority: 30
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesAmazonIpReputationList
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: aws-ip-reputation
+            SampledRequestsEnabled: true
+        - Name: PerIpRequestRate
+          Priority: 40
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              AggregateKeyType: IP
+              Limit: !Ref RequestsPerFiveMinutesPerIp
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: per-ip-request-rate
+            SampledRequestsEnabled: true
+
+  PublicApiWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Ref TargetResourceArn
+      WebACLArn: !GetAtt PublicApiWebAcl.Arn
+
+Outputs:
+  WebAclArn:
+    Value: !GetAtt PublicApiWebAcl.Arn
+  WebAclId:
+    Value: !GetAtt PublicApiWebAcl.Id
