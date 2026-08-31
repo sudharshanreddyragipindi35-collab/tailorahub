@@ -137,6 +137,8 @@ def request_client_ip(scope: dict, headers: dict[str, str]) -> str:
 
 def classify_rate_limit(path: str) -> tuple[str, int]:
     normalized = path.lower()
+    if "/webhooks/" in normalized:
+        return "webhook", settings.rate_limit_webhook_per_minute
     if "/otp" in normalized or "forgot-password" in normalized or "reset-password" in normalized:
         return "otp", settings.rate_limit_otp_per_minute
     if any(value in normalized for value in ("/login", "/register", "check-availability", "/auth/refresh")):

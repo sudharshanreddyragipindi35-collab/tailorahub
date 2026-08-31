@@ -1,4 +1,4 @@
-# Phase 1 through Phase 5 pending items
+# Phase 1 through Phase 6 pending items
 
 This file is the single backlog for production-account work and measured validation intentionally deferred while implementation continues.
 
@@ -55,3 +55,17 @@ The Phase 4 implementation and provider-variable templates are documented in `PH
 8. Review CloudWatch/WAF samples after representative traffic and tune limits without weakening OTP, authentication, payment, or upload protection.
 
 The Phase 5 source implementation and environment-variable templates are documented in `PHASE5_IMPLEMENTATION.md`.
+
+## Phase 6: live-provider and webhook validation
+
+1. Add the production `RAZORPAY_WEBHOOK_SECRET` through AWS Secrets Manager or SSM, never Git or a Docker image.
+2. Register `https://api.tailorahub.com/api/v1/payments/webhooks/razorpay` in the Razorpay dashboard for `payment.captured` and `order.paid` events.
+3. Run signed sandbox events followed by one real low-value payment and confirm the booking, payment intent, tailor wallet, and admin wallet update exactly once.
+4. Replay an identical event, send an invalid signature, and deliver supported events out of order; verify deduplication and no duplicate wallet credit or notification.
+5. Activate real email and SMS credentials when available and measure provider latency, timeout, queue retry, DLQ, and circuit-open behaviour.
+6. Select and implement the production Aadhaar KYC provider only after its compliance, consent, data-retention, and API requirements are approved.
+7. Select and implement a live payout provider only after settlement, reconciliation, and beneficiary-verification requirements are approved.
+8. Run controlled provider-failure tests and confirm slow email, SMS, Razorpay, KYC, and payout services do not affect unrelated API requests.
+9. Review production logs and traces to confirm URLs, authorization headers, OTPs, Aadhaar values, API keys, secrets, and full provider payloads are not recorded.
+
+The Phase 6 source implementation and production variables are documented in `PHASE6_IMPLEMENTATION.md`.

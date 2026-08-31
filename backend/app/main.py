@@ -277,6 +277,8 @@ class RazorpayVerifyPaymentIn(BaseModel):
 
 @app.post("/api/create-order")
 async def create_standard_razorpay_order(body: RazorpayCreateOrderIn):
+    if settings.app_env == "production":
+        raise HTTPException(404, "Use the authenticated booking payment endpoint.")
     if body.amount < 100:
         raise HTTPException(400, "Amount must be at least 100 paise.")
     currency = body.currency.strip().upper()
@@ -308,6 +310,8 @@ async def create_standard_razorpay_order(body: RazorpayCreateOrderIn):
 
 @app.post("/api/verify-payment")
 async def verify_standard_razorpay_payment(body: RazorpayVerifyPaymentIn):
+    if settings.app_env == "production":
+        raise HTTPException(404, "Use the authenticated booking payment endpoint.")
     order_id = (body.razorpay_order_id or body.order_id or "").strip()
     payment_id = (body.razorpay_payment_id or body.payment_id or "").strip()
     signature = (body.razorpay_signature or "").strip()
@@ -1400,6 +1404,8 @@ async def startup() -> None:
             raise RuntimeError("Production requires REALTIME_BACKPLANE=redis")
         if settings.traffic_store_backend != "redis":
             raise RuntimeError("Production requires TRAFFIC_STORE_BACKEND=redis for shared caching and rate limits")
+        if settings.payment_provider == "razorpay" and not settings.razorpay_webhook_secret:
+            raise RuntimeError("Production Razorpay requires RAZORPAY_WEBHOOK_SECRET")
         if "localhost" in settings.redis_url or "127.0.0.1" in settings.redis_url:
             raise RuntimeError("Production REDIS_URL must point to the shared Redis/Valkey service")
     await tracker_connections.start()
@@ -2042,6 +2048,8 @@ def unfollow_tailor(tailor_id: str, customer: dict = Depends(customer_user), db:
 
 @app.post("/api/customer/booking-requests", status_code=201)
 def create_booking_request(body: BookingCreate, customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
+    if settings.app_env == "production":
+        raise HTTPException(410, "This legacy booking endpoint is disabled. Use /api/v1/bookings.")
     measurement_mode = body.measurementMode.upper()
     if measurement_mode not in {"HOME", "SHOP"}:
         raise HTTPException(400, "Measurement mode must be HOME or SHOP")
@@ -2229,6 +2237,8 @@ def close_customer_support_ticket(ticket_id: str, customer: dict = Depends(custo
 
 @app.post("/api/customer/orders/{order_id}/pay")
 def pay_order(order_id: str, body: PaymentIn, customer: dict = Depends(customer_user), db: Session = Depends(db_session)):
+    if settings.app_env == "production":
+        raise HTTPException(410, "This legacy payment endpoint is disabled. Use the verified Razorpay booking checkout.")
     order = fetch_one(db, "SELECT * FROM orders WHERE id=:id AND customer_id=:uid", {"id": order_id, "uid": customer["id"]})
     if not order:
         raise HTTPException(404, "Order not found")

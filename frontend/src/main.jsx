@@ -4635,6 +4635,7 @@ function CustomerOrderCard({ order, reload }) {
   const [detailsOpen, setDetailsOpen] = useState(deepLinked);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const paymentRequestKeyRef = useRef(null);
 
   async function loadStatus() {
     try {
@@ -4681,7 +4682,9 @@ function CustomerOrderCard({ order, reload }) {
     try {
       const currentBreakdown = breakdown || await api.bookingPaymentBreakdown(order.id);
       setBreakdown(currentBreakdown);
-      const res = await api.payBooking(order.id, { method: "razorpay" });
+      const idempotencyKey = paymentRequestKeyRef.current || crypto.randomUUID();
+      paymentRequestKeyRef.current = idempotencyKey;
+      const res = await api.payBooking(order.id, { method: "razorpay", idempotencyKey });
       const nextIntent = res.paymentIntent || res.payment_intent || null;
       if (nextIntent) setPaymentIntent(nextIntent);
       const checkoutOptions = res.razorpayCheckout || res.checkout;
@@ -4694,12 +4697,14 @@ function CustomerOrderCard({ order, reload }) {
         razorpay_signature: paymentResult.razorpay_signature,
       });
       const verifiedIntent = verified.paymentIntent || verified.payment_intent || nextIntent;
+      paymentRequestKeyRef.current = null;
       if (verifiedIntent) setPaymentIntent(verifiedIntent);
       setMessage(verified.message || "Payment completed securely through Razorpay. Delivery OTP is now enabled.");
       if (res.breakdown) setBreakdown(res.breakdown);
       await loadStatus();
       await reload();
     } catch (err) {
+      if (/expired|cancelled|already/i.test(err.message || "")) paymentRequestKeyRef.current = null;
       setMessage(err.message);
     } finally {
       setBusy(false);

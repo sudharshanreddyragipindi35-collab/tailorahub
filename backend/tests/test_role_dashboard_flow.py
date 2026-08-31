@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 import hashlib
 import hmac
+import json
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -123,6 +124,7 @@ def _cleanup_flow_data(engine, phone: str, email: str, username: str) -> None:
 
         if order_ids:
             _delete_in(conn, "admin_wallet_transactions", "source_booking_id", order_ids)
+            _delete_in(conn, "payment_webhook_events", "booking_id", order_ids)
             _delete_in(conn, "payment_intents", "booking_id", order_ids)
             _delete_in(conn, "disputes", "booking_id", order_ids)
             _delete_in(conn, "wallet_transactions", "reference_booking_id", order_ids)
@@ -188,6 +190,8 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
     monkeypatch.setattr(main_module, "ADMIN_ALLOWED_NETWORKS", [])
     monkeypatch.setattr(otp_module.secrets, "randbelow", lambda upper_bound: 123456)
     gateway_secret = "integration-secret"
+    webhook_secret = "integration-webhook-secret"
+    monkeypatch.setattr(settings, "razorpay_webhook_secret", webhook_secret)
     monkeypatch.setattr(bookings_module, "razorpay_credentials", lambda: ("rzp_test_integration", gateway_secret))
     monkeypatch.setattr(bookings_module, "create_razorpay_order_sync", lambda key, secret, payload: {"id": "order_integration_123", "status": "created"})
     suffix = str(time.time_ns())[-9:]
@@ -336,7 +340,11 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
             gated_otp = client.post(f"/api/v1/bookings/{booking_id}/send-delivery-otp", headers=tailor_headers)
             assert gated_otp.status_code == 403
 
-            pay_request = client.post(f"/api/v1/bookings/{booking_id}/pay", json={"method": "razorpay"}, headers=customer_headers)
+            pay_request = client.post(
+                f"/api/v1/bookings/{booking_id}/pay",
+                json={"method": "razorpay", "idempotencyKey": f"payment-{booking_id}"},
+                headers=customer_headers,
+            )
             assert pay_request.status_code == 200, pay_request.text
             payment_json = pay_request.json()
             assert payment_json["paymentIntent"]["status"] == "pending"
@@ -350,6 +358,48 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
             assert still_gated_otp.status_code == 403
 
             gateway_payment_id = "pay_integration_123"
+            webhook_payload = json.dumps(
+                {
+                    "event": "payment.captured",
+                    "payload": {
+                        "payment": {
+                            "entity": {
+                                "id": gateway_payment_id,
+                                "order_id": "order_integration_123",
+                                "status": "captured",
+                            }
+                        }
+                    },
+                },
+                separators=(",", ":"),
+            ).encode()
+            invalid_webhook = client.post(
+                "/api/v1/payments/webhooks/razorpay",
+                content=webhook_payload,
+                headers={"Content-Type": "application/json", "X-Razorpay-Signature": "invalid"},
+            )
+            assert invalid_webhook.status_code == 401
+            webhook_signature = hmac.new(webhook_secret.encode(), webhook_payload, hashlib.sha256).hexdigest()
+            webhook_headers = {
+                "Content-Type": "application/json",
+                "X-Razorpay-Signature": webhook_signature,
+                "X-Razorpay-Event-Id": f"evt_{suffix}",
+            }
+            captured_webhook = client.post(
+                "/api/v1/payments/webhooks/razorpay",
+                content=webhook_payload,
+                headers=webhook_headers,
+            )
+            assert captured_webhook.status_code == 200, captured_webhook.text
+            assert captured_webhook.json()["status"] == "completed"
+            duplicate_webhook = client.post(
+                "/api/v1/payments/webhooks/razorpay",
+                content=webhook_payload,
+                headers=webhook_headers,
+            )
+            assert duplicate_webhook.status_code == 200, duplicate_webhook.text
+            assert duplicate_webhook.json()["duplicate"] is True
+
             signature = hmac.new(gateway_secret.encode(), f"order_integration_123|{gateway_payment_id}".encode(), hashlib.sha256).hexdigest()
             verified_payment = client.post(f"/api/v1/bookings/{booking_id}/razorpay/verify", json={
                 "razorpay_order_id": "order_integration_123",

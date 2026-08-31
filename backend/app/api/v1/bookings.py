@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from urllib import error as urllib_error, request as urllib_request
 from urllib.parse import quote_plus
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -32,6 +32,8 @@ from app.qr import generate_wallet_qr
 from app.services.tracker_service import tracker_connections
 from app.services.media_storage import MediaStorageError, get_media_storage, validate_file_signature
 from app.services.booking_rules import APP_TIMEZONE, BookingRuleError, calculate_booking, zoned_slot
+from app.services.external_resilience import CircuitOpenError, external_call, external_timeout_seconds
+from app.settings import settings as runtime_settings
 
 
 router = APIRouter()
@@ -91,6 +93,7 @@ class StageUpdateIn(BaseModel):
 class PaymentIn(BaseModel):
     method: str = "razorpay"
     txn_ref: str | None = Field(default=None, alias="txnRef")
+    idempotency_key: str | None = Field(default=None, alias="idempotencyKey", min_length=8, max_length=100)
 
 
 class RazorpayVerifyIn(BaseModel):
@@ -538,29 +541,25 @@ def create_razorpay_order_sync(key_id: str, key_secret: str, payload: dict) -> d
         },
     )
     try:
-        with urllib_request.urlopen(req, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8"))
+        def create_order() -> dict:
+            with urllib_request.urlopen(req, timeout=external_timeout_seconds()) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        # Creating a gateway order is a POST and is not automatically retried:
+        # an ambiguous timeout could otherwise create multiple live orders.
+        return external_call("razorpay", "create_order", create_order, retry_safe=False)
     except urllib_error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "ignore")
-        message = detail[:300] or "No details returned."
-        try:
-            parsed = json.loads(detail)
-            razorpay_message = parsed.get("error", {}).get("description")
-            if razorpay_message:
-                message = razorpay_message
-        except Exception:
-            pass
-        if exc.code in {401, 403} or "authentication failed" in message.lower():
+        if exc.code in {401, 403}:
             raise HTTPException(
                 401,
                 "Razorpay authentication failed. The backend is still using an old or mismatched Razorpay key/secret pair. "
                 "Update RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in backend .env or the server container environment, then restart the backend.",
             )
         if exc.code == 400:
-            raise HTTPException(400, f"Razorpay rejected the order request. {message}")
-        raise HTTPException(500, f"Razorpay order creation failed. {message}")
-    except urllib_error.URLError as exc:
-        raise HTTPException(500, f"Could not connect to Razorpay: {exc.reason}")
+            raise HTTPException(400, "Razorpay rejected the order request. Check the amount and booking reference.")
+        raise HTTPException(502, "Razorpay is temporarily unavailable. No payment was applied.")
+    except (urllib_error.URLError, TimeoutError, CircuitOpenError):
+        raise HTTPException(503, "Razorpay is temporarily unavailable. No payment was applied.")
 
 
 async def create_razorpay_order(key_id: str, key_secret: str, payload: dict) -> dict:
@@ -1250,13 +1249,21 @@ async def preview_booking(
 @router.post("")
 async def create_booking(
     body: BookingCreateIn,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
     customer: dict = Depends(get_current_customer),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     await ensure_measurement_visit_schema(db)
-    if body.idempotency_key:
-        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"{customer['id']}:{body.idempotency_key}"})
-        existing = await fetch_one(db, "SELECT id,code,status FROM orders WHERE customer_id=:customer_id AND client_request_id=:key LIMIT 1", {"customer_id": customer["id"], "key": body.idempotency_key})
+    if body.idempotency_key and idempotency_key_header and body.idempotency_key != idempotency_key_header:
+        raise HTTPException(409, "Body and header idempotency keys do not match.")
+    idempotency_key = (body.idempotency_key or idempotency_key_header or "").strip() or None
+    if idempotency_key and not 8 <= len(idempotency_key) <= 100:
+        raise HTTPException(400, "Idempotency-Key must contain between 8 and 100 characters.")
+    if runtime_settings.app_env == "production" and not idempotency_key:
+        raise HTTPException(400, "An idempotency key is required to create a booking.")
+    if idempotency_key:
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"{customer['id']}:{idempotency_key}"})
+        existing = await fetch_one(db, "SELECT id,code,status FROM orders WHERE customer_id=:customer_id AND client_request_id=:key LIMIT 1", {"customer_id": customer["id"], "key": idempotency_key})
         if existing:
             detail = await fetch_booking_detail(db, existing["id"])
             return {"booking": public_booking(detail, {"id": customer["id"], "roles": ["customer"]}), "code": existing["code"], "status": existing["status"], "message": f"Booking {existing['code']} was already submitted.", "duplicate": True}
@@ -1443,7 +1450,7 @@ async def create_booking(
             "customer_location_lat": body.customer_location_lat if measurement_mode == "tailor_visits_customer" else None,
             "customer_location_lng": body.customer_location_lng if measurement_mode == "tailor_visits_customer" else None,
             "customer_location_confirmed_at": None,
-            "client_request_id": body.idempotency_key,
+            "client_request_id": idempotency_key,
         },
     )
     order = dict(result.mappings().first())
@@ -2042,6 +2049,7 @@ async def mark_gateway_payment_paid(
 async def pay_booking(
     booking_id: str,
     body: PaymentIn,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
     customer: dict = Depends(get_current_customer),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -2072,6 +2080,54 @@ async def pay_booking(
     if method != "razorpay":
         raise HTTPException(400, "Only Razorpay secure checkout is enabled for customer payments.")
     key_id, key_secret = require_razorpay_credentials()
+
+    if body.idempotency_key and idempotency_key_header and body.idempotency_key != idempotency_key_header:
+        raise HTTPException(409, "Body and header idempotency keys do not match.")
+    idempotency_key = (body.idempotency_key or idempotency_key_header or "").strip() or None
+    if idempotency_key and not 8 <= len(idempotency_key) <= 100:
+        raise HTTPException(400, "Idempotency-Key must contain between 8 and 100 characters.")
+    if runtime_settings.app_env == "production" and not idempotency_key:
+        raise HTTPException(400, "An idempotency key is required to create a payment checkout.")
+    if idempotency_key:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:key))"),
+            {"key": f"payment:{customer['id']}:{idempotency_key}"},
+        )
+        existing_request = await fetch_one(
+            db,
+            "SELECT * FROM payment_intents WHERE customer_id=:customer_id AND client_request_id=:key LIMIT 1",
+            {"customer_id": customer["id"], "key": idempotency_key},
+        )
+        if existing_request:
+            if existing_request["booking_id"] != booking_id:
+                raise HTTPException(409, "This payment idempotency key was already used for another booking.")
+            if existing_request.get("status") == "pending":
+                existing_expiry = existing_request.get("expires_at")
+                if existing_expiry:
+                    if existing_expiry.tzinfo is None:
+                        existing_expiry = existing_expiry.replace(tzinfo=timezone.utc)
+                    if existing_expiry <= datetime.now(timezone.utc):
+                        await db.execute(
+                            text("UPDATE payment_intents SET status='expired',updated_at=now() WHERE id=:id"),
+                            {"id": existing_request["id"]},
+                        )
+                        await db.commit()
+                        raise HTTPException(409, "This payment request is expired. Start a new payment attempt.")
+                checkout = razorpay_public_checkout_payload(order, existing_request, breakdown, key_id)
+                intent_payload = payment_intent_payload(existing_request)
+                return {
+                    "ok": True,
+                    "provider": "razorpay",
+                    "booking": public_booking(order),
+                    "breakdown": breakdown,
+                    "paymentIntent": intent_payload,
+                    "payment_intent": intent_payload,
+                    "checkout": checkout,
+                    "razorpayCheckout": checkout,
+                    "duplicate": True,
+                    "message": "The existing secure Razorpay checkout was returned.",
+                }
+            raise HTTPException(409, f"This payment request is already {existing_request.get('status')}.")
 
     await latest_payment_intent(db, booking_id)
 
@@ -2120,11 +2176,11 @@ async def pay_booking(
             INSERT INTO payment_intents
               (booking_id,customer_id,tailor_id,payment_reference,method,order_amount,gst_amount,
                platform_fee_amount,gst_platform_charge_amount,commission_amount,tailor_credit_amount,
-               payable_total,status,gateway_order_id,gateway_response,customer_note,expires_at,created_at,updated_at)
+               payable_total,status,gateway_order_id,gateway_response,customer_note,client_request_id,expires_at,created_at,updated_at)
             VALUES
               (:booking_id,:customer_id,:tailor_id,:payment_reference,'razorpay',:order_amount,:gst_amount,
                :platform_fee_amount,:gst_platform_charge_amount,:commission_amount,:tailor_credit_amount,
-               :payable_total,'pending',:gateway_order_id,CAST(:gateway_response AS jsonb),:customer_note,:expires_at,now(),now())
+               :payable_total,'pending',:gateway_order_id,CAST(:gateway_response AS jsonb),:customer_note,:client_request_id,:expires_at,now(),now())
             RETURNING *
             """
         ),
@@ -2143,6 +2199,7 @@ async def pay_booking(
             "gateway_order_id": razorpay_order_id,
             "gateway_response": json.dumps(razorpay_order),
             "customer_note": body.txn_ref,
+            "client_request_id": idempotency_key,
             "expires_at": expires_at,
         },
     )

@@ -23,7 +23,7 @@ def _handle_email(payload: dict) -> dict:
 
     result = email_service().send(payload["to"], payload["subject"], payload["body"])
     if not result.get("ok"):
-        raise RuntimeError("Email provider rejected delivery")
+        return {**result, "terminalFailure": True, "reason": result.get("reason") or "email_delivery_failed"}
     return result
 
 
@@ -32,7 +32,7 @@ def _handle_sms_otp(payload: dict) -> dict:
 
     result = sms_service_now().send_otp(payload["phone"], payload["code"])
     if not result.get("ok"):
-        raise RuntimeError("SMS provider rejected delivery")
+        return {**result, "terminalFailure": True, "reason": result.get("reason") or "sms_delivery_failed"}
     return result
 
 

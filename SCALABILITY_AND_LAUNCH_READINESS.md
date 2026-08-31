@@ -132,15 +132,15 @@ Move operations that do not need to block the user request into SQS-backed worke
 
 Every external service call must have controlled failure behaviour.
 
-- [ ] Configure short connection and response timeouts.
-- [ ] Retry only operations that are safe to retry.
-- [ ] Use exponential backoff with jitter.
-- [ ] Use idempotency keys for booking creation, payment creation, payment webhooks, and other sensitive writes.
-- [ ] Verify Razorpay webhook signatures.
-- [ ] Deduplicate webhook processing.
-- [ ] Implement circuit-breaker behaviour for unstable external providers.
-- [ ] Ensure slow SMS, email, maps, or payment providers cannot freeze unrelated application requests.
-- [ ] Record provider errors without exposing secrets to users or logs.
+- [x] Configure short connection and response timeouts.
+- [x] Retry only operations that are safe to retry.
+- [x] Use exponential backoff with jitter.
+- [x] Use idempotency keys for booking creation, payment creation, payment webhooks, and other sensitive writes.
+- [x] Verify Razorpay webhook signatures.
+- [x] Deduplicate webhook processing.
+- [x] Implement circuit-breaker behaviour for unstable external providers.
+- [x] Ensure slow SMS, email, maps, or payment providers cannot freeze unrelated application requests.
+- [x] Record provider errors without exposing secrets to users or logs.
 
 ## Phase 7: AWS production deployment
 

@@ -902,9 +902,30 @@ ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS gateway_order_id TEXT;
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS gateway_payment_id TEXT;
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS gateway_signature TEXT;
 ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS gateway_response JSONB;
+ALTER TABLE payment_intents ADD COLUMN IF NOT EXISTS client_request_id TEXT;
 CREATE INDEX IF NOT EXISTS payment_intents_booking_idx ON payment_intents(booking_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS payment_intents_status_idx ON payment_intents(status, expires_at);
 CREATE INDEX IF NOT EXISTS payment_intents_gateway_order_idx ON payment_intents(gateway_order_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_payment_intents_customer_request
+  ON payment_intents(customer_id, client_request_id) WHERE client_request_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS payment_webhook_events (
+  provider TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_sha256 TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('processing','completed','ignored','failed')),
+  gateway_order_id TEXT,
+  gateway_payment_id TEXT,
+  booking_id TEXT REFERENCES orders(id) ON DELETE SET NULL,
+  last_error TEXT,
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, event_id)
+);
+CREATE INDEX IF NOT EXISTS payment_webhook_status_updated_idx
+  ON payment_webhook_events(status, updated_at);
 
 CREATE TABLE IF NOT EXISTS withdrawal_requests (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

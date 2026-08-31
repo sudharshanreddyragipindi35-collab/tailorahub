@@ -1,8 +1,11 @@
 import asyncio
+import hashlib
+import hmac
 import inspect
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from pathlib import Path
+from urllib import error as urllib_error
 
 import pytest
 from fastapi import HTTPException, WebSocketDisconnect
@@ -36,6 +39,9 @@ from app.main import app
 from app.schema_models import SchemaBase
 from app.services.media_storage import MediaStorage, MediaStorageError, validate_file_signature
 from app.services.tracker_service import TrackerConnectionManager
+from app.services.external_resilience import external_call, safe_provider_error
+from app.services.webhook_service import verify_payment_webhook_signature
+from app.settings import settings as runtime_settings
 from app.tasks.queue import TaskQueue
 from app.tasks import worker as task_worker
 
@@ -53,6 +59,7 @@ def test_v1_router_has_health_route():
     assert "/auth/refresh" in paths
     assert "/auth/forgot-password" in paths
     assert "/auth/reset-password" in paths
+    assert "/payments/webhooks/razorpay" in paths
     assert "/auth/customer-forgot-password" in paths
     assert "/auth/customer-reset-password" in paths
     assert "/tailors/register" in paths
@@ -310,11 +317,13 @@ def test_phase5_strict_routes_have_lower_limits():
     auth = classify_rate_limit("/api/v1/auth/login")
     payment = classify_rate_limit("/api/v1/bookings/id/pay")
     upload = classify_rate_limit("/api/tailor/media")
+    webhook = classify_rate_limit("/api/v1/payments/webhooks/razorpay")
     assert general[0] == "general"
     assert otp[0] == "otp" and otp[1] < general[1]
     assert auth[0] == "auth" and auth[1] < general[1]
     assert payment[0] == "payment" and payment[1] < general[1]
     assert upload[0] == "upload" and upload[1] < general[1]
+    assert webhook[0] == "webhook" and webhook[1] > general[1]
 
 
 @pytest.mark.asyncio
@@ -497,3 +506,54 @@ def test_measurement_appointment_rejects_missing_or_past_dates():
     with pytest.raises(HTTPException) as exc_info:
         resolve_booking_dates(delivery_date, date.today() - timedelta(days=1), 5)
     assert exc_info.value.status_code == 400
+
+
+def test_phase6_webhook_signature_uses_configured_secret(monkeypatch):
+    payload = b'{"event":"payment.captured"}'
+    monkeypatch.setattr(runtime_settings, "razorpay_webhook_secret", "phase6-secret")
+    signature = hmac.new(b"phase6-secret", payload, hashlib.sha256).hexdigest()
+    assert verify_payment_webhook_signature(payload, signature)
+    assert not verify_payment_webhook_signature(payload + b"x", signature)
+
+
+def test_phase6_safe_external_retry_uses_backoff_without_leaking_url(monkeypatch):
+    monkeypatch.setattr(runtime_settings, "external_safe_retry_attempts", 3)
+    monkeypatch.setattr(runtime_settings, "external_retry_base_ms", 1)
+    monkeypatch.setattr("app.services.external_resilience.time.sleep", lambda _: None)
+    calls = []
+
+    def action():
+        calls.append(1)
+        if len(calls) < 3:
+            raise urllib_error.URLError("https://provider.test?api_key=secret-value")
+        return "ok"
+
+    assert external_call("phase6-retry-test", "safe_read", action, retry_safe=True) == "ok"
+    assert len(calls) == 3
+    error = urllib_error.URLError("https://provider.test?api_key=secret-value")
+    assert safe_provider_error(error) == "provider_unavailable"
+    assert "secret-value" not in safe_provider_error(error)
+
+
+def test_phase6_unsafe_external_writes_are_not_retried(monkeypatch):
+    monkeypatch.setattr(runtime_settings, "external_safe_retry_attempts", 3)
+    calls = []
+
+    def action():
+        calls.append(1)
+        raise urllib_error.URLError("timeout")
+
+    with pytest.raises(urllib_error.URLError):
+        external_call("phase6-no-retry-test", "create_payment", action, retry_safe=False)
+    assert len(calls) == 1
+
+
+def test_phase6_schema_tracks_payment_idempotency_and_webhook_deduplication():
+    schema = (Path(__file__).resolve().parents[1] / "app" / "schema.sql").read_text(encoding="utf-8")
+    assert "client_request_id TEXT" in schema
+    assert "uq_payment_intents_customer_request" in schema
+    assert "CREATE TABLE IF NOT EXISTS payment_webhook_events" in schema
+    assert "PRIMARY KEY (provider, event_id)" in schema
+    payment_source = inspect.getsource(pay_booking)
+    assert "Idempotency-Key" in payment_source
+    assert "pg_advisory_xact_lock" in payment_source

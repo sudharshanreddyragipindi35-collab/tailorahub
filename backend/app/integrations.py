@@ -13,6 +13,7 @@ import uuid
 import hashlib
 
 from .settings import settings
+from .services.external_resilience import external_call, external_timeout_seconds, safe_provider_error
 
 
 @dataclass
@@ -50,17 +51,23 @@ class SmtpEmailService(EmailService):
         msg["To"] = to_email
         msg["Subject"] = subject
         msg.set_content(body)
-        if settings.smtp_secure:
-            server = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=20)
-        else:
-            server = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=20)
-        with server:
-            if settings.smtp_starttls and not settings.smtp_secure:
-                server.starttls()
-            if settings.smtp_user:
-                server.login(settings.smtp_user, settings.smtp_pass)
-            server.send_message(msg)
-        return IntegrationResult(True, "smtp", "live", {"delivered": True, "via": "smtp"}).as_dict()
+        def deliver() -> None:
+            if settings.smtp_secure:
+                server = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=external_timeout_seconds())
+            else:
+                server = smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=external_timeout_seconds())
+            with server:
+                if settings.smtp_starttls and not settings.smtp_secure:
+                    server.starttls()
+                if settings.smtp_user:
+                    server.login(settings.smtp_user, settings.smtp_pass)
+                server.send_message(msg)
+
+        try:
+            external_call("smtp", "send_email", deliver, retry_safe=False)
+            return IntegrationResult(True, "smtp", "live", {"delivered": True, "via": "smtp"}).as_dict()
+        except Exception as exc:
+            return IntegrationResult(False, "smtp", "live", {"delivered": False, "reason": safe_provider_error(exc)}).as_dict()
 
 
 class ApiEmailService(EmailService):
@@ -68,15 +75,30 @@ class ApiEmailService(EmailService):
         if settings.email_provider == "ses":
             try:
                 import boto3
+                from botocore.config import Config
 
-                response = boto3.client("sesv2", region_name=settings.aws_ses_region).send_email(
-                    FromEmailAddress=settings.email_from_address,
-                    Destination={"ToAddresses": [to_email]},
-                    Content={"Simple": {"Subject": {"Data": subject}, "Body": {"Text": {"Data": body}}}},
+                client = boto3.client(
+                    "sesv2",
+                    region_name=settings.aws_ses_region,
+                    config=Config(
+                        connect_timeout=settings.external_connect_timeout_seconds,
+                        read_timeout=settings.external_response_timeout_seconds,
+                        retries={"total_max_attempts": 1, "mode": "standard"},
+                    ),
+                )
+                response = external_call(
+                    "ses",
+                    "send_email",
+                    lambda: client.send_email(
+                        FromEmailAddress=settings.email_from_address,
+                        Destination={"ToAddresses": [to_email]},
+                        Content={"Simple": {"Subject": {"Data": subject}, "Body": {"Text": {"Data": body}}}},
+                    ),
+                    retry_safe=False,
                 )
                 return IntegrationResult(True, "ses", "live", {"delivered": True, "messageId": response.get("MessageId")}).as_dict()
             except Exception as exc:
-                return IntegrationResult(False, "ses", "live", {"delivered": False, "reason": type(exc).__name__}).as_dict()
+                return IntegrationResult(False, "ses", "live", {"delivered": False, "reason": safe_provider_error(exc)}).as_dict()
         if settings.email_provider == "sendgrid":
             if not settings.email_api_key:
                 return IntegrationResult(False, "sendgrid", "not_configured", {"delivered": False, "reason": "EMAIL_API_KEY is required"}).as_dict()
@@ -93,10 +115,14 @@ class ApiEmailService(EmailService):
                 method="POST",
             )
             try:
-                with request.urlopen(req, timeout=20) as res:
-                    return IntegrationResult(res.status in {200, 202}, "sendgrid", "live", {"delivered": res.status in {200, 202}, "statusCode": res.status}).as_dict()
+                def deliver() -> int:
+                    with request.urlopen(req, timeout=external_timeout_seconds()) as res:
+                        return res.status
+
+                status = external_call("sendgrid", "send_email", deliver, retry_safe=False)
+                return IntegrationResult(status in {200, 202}, "sendgrid", "live", {"delivered": status in {200, 202}, "statusCode": status}).as_dict()
             except Exception as exc:
-                return IntegrationResult(False, "sendgrid", "live", {"delivered": False, "reason": str(exc)}).as_dict()
+                return IntegrationResult(False, "sendgrid", "live", {"delivered": False, "reason": safe_provider_error(exc)}).as_dict()
         return IntegrationResult(False, settings.email_provider, "not_configured", {"delivered": False, "reason": "Live email adapter is not implemented yet"}).as_dict()
 
 
@@ -131,16 +157,19 @@ class LiveSmsService(SmsService):
             auth = base64.b64encode(f"{sid}:{token}".encode("utf-8")).decode("ascii")
             req = request.Request(url, data=payload, headers={"Authorization": f"Basic {auth}"}, method="POST")
             try:
-                with request.urlopen(req, timeout=20) as res:
-                    return IntegrationResult(res.status in {200, 201}, "twilio", "live", {"sent": res.status in {200, 201}, "statusCode": res.status}).as_dict()
+                def deliver() -> int:
+                    with request.urlopen(req, timeout=external_timeout_seconds()) as res:
+                        return res.status
+
+                status = external_call("twilio", "send_otp", deliver, retry_safe=False)
+                return IntegrationResult(status in {200, 201}, "twilio", "live", {"sent": status in {200, 201}, "statusCode": status}).as_dict()
             except Exception as exc:
-                return IntegrationResult(False, "twilio", "live", {"sent": False, "reason": str(exc)}).as_dict()
+                return IntegrationResult(False, "twilio", "live", {"sent": False, "reason": safe_provider_error(exc)}).as_dict()
         if settings.sms_provider == "msg91" and settings.sms_otp_template_id:
             base_url = settings.sms_api_base_url or "https://control.msg91.com/api/v5/otp"
             query = parse.urlencode({
                 "template_id": settings.sms_otp_template_id,
                 "mobile": "91" + phone_number[-10:],
-                "authkey": settings.sms_api_key,
             })
             req = request.Request(
                 f"{base_url}?{query}",
@@ -149,10 +178,14 @@ class LiveSmsService(SmsService):
                 method="POST",
             )
             try:
-                with request.urlopen(req, timeout=20) as res:
-                    return IntegrationResult(res.status in {200, 201}, "msg91", "live", {"sent": res.status in {200, 201}, "statusCode": res.status}).as_dict()
+                def deliver() -> int:
+                    with request.urlopen(req, timeout=external_timeout_seconds()) as res:
+                        return res.status
+
+                status = external_call("msg91", "send_otp", deliver, retry_safe=False)
+                return IntegrationResult(status in {200, 201}, "msg91", "live", {"sent": status in {200, 201}, "statusCode": status}).as_dict()
             except Exception as exc:
-                return IntegrationResult(False, "msg91", "live", {"sent": False, "reason": type(exc).__name__}).as_dict()
+                return IntegrationResult(False, "msg91", "live", {"sent": False, "reason": safe_provider_error(exc)}).as_dict()
         return IntegrationResult(False, settings.sms_provider, "not_configured", {"sent": False, "reason": "Live SMS adapter is not implemented yet"}).as_dict()
 
 
@@ -230,12 +263,15 @@ class RazorpayPaymentService(PaymentService):
                 headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"},
                 method="POST",
             )
-            with request.urlopen(req, timeout=20) as res:
-                raw = res.read().decode("utf-8")
-                data = json.loads(raw) if raw else {}
-                return IntegrationResult(res.status in {200, 201}, "razorpay", "live", {"status": "success", "txnRef": data.get("id") or reference, "amount": amount, "reference": reference, "method": method, "rawStatus": data.get("status")}).as_dict()
+            def deliver() -> tuple[int, dict]:
+                with request.urlopen(req, timeout=external_timeout_seconds()) as res:
+                    raw = res.read().decode("utf-8")
+                    return res.status, json.loads(raw) if raw else {}
+
+            status, data = external_call("razorpay", "capture_or_create", deliver, retry_safe=False)
+            return IntegrationResult(status in {200, 201}, "razorpay", "live", {"status": "success", "txnRef": data.get("id") or reference, "amount": amount, "reference": reference, "method": method, "rawStatus": data.get("status")}).as_dict()
         except Exception as exc:
-            return IntegrationResult(False, "razorpay", "live", {"status": "failed", "reason": str(exc)}).as_dict()
+            return IntegrationResult(False, "razorpay", "live", {"status": "failed", "reason": safe_provider_error(exc)}).as_dict()
 
 
 def payment_service() -> PaymentService:

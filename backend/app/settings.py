@@ -129,6 +129,7 @@ class Settings:
     rate_limit_otp_per_minute = env_int("RATE_LIMIT_OTP_PER_MINUTE", 5)
     rate_limit_payment_per_minute = env_int("RATE_LIMIT_PAYMENT_PER_MINUTE", 10)
     rate_limit_upload_per_minute = env_int("RATE_LIMIT_UPLOAD_PER_MINUTE", 20)
+    rate_limit_webhook_per_minute = env_int("RATE_LIMIT_WEBHOOK_PER_MINUTE", 1000)
     max_request_body_bytes = env_int("MAX_REQUEST_BODY_BYTES", 2 * 1024 * 1024)
     max_upload_request_bytes = env_int("MAX_UPLOAD_REQUEST_BYTES", 25 * 1024 * 1024)
     client_ip_trusted_proxy_networks = [
@@ -146,6 +147,13 @@ class Settings:
     task_max_attempts = env_int("TASK_MAX_ATTEMPTS", 5)
     task_visibility_timeout_seconds = env_int("TASK_VISIBILITY_TIMEOUT_SECONDS", 60)
     task_long_poll_seconds = env_int("TASK_LONG_POLL_SECONDS", 20)
+
+    external_connect_timeout_seconds = env_int("EXTERNAL_CONNECT_TIMEOUT_SECONDS", 5)
+    external_response_timeout_seconds = env_int("EXTERNAL_RESPONSE_TIMEOUT_SECONDS", 15)
+    external_safe_retry_attempts = env_int("EXTERNAL_SAFE_RETRY_ATTEMPTS", 3)
+    external_retry_base_ms = env_int("EXTERNAL_RETRY_BASE_MS", 250)
+    external_circuit_failure_threshold = env_int("EXTERNAL_CIRCUIT_FAILURE_THRESHOLD", 5)
+    external_circuit_reset_seconds = env_int("EXTERNAL_CIRCUIT_RESET_SECONDS", 30)
 
 
 settings = Settings()
