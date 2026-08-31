@@ -209,6 +209,20 @@ class MediaStorage:
             raise
         return self.public_url(safe)
 
+    def mark_processed(self, key: str, content_type: str) -> dict:
+        safe = _safe_key(key)
+        if self.backend == "local":
+            return {"processed": True, "mode": "local"}
+        self._s3().put_object_tagging(
+            Bucket=self.bucket,
+            Key=self._object_key(safe),
+            Tagging={"TagSet": [
+                {"Key": "tailorahub-processed", "Value": "true"},
+                {"Key": "content-type", "Value": content_type.replace("/", "-")[:128]},
+            ]},
+        )
+        return {"processed": True, "mode": "s3", "objectKey": safe}
+
 
 @lru_cache
 def get_media_storage() -> MediaStorage:

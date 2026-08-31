@@ -938,3 +938,18 @@ CREATE INDEX IF NOT EXISTS payments_status_ts_idx ON payments(status, ts DESC);
 CREATE INDEX IF NOT EXISTS reviews_tailor_hidden_ts_idx ON reviews(tailor_id, hidden, ts DESC);
 CREATE INDEX IF NOT EXISTS support_tickets_requester_activity_idx ON support_tickets(requester_id, requester_role, last_activity_at DESC);
 CREATE INDEX IF NOT EXISTS complaints_status_ts_idx ON complaints(status, ts DESC);
+
+-- Phase 4 idempotent background job execution ledger.
+CREATE TABLE IF NOT EXISTS background_job_receipts (
+  idempotency_key TEXT PRIMARY KEY,
+  job_id TEXT NOT NULL,
+  job_type TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('processing','completed','failed')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  result JSONB NOT NULL DEFAULT '{}'::jsonb,
+  last_error TEXT,
+  started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS background_job_status_updated_idx ON background_job_receipts(status, updated_at);

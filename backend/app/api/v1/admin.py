@@ -17,6 +17,7 @@ from app.pagination import PageParams
 from app.qr import generate_wallet_qr
 from app.schemas.admin import PlatformSettingsIn
 from app.services.media_storage import get_media_storage
+from app.tasks.queue import enqueue_task
 
 
 router = APIRouter()
@@ -144,6 +145,52 @@ async def finance_wallet_export(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=admin-wallet-transactions.csv"},
     )
+
+
+@router.post("/finance/wallet/export-jobs", status_code=202)
+async def queue_finance_wallet_export(
+    date_from: date | None = Query(default=None, alias="dateFrom"),
+    date_to: date | None = Query(default=None, alias="dateTo"),
+    admin: dict = Depends(require_admin),
+) -> dict:
+    request_id = uuid.uuid4().hex
+    queued = enqueue_task(
+        "admin_wallet_export",
+        {
+            "dateFrom": date_from.isoformat() if date_from else None,
+            "dateTo": date_to.isoformat() if date_to else None,
+            "requestedBy": str(admin["id"]),
+        },
+        f"admin-wallet-export:{request_id}",
+    )
+    return {"jobId": queued["jobId"], "status": "queued" if queued["queued"] else "completed"}
+
+
+@router.get("/jobs/{job_id}")
+async def background_job_status(
+    job_id: str,
+    _: dict = Depends(require_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    result = await db.execute(text("SELECT job_id,job_type,status,attempts,result,last_error,completed_at,updated_at FROM background_job_receipts WHERE job_id=:job_id"), {"job_id": job_id})
+    row = result.mappings().first()
+    if not row:
+        return {"jobId": job_id, "status": "queued"}
+    payload = dict(row)
+    job_result = dict(payload.get("result") or {})
+    reference = job_result.pop("downloadReference", None)
+    if reference:
+        job_result["downloadUrl"] = get_media_storage().download_url(reference)
+    return {
+        "jobId": payload["job_id"],
+        "jobType": payload["job_type"],
+        "status": payload["status"],
+        "attempts": payload["attempts"],
+        "result": job_result,
+        "error": payload["last_error"],
+        "completedAt": payload["completed_at"],
+        "updatedAt": payload["updated_at"],
+    }
 
 
 @router.get("/payment-intents")

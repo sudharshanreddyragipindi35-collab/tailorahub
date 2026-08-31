@@ -38,9 +38,9 @@ from .security import (
     verify_password,
 )
 from .settings import settings
-from .tasks.scheduler import configure_jobs, scheduler
 from .services.media_storage import MediaStorageError, get_media_storage, validate_file_signature
 from .services.tracker_service import tracker_connections
+from .tasks.queue import enqueue_task
 
 
 UPLOADS_DIR = settings.base_dir / "uploads"
@@ -1043,6 +1043,14 @@ def delete_uploaded_url(url: str | None) -> None:
         pass
 
 
+def queue_media_postprocess(object_key: str, content_type: str) -> None:
+    enqueue_task(
+        "media_postprocess",
+        {"objectKey": object_key, "contentType": content_type},
+        f"media-process:{object_key}",
+    )
+
+
 def audit(db: Session, admin: dict, action: str, target_type: str, target_id: str | None, target_name: str | None, reason: str | None = None, meta: dict | None = None) -> None:
     db.execute(
         text(
@@ -1378,6 +1386,10 @@ def seed_demo_tailors(db: Session) -> None:
 @app.on_event("startup")
 async def startup() -> None:
     if settings.app_env == "production":
+        if settings.auto_migrate:
+            raise RuntimeError("Production web containers require AUTO_MIGRATE=false; run SERVICE_ROLE=migration once")
+        if settings.task_queue_backend != "sqs" or not settings.sqs_task_queue_url or not settings.sqs_task_dlq_url:
+            raise RuntimeError("Production requires the SQS task queue and dead-letter queue configuration")
         if settings.media_storage_backend != "s3":
             raise RuntimeError("Production requires MEDIA_STORAGE_BACKEND=s3")
         if not settings.cloudfront_media_base_url:
@@ -1395,16 +1407,11 @@ async def startup() -> None:
         seed_demo_tailors(db)
     finally:
         db.close()
-    configure_jobs()
-    if not scheduler.running:
-        scheduler.start()
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
     await tracker_connections.stop()
-    if scheduler.running:
-        scheduler.shutdown(wait=False)
 
 
 @app.get("/api/health")
@@ -2623,6 +2630,7 @@ def upload_tailor_media(body: TailorMediaUpload, user: dict = Depends(tailor_use
         url = media_storage.store_bytes(object_key, raw, body.mediaType)
     except MediaStorageError as exc:
         raise HTTPException(503, "Media storage is temporarily unavailable") from exc
+    queue_media_postprocess(object_key, body.mediaType)
     entry = json.dumps(
         {
             "id": media_id,
@@ -2679,6 +2687,7 @@ def complete_tailor_media(body: TailorMediaComplete, user: dict = Depends(tailor
         url = media_storage.validate_uploaded_object(body.objectKey, body.mediaType, MAX_MEDIA_BYTES)
     except MediaStorageError as exc:
         raise HTTPException(400, str(exc)) from exc
+    queue_media_postprocess(body.objectKey, body.mediaType)
     entry = json.dumps(
         {
             "id": Path(body.objectKey).stem,
@@ -2712,6 +2721,7 @@ def upload_tailor_profile_image(body: TailorProfileImageUpload, user: dict = Dep
         url = media_storage.store_bytes(object_key, raw, body.mediaType)
     except MediaStorageError as exc:
         raise HTTPException(503, "Media storage is temporarily unavailable") from exc
+    queue_media_postprocess(object_key, body.mediaType)
     delete_uploaded_url(tailor.get("profile_image"))
     db.execute(text("UPDATE tailors SET profile_image=:url WHERE id=:id"), {"id": tailor["id"], "url": url})
     db.commit()
@@ -2748,6 +2758,7 @@ def complete_tailor_profile_image(body: TailorMediaComplete, user: dict = Depend
         url = media_storage.validate_uploaded_object(body.objectKey, body.mediaType, MAX_PROFILE_IMAGE_BYTES)
     except MediaStorageError as exc:
         raise HTTPException(400, str(exc)) from exc
+    queue_media_postprocess(body.objectKey, body.mediaType)
     delete_uploaded_url(tailor.get("profile_image"))
     db.execute(text("UPDATE tailors SET profile_image=:url WHERE id=:id"), {"id": tailor["id"], "url": url})
     db.commit()
@@ -2798,6 +2809,7 @@ def create_tailor_offer(body: TailorOfferCreate, user: dict = Depends(tailor_use
             media_url = media_storage.store_bytes(object_key, raw, body.mediaType)
         except MediaStorageError as exc:
             raise HTTPException(503, "Media storage is temporarily unavailable") from exc
+        queue_media_postprocess(object_key, body.mediaType)
         media_type = body.mediaType
     db.execute(
         text(

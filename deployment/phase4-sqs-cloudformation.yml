@@ -1,0 +1,40 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: TailoraHub Phase 4 background task queue and dead-letter queue
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+  MaxReceiveCount:
+    Type: Number
+    Default: 5
+
+Resources:
+  TaskDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub tailorahub-${EnvironmentName}-tasks-dlq
+      MessageRetentionPeriod: 1209600
+      KmsMasterKeyId: alias/aws/sqs
+
+  TaskQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub tailorahub-${EnvironmentName}-tasks
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600
+      KmsMasterKeyId: alias/aws/sqs
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt TaskDeadLetterQueue.Arn
+        maxReceiveCount: !Ref MaxReceiveCount
+
+Outputs:
+  TaskQueueUrl:
+    Value: !Ref TaskQueue
+  TaskQueueArn:
+    Value: !GetAtt TaskQueue.Arn
+  TaskDeadLetterQueueUrl:
+    Value: !Ref TaskDeadLetterQueue
+  TaskDeadLetterQueueArn:
+    Value: !GetAtt TaskDeadLetterQueue.Arn

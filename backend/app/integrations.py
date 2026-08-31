@@ -10,6 +10,7 @@ import re
 import smtplib
 from urllib import parse, request
 import uuid
+import hashlib
 
 from .settings import settings
 
@@ -64,9 +65,21 @@ class SmtpEmailService(EmailService):
 
 class ApiEmailService(EmailService):
     def send(self, to_email: str, subject: str, body: str) -> dict:
-        if not settings.email_api_key:
-            return MockEmailService().send(to_email, subject, body)
+        if settings.email_provider == "ses":
+            try:
+                import boto3
+
+                response = boto3.client("sesv2", region_name=settings.aws_ses_region).send_email(
+                    FromEmailAddress=settings.email_from_address,
+                    Destination={"ToAddresses": [to_email]},
+                    Content={"Simple": {"Subject": {"Data": subject}, "Body": {"Text": {"Data": body}}}},
+                )
+                return IntegrationResult(True, "ses", "live", {"delivered": True, "messageId": response.get("MessageId")}).as_dict()
+            except Exception as exc:
+                return IntegrationResult(False, "ses", "live", {"delivered": False, "reason": type(exc).__name__}).as_dict()
         if settings.email_provider == "sendgrid":
+            if not settings.email_api_key:
+                return IntegrationResult(False, "sendgrid", "not_configured", {"delivered": False, "reason": "EMAIL_API_KEY is required"}).as_dict()
             payload = {
                 "personalizations": [{"to": [{"email": to_email}]}],
                 "from": {"email": settings.email_from_address},
@@ -109,7 +122,7 @@ class MockSmsService(SmsService):
 class LiveSmsService(SmsService):
     def send_otp(self, phone_number: str, code: str) -> dict:
         if not settings.sms_api_key:
-            return MockSmsService().send_otp(phone_number, code)
+            return IntegrationResult(False, settings.sms_provider, "not_configured", {"sent": False, "reason": "SMS_API_KEY is required"}).as_dict()
         if settings.sms_provider == "twilio" and settings.sms_api_secret and settings.sms_sender_id:
             sid = settings.sms_api_secret
             token = settings.sms_api_key
@@ -122,13 +135,46 @@ class LiveSmsService(SmsService):
                     return IntegrationResult(res.status in {200, 201}, "twilio", "live", {"sent": res.status in {200, 201}, "statusCode": res.status}).as_dict()
             except Exception as exc:
                 return IntegrationResult(False, "twilio", "live", {"sent": False, "reason": str(exc)}).as_dict()
+        if settings.sms_provider == "msg91" and settings.sms_otp_template_id:
+            base_url = settings.sms_api_base_url or "https://control.msg91.com/api/v5/otp"
+            query = parse.urlencode({
+                "template_id": settings.sms_otp_template_id,
+                "mobile": "91" + phone_number[-10:],
+                "authkey": settings.sms_api_key,
+            })
+            req = request.Request(
+                f"{base_url}?{query}",
+                data=json.dumps({"otp": code}).encode("utf-8"),
+                headers={"Content-Type": "application/json", "authkey": settings.sms_api_key},
+                method="POST",
+            )
+            try:
+                with request.urlopen(req, timeout=20) as res:
+                    return IntegrationResult(res.status in {200, 201}, "msg91", "live", {"sent": res.status in {200, 201}, "statusCode": res.status}).as_dict()
+            except Exception as exc:
+                return IntegrationResult(False, "msg91", "live", {"sent": False, "reason": type(exc).__name__}).as_dict()
         return IntegrationResult(False, settings.sms_provider, "not_configured", {"sent": False, "reason": "Live SMS adapter is not implemented yet"}).as_dict()
 
 
-def sms_service() -> SmsService:
+def sms_service_now() -> SmsService:
     if settings.sms_provider in {"twilio", "msg91"}:
         return LiveSmsService()
     return MockSmsService()
+
+
+class QueuedSmsService(SmsService):
+    def send_otp(self, phone_number: str, code: str) -> dict:
+        from app.tasks.queue import enqueue_task
+
+        digest = hashlib.sha256(f"sms|{phone_number}|{code}".encode("utf-8")).hexdigest()
+        queued = enqueue_task("sms_otp_delivery", {"phone": phone_number, "code": code}, f"sms:{digest}")
+        if queued["mode"] == "inline":
+            return queued["result"]
+        return IntegrationResult(True, "sqs", "queued", {"sent": False, "jobId": queued["jobId"]}).as_dict()
+
+
+def sms_service() -> SmsService:
+    return QueuedSmsService()
 
 
 class AadhaarKycService:

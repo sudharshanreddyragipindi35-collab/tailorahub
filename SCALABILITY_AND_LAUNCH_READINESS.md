@@ -96,24 +96,24 @@ Do not declare the application ready for a large public launch until the mandato
 
 Move operations that do not need to block the user request into SQS-backed workers.
 
-- [ ] Queue email delivery.
-- [ ] Queue SMS and OTP-provider delivery while retaining secure OTP state handling.
-- [ ] Queue non-critical notifications.
-- [ ] Queue image/media processing.
-- [ ] Queue reports and exports.
-- [ ] Queue payment reconciliation and safe webhook retries.
-- [ ] Queue wallet reconciliation.
-- [ ] Configure retry limits and exponential backoff.
-- [ ] Configure a dead-letter queue for failed jobs.
-- [ ] Make every retried job idempotent.
+- [x] Queue email delivery.
+- [x] Queue SMS and OTP-provider delivery while retaining secure OTP state handling.
+- [x] Queue non-critical external notification delivery.
+- [x] Queue post-upload media processing.
+- [x] Queue large admin wallet report exports while retaining the bounded legacy export.
+- [x] Queue payment-intent reconciliation; signed webhook ingestion/deduplication remains in Phase 6.
+- [x] Queue wallet reconciliation.
+- [x] Configure retry limits and exponential visibility backoff.
+- [x] Configure an encrypted dead-letter queue through the deployment template.
+- [x] Make every retried job idempotent through a database receipt ledger.
 
 ### Scheduler isolation
 
-- [ ] Run scheduled jobs in one dedicated scheduler/worker service.
-- [ ] Do not start an independent scheduler inside every web container.
-- [ ] Move database migrations out of normal multi-replica web startup.
-- [ ] Run migrations once as a controlled deployment task.
-- [ ] Prevent duplicate booking-expiry, notification, reconciliation, and cleanup jobs.
+- [x] Run scheduled jobs in one dedicated scheduler service and execute them through workers.
+- [x] Do not start an independent scheduler inside every web container.
+- [x] Move database migrations out of normal multi-replica web startup.
+- [x] Run migrations once through the controlled `migration` container role.
+- [x] Prevent duplicate booking-expiry, delivery, reconciliation, export, media, and cleanup jobs.
 
 ## Phase 5: Caching and traffic protection
 

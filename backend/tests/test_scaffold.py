@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from fastapi import HTTPException, WebSocketDisconnect
+from sqlalchemy import text
 
 from app.api.v1 import api_router
 from app.api.v1.admin import verify_payment_intent
@@ -22,10 +23,13 @@ from app.api.v1.bookings import (
 from app.api.v1 import bookings as bookings_module
 from app.core.config import get_settings
 from app.core.security import create_booking_ws_ticket, decode_booking_ws_ticket
+from app.db import engine as sync_engine
 from app.main import app
 from app.schema_models import SchemaBase
 from app.services.media_storage import MediaStorage, MediaStorageError, validate_file_signature
 from app.services.tracker_service import TrackerConnectionManager
+from app.tasks.queue import TaskQueue
+from app.tasks import worker as task_worker
 
 
 def test_v1_router_has_health_route():
@@ -228,6 +232,54 @@ def test_s3_presign_enforces_type_size_and_validates_file_signature(monkeypatch,
     validate_file_signature(b"\x89PNG\r\n\x1a\nmore", "image/png")
     with pytest.raises(MediaStorageError):
         validate_file_signature(b"not-an-image", "image/png")
+
+
+def test_sqs_task_message_contains_idempotency_and_retry_metadata(monkeypatch):
+    from app import settings as settings_module
+
+    class FakeSqs:
+        def send_message(self, **kwargs):
+            self.request = kwargs
+            return {"MessageId": "message-1"}
+
+    monkeypatch.setattr(settings_module.settings, "task_queue_backend", "sqs")
+    monkeypatch.setattr(settings_module.settings, "sqs_task_queue_url", "https://sqs.example.test/tasks")
+    queue = TaskQueue()
+    fake = FakeSqs()
+    queue._client = fake
+
+    result = queue.enqueue("email_delivery", {"to": "user@example.test"}, "email:key-1", 12)
+    message = __import__("json").loads(fake.request["MessageBody"])
+
+    assert result["queued"] is True
+    assert message["idempotencyKey"] == "email:key-1"
+    assert message["jobType"] == "email_delivery"
+    assert fake.request["DelaySeconds"] == 12
+    assert fake.request["MessageAttributes"]["idempotencyKey"]["StringValue"] == "email:key-1"
+
+
+def test_background_worker_executes_same_idempotency_key_once(monkeypatch):
+    key = f"phase4-test:{__import__('time').time_ns()}"
+    calls = []
+    monkeypatch.setitem(task_worker.HANDLERS, "phase4_test", lambda payload: calls.append(payload) or {"ok": True})
+    first = {"jobId": "job-1", "jobType": "phase4_test", "idempotencyKey": key, "payload": {"value": 1}}
+    second = {**first, "jobId": "job-2"}
+    try:
+        assert task_worker.process_message(first) is True
+        assert task_worker.process_message(second) is True
+        assert calls == [{"value": 1, "_jobId": "job-1"}]
+    finally:
+        with sync_engine.begin() as connection:
+            connection.execute(text("DELETE FROM background_job_receipts WHERE idempotency_key=:key"), {"key": key})
+
+
+def test_web_container_does_not_run_scheduler_or_migrations_from_docker_cmd():
+    dockerfile = (Path(__file__).resolve().parents[1] / "Dockerfile").read_text(encoding="utf-8")
+    main_source = inspect.getsource(__import__("app.main", fromlist=["startup"]).startup)
+    assert "SERVICE_ROLE:-web" in dockerfile
+    assert "migration) exec alembic upgrade head" in dockerfile
+    assert "configure_jobs" not in main_source
+    assert "scheduler.start" not in main_source
 
 
 def test_large_collection_routes_expose_bounded_pagination():

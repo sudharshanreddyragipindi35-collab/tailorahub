@@ -71,6 +71,7 @@ class Settings:
     sms_api_secret = env_value("SMS_API_SECRET")
     sms_sender_id = env_value("SMS_SENDER_ID")
     sms_otp_template_id = env_value("SMS_OTP_TEMPLATE_ID")
+    sms_api_base_url = env_value("SMS_API_BASE_URL")
 
     email_provider = env_value("EMAIL_PROVIDER", "mock").lower()
     email_api_key = env_value("EMAIL_API_KEY")
@@ -83,6 +84,7 @@ class Settings:
     smtp_user = env_value("SMTP_USER")
     smtp_pass = env_value("SMTP_PASS")
     email_outbox = env_value("EMAIL_OUTBOX", str(BASE_DIR / "email-outbox.log"))
+    aws_ses_region = env_value("AWS_SES_REGION", "ap-south-1")
 
     aadhaar_kyc_provider = env_value("AADHAAR_KYC_PROVIDER", "mock").lower()
     aadhaar_kyc_api_key = env_value("AADHAAR_KYC_API_KEY")
@@ -118,6 +120,16 @@ class Settings:
     realtime_channel_prefix = env_value("REALTIME_CHANNEL_PREFIX", "tailorahub:booking")
     realtime_ticket_seconds = env_int("REALTIME_TICKET_SECONDS", 120)
     redis_url = env_value("REDIS_URL", "redis://localhost:6379/0")
+
+    service_role = env_value("SERVICE_ROLE", "web").lower()
+    task_queue_backend = env_value("TASK_QUEUE_BACKEND", "inline").lower()
+    sqs_task_queue_url = env_value("SQS_TASK_QUEUE_URL")
+    sqs_task_dlq_url = env_value("SQS_TASK_DLQ_URL")
+    sqs_region = env_value("SQS_REGION", "ap-south-1")
+    sqs_endpoint_url = env_value("SQS_ENDPOINT_URL")
+    task_max_attempts = env_int("TASK_MAX_ATTEMPTS", 5)
+    task_visibility_timeout_seconds = env_int("TASK_VISIBILITY_TIMEOUT_SECONDS", 60)
+    task_long_poll_seconds = env_int("TASK_LONG_POLL_SECONDS", 20)
 
 
 settings = Settings()
