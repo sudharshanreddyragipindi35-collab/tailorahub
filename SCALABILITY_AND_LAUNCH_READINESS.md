@@ -148,12 +148,18 @@ The initial sizes below are starting hypotheses and must be adjusted using load-
 
 ### Frontend
 
+- [x] Add a source-controlled Amplify monorepo build specification.
+- [x] Add repeatable SPA rewrite automation for the existing Amplify application.
+- [x] Add source-controlled secure response and cache header rules.
 - [ ] Deploy the production frontend through AWS Amplify/CloudFront.
 - [ ] Configure SPA rewrites so refreshed application routes return `index.html`.
 - [ ] Configure secure response headers and cache policies.
 
 ### Backend
 
+- [x] Add repeatable immutable ECR image publication with scan-on-push repository bootstrapping.
+- [x] Add a parameterized ECS/ALB CloudFormation stack with separate web, worker, scheduler, and migration roles.
+- [x] Configure the stack for two 1-vCPU/2-GB web tasks, health checks, rolling rollback, and CPU/memory target tracking from two to ten tasks.
 - [ ] Store the backend image in Amazon ECR.
 - [ ] Deploy the backend using ECS Fargate.
 - [ ] Run at least two backend tasks in production.
@@ -167,6 +173,8 @@ The initial sizes below are starting hypotheses and must be adjusted using load-
 
 ### Data services
 
+- [x] Parameterize the production stack to connect private RDS Proxy, Redis, S3/CloudFront, and SQS resources without committing credentials.
+- [x] Add task-to-RDS and task-to-Redis security-group ingress scoped to the ECS application security group.
 - [ ] Use RDS PostgreSQL in private subnets.
 - [ ] Use Multi-AZ for the public production launch when the availability requirement justifies it.
 - [ ] Use RDS Proxy for pooled database access.

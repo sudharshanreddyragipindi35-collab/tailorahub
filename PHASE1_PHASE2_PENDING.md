@@ -1,4 +1,4 @@
-# Phase 1 through Phase 6 pending items
+# Phase 1 through Phase 7 pending items
 
 This file is the single backlog for production-account work and measured validation intentionally deferred while implementation continues.
 
@@ -69,3 +69,22 @@ The Phase 5 source implementation and environment-variable templates are documen
 9. Review production logs and traces to confirm URLs, authorization headers, OTPs, Aadhaar values, API keys, secrets, and full provider payloads are not recorded.
 
 The Phase 6 source implementation and production variables are documented in `PHASE6_IMPLEMENTATION.md`.
+
+## Phase 7: AWS account deployment and production validation
+
+1. Create or confirm two public ALB subnets and two private application subnets with NAT access or the required VPC endpoints.
+2. Issue and validate the regional ACM certificate for `api.tailorahub.com`.
+3. Create the application and optional provider JSON secrets described in `PHASE7_IMPLEMENTATION.md`; pass only their ARNs to ECS.
+4. Publish an immutable commit-tagged backend image with `deployment/phase7-publish-image.ps1` and review the ECR scan result before deployment.
+5. Replace every placeholder in a private copy of `deployment/phase7-ecs-parameters.example.json`, validate the template, and deploy `deployment/phase7-ecs-cloudformation.yml` with `CAPABILITY_NAMED_IAM`.
+6. Run the migration task once and require exit code `0` before allowing the new web, worker, and scheduler revisions to serve production traffic.
+7. Confirm both web tasks become healthy behind the ALB, both worker tasks consume SQS jobs, and exactly one scheduler task remains active.
+8. Point `api.tailorahub.com` to the ALB and associate `deployment/phase5-waf-cloudformation.yml` with the ALB ARN.
+9. Add `VITE_API_BASE=https://api.tailorahub.com/api` and approved browser-only keys to Amplify, then deploy the frontend using `amplify.yml`.
+10. Run `deployment/phase7-configure-amplify.ps1` and verify direct refreshes of customer, tailor, and private admin routes return the React application rather than a 404 or blank screen.
+11. Verify the production security headers and immutable asset/no-cache HTML policies from the public domain.
+12. Test a rolling ECS deployment and an unhealthy-task replacement while requests and WebSocket tracking remain active.
+13. Generate controlled load to confirm scaling from two tasks and back down without dropping below two; tune CPU, memory, and cooldown settings from evidence.
+14. Confirm RDS Proxy, Redis TLS, private S3 media, CloudFront delivery, SQS/DLQ, security-group boundaries, and approved `/32` admin access work from the deployed services.
+
+The Phase 7 infrastructure source and ordered production runbook are documented in `PHASE7_IMPLEMENTATION.md`.

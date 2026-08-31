@@ -1,0 +1,780 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: TailoraHub Phase 7 ECS Fargate application stack using existing private data services.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedPattern: "[a-z0-9-]+"
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two public subnets for the internet-facing ALB.
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two private subnets with NAT or VPC endpoints for Fargate tasks.
+  VpcCidr:
+    Type: String
+    Description: IPv4 CIDR of the selected VPC, used to restrict ALB-to-task egress.
+  CertificateArn:
+    Type: String
+    Description: ACM certificate ARN for api.tailorahub.com in this stack's region.
+  BackendImageUri:
+    Type: String
+    Description: Immutable ECR image URI, including a version or commit tag (do not use latest).
+  ApplicationSecretArn:
+    Type: String
+    Description: Secrets Manager JSON secret containing DATABASE_URL, JWT_SECRET, JWT_REFRESH_SECRET, ADMIN_PASSWORD, and AADHAAR_ENCRYPTION_KEY.
+  ProviderSecretArn:
+    Type: String
+    Default: ""
+    Description: Optional Secrets Manager JSON secret containing live SMS, email, and Razorpay keys listed in PHASE7_IMPLEMENTATION.md.
+  MediaBucketName:
+    Type: String
+  MediaBucketArn:
+    Type: String
+  CloudFrontMediaBaseUrl:
+    Type: String
+  RedisUrl:
+    Type: String
+    NoEcho: true
+    Description: TLS URL for the shared private Redis/Valkey endpoint.
+  TaskQueueUrl:
+    Type: String
+  TaskQueueArn:
+    Type: String
+  TaskDeadLetterQueueUrl:
+    Type: String
+  TaskDeadLetterQueueArn:
+    Type: String
+  DatabaseSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: Existing RDS Proxy security group. Leave empty to manage ingress outside this stack.
+  RedisSecurityGroupId:
+    Type: String
+    Default: ""
+    Description: Existing ElastiCache security group. Leave empty to manage ingress outside this stack.
+  CorsOrigins:
+    Type: String
+    Default: https://tailorahub.com,https://www.tailorahub.com
+  AdminAllowedNetworks:
+    Type: String
+    Default: ""
+    Description: Comma-separated public /32 or approved CIDRs allowed to use admin APIs.
+  TrustedProxyNetworks:
+    Type: String
+    Description: Comma-separated private VPC/ALB CIDRs trusted to supply X-Forwarded-For.
+  SmsProvider:
+    Type: String
+    Default: mock
+  SmsSenderId:
+    Type: String
+    Default: ""
+  SmsOtpTemplateId:
+    Type: String
+    Default: ""
+  SmsApiBaseUrl:
+    Type: String
+    Default: ""
+  EmailProvider:
+    Type: String
+    Default: mock
+  EmailFromAddress:
+    Type: String
+    Default: TailoraHub <no-reply@tailorahub.com>
+  PaymentProvider:
+    Type: String
+    Default: mock
+  WebDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+  WebMinimumCount:
+    Type: Number
+    Default: 2
+    MinValue: 2
+  WebMaximumCount:
+    Type: Number
+    Default: 10
+    MinValue: 2
+  WorkerDesiredCount:
+    Type: Number
+    Default: 2
+    MinValue: 1
+  DeployServices:
+    Type: String
+    Default: "false"
+    AllowedValues: ["true", "false"]
+    Description: Keep false for the foundation deployment, run migrations, then update to true.
+
+Conditions:
+  HasProviderSecret: !Not [!Equals [!Ref ProviderSecretArn, ""]]
+  ManageDatabaseIngress: !Not [!Equals [!Ref DatabaseSecurityGroupId, ""]]
+  ManageRedisIngress: !Not [!Equals [!Ref RedisSecurityGroupId, ""]]
+  ShouldDeployServices: !Equals [!Ref DeployServices, "true"]
+
+Resources:
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub tailorahub-${EnvironmentName}
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+
+  WebLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/tailorahub/${EnvironmentName}/web
+      RetentionInDays: 30
+
+  WorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/tailorahub/${EnvironmentName}/worker
+      RetentionInDays: 30
+
+  SchedulerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/tailorahub/${EnvironmentName}/scheduler
+      RetentionInDays: 30
+
+  MigrationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/tailorahub/${EnvironmentName}/migration
+      RetentionInDays: 30
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub tailorahub-${EnvironmentName}-ecs-execution
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadRuntimeSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref ApplicationSecretArn
+                  - !If [HasProviderSecret, !Ref ProviderSecretArn, !Ref "AWS::NoValue"]
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    kms:ViaService: !Sub secretsmanager.${AWS::Region}.amazonaws.com
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub tailorahub-${EnvironmentName}-ecs-task
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ApplicationDataAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:GetObjectTagging
+                  - s3:PutObjectTagging
+                Resource: !Sub "${MediaBucketArn}/media/*"
+              - Effect: Allow
+                Action:
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !Ref TaskQueueArn
+                  - !Ref TaskDeadLetterQueueArn
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: "*"
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public HTTPS access to the TailoraHub application load balancer
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 8001
+          ToPort: 8001
+          CidrIp: !Ref VpcCidr
+
+  ApplicationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: TailoraHub private Fargate tasks
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8001
+          ToPort: 8001
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+
+  DatabaseIngressFromTasks:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: ManageDatabaseIngress
+    Properties:
+      GroupId: !Ref DatabaseSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      SourceSecurityGroupId: !Ref ApplicationSecurityGroup
+      Description: PostgreSQL from TailoraHub Fargate tasks
+
+  RedisIngressFromTasks:
+    Type: AWS::EC2::SecurityGroupIngress
+    Condition: ManageRedisIngress
+    Properties:
+      GroupId: !Ref RedisSecurityGroupId
+      IpProtocol: tcp
+      FromPort: 6379
+      ToPort: 6379
+      SourceSecurityGroupId: !Ref ApplicationSecurityGroup
+      Description: Redis TLS from TailoraHub Fargate tasks
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub tailorahub-${EnvironmentName}
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets: !Ref PublicSubnetIds
+      LoadBalancerAttributes:
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+        - Key: routing.http2.enabled
+          Value: "true"
+        - Key: idle_timeout.timeout_seconds
+          Value: "120"
+
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub tailorahub-${EnvironmentName}-web
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8001
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckPath: /api/health
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTPS
+      Port: 443
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebTargetGroup
+
+  WebTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub tailorahub-${EnvironmentName}-web
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "2048"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      RuntimePlatform:
+        CpuArchitecture: X86_64
+        OperatingSystemFamily: LINUX
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImageUri
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8001
+              Protocol: tcp
+          Environment:
+            - Name: APP_ENV
+              Value: production
+            - Name: AUTO_MIGRATE
+              Value: "false"
+            - Name: PORT
+              Value: "8001"
+            - Name: CORS_ORIGINS
+              Value: !Ref CorsOrigins
+            - Name: MEDIA_STORAGE_BACKEND
+              Value: s3
+            - Name: S3_MEDIA_BUCKET
+              Value: !Ref MediaBucketName
+            - Name: S3_MEDIA_REGION
+              Value: !Ref "AWS::Region"
+            - Name: S3_MEDIA_KEY_PREFIX
+              Value: media
+            - Name: CLOUDFRONT_MEDIA_BASE_URL
+              Value: !Ref CloudFrontMediaBaseUrl
+            - Name: REALTIME_BACKPLANE
+              Value: redis
+            - Name: REDIS_URL
+              Value: !Ref RedisUrl
+            - Name: TRAFFIC_STORE_BACKEND
+              Value: redis
+            - Name: TASK_QUEUE_BACKEND
+              Value: sqs
+            - Name: SQS_TASK_QUEUE_URL
+              Value: !Ref TaskQueueUrl
+            - Name: SQS_TASK_DLQ_URL
+              Value: !Ref TaskDeadLetterQueueUrl
+            - Name: SQS_REGION
+              Value: !Ref "AWS::Region"
+            - Name: CLIENT_IP_TRUSTED_PROXY_NETWORKS
+              Value: !Ref TrustedProxyNetworks
+            - Name: ADMIN_TRUSTED_PROXY_NETWORKS
+              Value: !Ref TrustedProxyNetworks
+            - Name: ADMIN_ALLOWED_NETWORKS
+              Value: !Ref AdminAllowedNetworks
+            - Name: SMS_PROVIDER
+              Value: !Ref SmsProvider
+            - Name: SMS_SENDER_ID
+              Value: !Ref SmsSenderId
+            - Name: SMS_OTP_TEMPLATE_ID
+              Value: !Ref SmsOtpTemplateId
+            - Name: SMS_API_BASE_URL
+              Value: !Ref SmsApiBaseUrl
+            - Name: EMAIL_PROVIDER
+              Value: !Ref EmailProvider
+            - Name: EMAIL_FROM_ADDRESS
+              Value: !Ref EmailFromAddress
+            - Name: AWS_SES_REGION
+              Value: !Ref "AWS::Region"
+            - Name: PAYMENT_PROVIDER
+              Value: !Ref PaymentProvider
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "${ApplicationSecretArn}:DATABASE_URL::"
+            - Name: JWT_SECRET
+              ValueFrom: !Sub "${ApplicationSecretArn}:JWT_SECRET::"
+            - Name: JWT_REFRESH_SECRET
+              ValueFrom: !Sub "${ApplicationSecretArn}:JWT_REFRESH_SECRET::"
+            - Name: ADMIN_PASSWORD
+              ValueFrom: !Sub "${ApplicationSecretArn}:ADMIN_PASSWORD::"
+            - Name: AADHAAR_ENCRYPTION_KEY
+              ValueFrom: !Sub "${ApplicationSecretArn}:AADHAAR_ENCRYPTION_KEY::"
+            - !If
+              - HasProviderSecret
+              - Name: SMS_API_KEY
+                ValueFrom: !Sub "${ProviderSecretArn}:SMS_API_KEY::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: SMS_API_SECRET
+                ValueFrom: !Sub "${ProviderSecretArn}:SMS_API_SECRET::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: EMAIL_API_KEY
+                ValueFrom: !Sub "${ProviderSecretArn}:EMAIL_API_KEY::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: RAZORPAY_KEY_ID
+                ValueFrom: !Sub "${ProviderSecretArn}:RAZORPAY_KEY_ID::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: RAZORPAY_KEY_SECRET
+                ValueFrom: !Sub "${ProviderSecretArn}:RAZORPAY_KEY_SECRET::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: RAZORPAY_WEBHOOK_SECRET
+                ValueFrom: !Sub "${ProviderSecretArn}:RAZORPAY_WEBHOOK_SECRET::"
+              - !Ref "AWS::NoValue"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WebLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: backend
+
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub tailorahub-${EnvironmentName}-worker
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "1024"
+      Memory: "2048"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImageUri
+          Essential: true
+          Environment:
+            - Name: APP_ENV
+              Value: production
+            - Name: AUTO_MIGRATE
+              Value: "false"
+            - Name: SERVICE_ROLE
+              Value: worker
+            - Name: MEDIA_STORAGE_BACKEND
+              Value: s3
+            - Name: S3_MEDIA_BUCKET
+              Value: !Ref MediaBucketName
+            - Name: S3_MEDIA_REGION
+              Value: !Ref "AWS::Region"
+            - Name: S3_MEDIA_KEY_PREFIX
+              Value: media
+            - Name: CLOUDFRONT_MEDIA_BASE_URL
+              Value: !Ref CloudFrontMediaBaseUrl
+            - Name: REDIS_URL
+              Value: !Ref RedisUrl
+            - Name: TASK_QUEUE_BACKEND
+              Value: sqs
+            - Name: SQS_TASK_QUEUE_URL
+              Value: !Ref TaskQueueUrl
+            - Name: SQS_TASK_DLQ_URL
+              Value: !Ref TaskDeadLetterQueueUrl
+            - Name: SQS_REGION
+              Value: !Ref "AWS::Region"
+            - Name: SMS_PROVIDER
+              Value: !Ref SmsProvider
+            - Name: SMS_SENDER_ID
+              Value: !Ref SmsSenderId
+            - Name: SMS_OTP_TEMPLATE_ID
+              Value: !Ref SmsOtpTemplateId
+            - Name: SMS_API_BASE_URL
+              Value: !Ref SmsApiBaseUrl
+            - Name: EMAIL_PROVIDER
+              Value: !Ref EmailProvider
+            - Name: EMAIL_FROM_ADDRESS
+              Value: !Ref EmailFromAddress
+            - Name: AWS_SES_REGION
+              Value: !Ref "AWS::Region"
+            - Name: PAYMENT_PROVIDER
+              Value: !Ref PaymentProvider
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "${ApplicationSecretArn}:DATABASE_URL::"
+            - !If
+              - HasProviderSecret
+              - Name: SMS_API_KEY
+                ValueFrom: !Sub "${ProviderSecretArn}:SMS_API_KEY::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: SMS_API_SECRET
+                ValueFrom: !Sub "${ProviderSecretArn}:SMS_API_SECRET::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: EMAIL_API_KEY
+                ValueFrom: !Sub "${ProviderSecretArn}:EMAIL_API_KEY::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: RAZORPAY_KEY_ID
+                ValueFrom: !Sub "${ProviderSecretArn}:RAZORPAY_KEY_ID::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: RAZORPAY_KEY_SECRET
+                ValueFrom: !Sub "${ProviderSecretArn}:RAZORPAY_KEY_SECRET::"
+              - !Ref "AWS::NoValue"
+            - !If
+              - HasProviderSecret
+              - Name: RAZORPAY_WEBHOOK_SECRET
+                ValueFrom: !Sub "${ProviderSecretArn}:RAZORPAY_WEBHOOK_SECRET::"
+              - !Ref "AWS::NoValue"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref WorkerLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: worker
+
+  SchedulerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub tailorahub-${EnvironmentName}-scheduler
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImageUri
+          Essential: true
+          Environment:
+            - Name: APP_ENV
+              Value: production
+            - Name: AUTO_MIGRATE
+              Value: "false"
+            - Name: SERVICE_ROLE
+              Value: scheduler
+            - Name: TASK_QUEUE_BACKEND
+              Value: sqs
+            - Name: SQS_TASK_QUEUE_URL
+              Value: !Ref TaskQueueUrl
+            - Name: SQS_TASK_DLQ_URL
+              Value: !Ref TaskDeadLetterQueueUrl
+            - Name: SQS_REGION
+              Value: !Ref "AWS::Region"
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "${ApplicationSecretArn}:DATABASE_URL::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref SchedulerLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: scheduler
+
+  MigrationTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub tailorahub-${EnvironmentName}-migration
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImageUri
+          Essential: true
+          Environment:
+            - Name: APP_ENV
+              Value: production
+            - Name: AUTO_MIGRATE
+              Value: "false"
+            - Name: SERVICE_ROLE
+              Value: migration
+          Secrets:
+            - Name: DATABASE_URL
+              ValueFrom: !Sub "${ApplicationSecretArn}:DATABASE_URL::"
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref MigrationLogGroup
+              awslogs-region: !Ref "AWS::Region"
+              awslogs-stream-prefix: migration
+
+  WebService:
+    Type: AWS::ECS::Service
+    Condition: ShouldDeployServices
+    DependsOn: HttpsListener
+    Properties:
+      ServiceName: !Sub tailorahub-${EnvironmentName}-web
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref WebTaskDefinition
+      DesiredCount: !Ref WebDesiredCount
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      EnableECSManagedTags: true
+      EnableExecuteCommand: false
+      HealthCheckGracePeriodSeconds: 90
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref ApplicationSecurityGroup
+          Subnets: !Ref PrivateSubnetIds
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: 8001
+          TargetGroupArn: !Ref WebTargetGroup
+
+  WorkerService:
+    Type: AWS::ECS::Service
+    Condition: ShouldDeployServices
+    Properties:
+      ServiceName: !Sub tailorahub-${EnvironmentName}-worker
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref WorkerTaskDefinition
+      DesiredCount: !Ref WorkerDesiredCount
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      EnableECSManagedTags: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 50
+        MaximumPercent: 200
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref ApplicationSecurityGroup
+          Subnets: !Ref PrivateSubnetIds
+
+  SchedulerService:
+    Type: AWS::ECS::Service
+    Condition: ShouldDeployServices
+    Properties:
+      ServiceName: !Sub tailorahub-${EnvironmentName}-scheduler
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref SchedulerTaskDefinition
+      DesiredCount: 1
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Weight: 1
+      EnableECSManagedTags: true
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref ApplicationSecurityGroup
+          Subnets: !Ref PrivateSubnetIds
+
+  WebScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: ShouldDeployServices
+    DependsOn: WebService
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub service/${Cluster}/${WebService.Name}
+      MinCapacity: !Ref WebMinimumCount
+      MaxCapacity: !Ref WebMaximumCount
+
+  WebCpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: ShouldDeployServices
+    Properties:
+      PolicyName: !Sub tailorahub-${EnvironmentName}-web-cpu
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WebScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 60
+        ScaleInCooldown: 180
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+
+  WebMemoryScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: ShouldDeployServices
+    Properties:
+      PolicyName: !Sub tailorahub-${EnvironmentName}-web-memory
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref WebScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: 70
+        ScaleInCooldown: 180
+        ScaleOutCooldown: 60
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster
+  LoadBalancerArn:
+    Value: !Ref LoadBalancer
+  LoadBalancerDnsName:
+    Value: !GetAtt LoadBalancer.DNSName
+  WebServiceName:
+    Condition: ShouldDeployServices
+    Value: !GetAtt WebService.Name
+  WorkerServiceName:
+    Condition: ShouldDeployServices
+    Value: !GetAtt WorkerService.Name
+  SchedulerServiceName:
+    Condition: ShouldDeployServices
+    Value: !GetAtt SchedulerService.Name
+  MigrationTaskDefinitionArn:
+    Value: !Ref MigrationTaskDefinition
+  ApplicationSecurityGroupId:
+    Value: !Ref ApplicationSecurityGroup
