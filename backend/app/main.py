@@ -2,10 +2,12 @@ from base64 import b64decode
 from datetime import date, datetime, timedelta, timezone
 import ipaddress
 import json
+import logging
 from pathlib import Path
 import re
 import secrets
 import string
+import time
 import uuid
 
 import jwt
@@ -42,10 +44,13 @@ from .services.media_storage import MediaStorageError, get_media_storage, valida
 from .services.tracker_service import tracker_connections
 from .tasks.queue import enqueue_task
 from .middleware.traffic import TrafficProtectionMiddleware
+from .observability import configure_logging, emit_metric, reset_request_id, set_request_id
 
 
 UPLOADS_DIR = settings.base_dir / "uploads"
 media_storage = get_media_storage()
+configure_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="TailoraHub API", version="1.0.0")
 if settings.media_storage_backend == "local":
@@ -110,6 +115,54 @@ async def restrict_admin_network(request: Request, call_next):
         if not _ip_in_networks(client_ip, ADMIN_ALLOWED_NETWORKS):
             return JSONResponse(status_code=403, content={"detail": "Administrator access is not available from this network."})
     return await call_next(request)
+
+
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
+
+
+@app.middleware("http")
+async def observe_request(request: Request, call_next):
+    supplied_request_id = request.headers.get("x-request-id", "").strip()
+    request_id = supplied_request_id if REQUEST_ID_PATTERN.fullmatch(supplied_request_id) else uuid.uuid4().hex
+    token = set_request_id(request_id)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        status_code = response.status_code
+        logger.log(
+            logging.WARNING if status_code >= 500 else logging.INFO,
+            "http_request_completed",
+            extra={
+                "event": "http_request_completed",
+                "http_method": request.method,
+                "route": route,
+                "status_code": status_code,
+                "duration_ms": duration_ms,
+            },
+        )
+        if status_code >= 500:
+            emit_metric("Http5xx", 1)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception:
+        duration_ms = round((time.perf_counter() - started) * 1000, 2)
+        route = getattr(request.scope.get("route"), "path", "unmatched")
+        logger.exception(
+            "http_request_failed",
+            extra={
+                "event": "http_request_failed",
+                "http_method": request.method,
+                "route": route,
+                "status_code": 500,
+                "duration_ms": duration_ms,
+            },
+        )
+        emit_metric("Http5xx", 1)
+        raise
+    finally:
+        reset_request_id(token)
 
 app.include_router(api_router, prefix="/api/v1")
 bearer = HTTPBearer(auto_error=False)

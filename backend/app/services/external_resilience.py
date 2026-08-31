@@ -9,6 +9,7 @@ import time
 from urllib import error as urllib_error
 
 from app.settings import settings
+from app.observability import emit_metric
 
 
 logger = logging.getLogger(__name__)
@@ -74,7 +75,28 @@ def safe_provider_error(exc: Exception) -> str:
 def external_call(provider: str, operation: str, action, *, retry_safe: bool = False):
     """Execute an external call without ever logging request URLs, payloads, or credentials."""
     attempts = max(1, settings.external_safe_retry_attempts if retry_safe else 1)
-    provider_circuits.before_call(provider)
+    try:
+        provider_circuits.before_call(provider)
+    except CircuitOpenError:
+        logger.warning(
+            "external_provider_failure",
+            extra={
+                "event": "external_provider_failure",
+                "provider": provider,
+                "operation": operation,
+                "category": "provider_circuit_open",
+                "attempt": 0,
+                "retry": False,
+            },
+        )
+        emit_metric(
+            "ExternalProviderFailure",
+            1,
+            Provider=provider,
+            Operation=operation,
+            Category="provider_circuit_open",
+        )
+        raise
     for attempt in range(1, attempts + 1):
         try:
             result = action()
@@ -82,13 +104,24 @@ def external_call(provider: str, operation: str, action, *, retry_safe: bool = F
             return result
         except Exception as exc:
             retryable = retry_safe and is_retryable_exception(exc) and attempt < attempts
+            category = safe_provider_error(exc)
             logger.warning(
-                "external_provider_failure provider=%s operation=%s category=%s attempt=%s retry=%s",
-                provider,
-                operation,
-                safe_provider_error(exc),
-                attempt,
-                retryable,
+                "external_provider_failure",
+                extra={
+                    "event": "external_provider_failure",
+                    "provider": provider,
+                    "operation": operation,
+                    "category": category,
+                    "attempt": attempt,
+                    "retry": retryable,
+                },
+            )
+            emit_metric(
+                "ExternalProviderFailure",
+                1,
+                Provider=provider,
+                Operation=operation,
+                Category=category,
             )
             if not retryable:
                 provider_circuits.failure(provider)

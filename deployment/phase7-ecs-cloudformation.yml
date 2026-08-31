@@ -66,6 +66,14 @@ Parameters:
   TrustedProxyNetworks:
     Type: String
     Description: Comma-separated private VPC/ALB CIDRs trusted to supply X-Forwarded-For.
+  AlbAccessLogsBucketName:
+    Type: String
+    Default: ""
+    Description: Optional Phase 8 encrypted S3 bucket for ALB access logs.
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR, CRITICAL]
   SmsProvider:
     Type: String
     Default: mock
@@ -114,6 +122,7 @@ Conditions:
   ManageDatabaseIngress: !Not [!Equals [!Ref DatabaseSecurityGroupId, ""]]
   ManageRedisIngress: !Not [!Equals [!Ref RedisSecurityGroupId, ""]]
   ShouldDeployServices: !Equals [!Ref DeployServices, "true"]
+  HasAlbAccessLogsBucket: !Not [!Equals [!Ref AlbAccessLogsBucketName, ""]]
 
 Resources:
   Cluster:
@@ -299,6 +308,21 @@ Resources:
           Value: "true"
         - Key: idle_timeout.timeout_seconds
           Value: "120"
+        - !If
+          - HasAlbAccessLogsBucket
+          - Key: access_logs.s3.enabled
+            Value: "true"
+          - !Ref "AWS::NoValue"
+        - !If
+          - HasAlbAccessLogsBucket
+          - Key: access_logs.s3.bucket
+            Value: !Ref AlbAccessLogsBucketName
+          - !Ref "AWS::NoValue"
+        - !If
+          - HasAlbAccessLogsBucket
+          - Key: access_logs.s3.prefix
+            Value: alb
+          - !Ref "AWS::NoValue"
 
   WebTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
@@ -374,6 +398,10 @@ Resources:
               Value: "false"
             - Name: PORT
               Value: "8001"
+            - Name: LOG_LEVEL
+              Value: !Ref LogLevel
+            - Name: CLOUDWATCH_EMF_ENABLED
+              Value: "true"
             - Name: CORS_ORIGINS
               Value: !Ref CorsOrigins
             - Name: MEDIA_STORAGE_BACKEND
@@ -491,6 +519,10 @@ Resources:
               Value: "false"
             - Name: SERVICE_ROLE
               Value: worker
+            - Name: LOG_LEVEL
+              Value: !Ref LogLevel
+            - Name: CLOUDWATCH_EMF_ENABLED
+              Value: "true"
             - Name: MEDIA_STORAGE_BACKEND
               Value: s3
             - Name: S3_MEDIA_BUCKET
@@ -588,6 +620,10 @@ Resources:
               Value: "false"
             - Name: SERVICE_ROLE
               Value: scheduler
+            - Name: LOG_LEVEL
+              Value: !Ref LogLevel
+            - Name: CLOUDWATCH_EMF_ENABLED
+              Value: "true"
             - Name: TASK_QUEUE_BACKEND
               Value: sqs
             - Name: SQS_TASK_QUEUE_URL

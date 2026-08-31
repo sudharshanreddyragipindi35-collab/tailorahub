@@ -5,9 +5,11 @@ import signal
 
 from app.settings import settings
 from app.tasks.scheduler import configure_jobs, scheduler
+from app.observability import configure_logging
 
 
 async def main() -> None:
+    configure_logging()
     if settings.task_queue_backend != "sqs":
         raise RuntimeError("The production scheduler requires TASK_QUEUE_BACKEND=sqs")
     stopped = asyncio.Event()

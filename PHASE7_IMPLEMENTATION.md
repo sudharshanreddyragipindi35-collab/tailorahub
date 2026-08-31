@@ -71,3 +71,5 @@ aws cloudformation deploy --profile tailorahub-prod --region ap-south-1 --stack-
 ```
 
 The two backend web tasks start at 1 vCPU and 2 GB each. Target tracking starts at 60% CPU and 70% memory, with a minimum of two and maximum of ten web tasks. These values must be tuned from Phase 10 load-test evidence.
+
+After deploying Phase 8, pass its `AlbAccessLogsBucketName` output back into this stack to enable encrypted ALB access logs. The backend, worker, and scheduler task definitions already enable Phase 8 JSON logs and Embedded Metric Format records.

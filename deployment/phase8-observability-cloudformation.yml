@@ -1,0 +1,511 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: TailoraHub Phase 8 CloudWatch dashboard, alarms, notification topic, and ALB access-log storage.
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: production
+    AllowedPattern: "[a-z0-9-]+"
+  AlarmEmail:
+    Type: String
+    Default: ""
+    Description: Optional operations email. The SNS subscription must be confirmed before alerts are delivered.
+  LoadBalancerFullName:
+    Type: String
+    Description: CloudWatch ALB dimension, for example app/tailorahub-production/abc123.
+  TargetGroupFullName:
+    Type: String
+    Description: CloudWatch target group dimension, for example targetgroup/tailorahub-production-web/abc123.
+  EcsClusterName:
+    Type: String
+  WebServiceName:
+    Type: String
+  RdsDbInstanceIdentifier:
+    Type: String
+  RedisReplicationGroupId:
+    Type: String
+  TaskQueueName:
+    Type: String
+    Default: tailorahub-production-tasks
+  TaskDeadLetterQueueName:
+    Type: String
+    Default: tailorahub-production-tasks-dlq
+  DatabaseConnectionAlarmThreshold:
+    Type: Number
+    Default: 80
+    MinValue: 1
+  RedisConnectionAlarmThreshold:
+    Type: Number
+    Default: 1000
+    MinValue: 1
+
+Conditions:
+  HasAlarmEmail: !Not [!Equals [!Ref AlarmEmail, ""]]
+
+Resources:
+  OperationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub tailorahub-${EnvironmentName}-operations
+      DisplayName: TailoraHub production alerts
+      KmsMasterKeyId: alias/aws/sns
+
+  OperationsEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAlarmEmail
+    Properties:
+      TopicArn: !Ref OperationsTopic
+      Protocol: email
+      Endpoint: !Ref AlarmEmail
+
+  AlbAccessLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAlbAccessLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 30
+      VersioningConfiguration:
+        Status: Enabled
+
+  AlbAccessLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AlbAccessLogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowAlbLogDelivery
+            Effect: Allow
+            Principal:
+              Service: logdelivery.elasticloadbalancing.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${AlbAccessLogsBucket.Arn}/alb/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref "AWS::AccountId"
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:elasticloadbalancing:${AWS::Region}:${AWS::AccountId}:loadbalancer/*
+
+  AlbFiveXxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-alb-5xx
+      AlarmDescription: ALB-generated 5xx responses exceeded the initial production threshold.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_ELB_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  TargetFiveXxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-target-5xx
+      AlarmDescription: Backend targets returned elevated 5xx responses.
+      Namespace: AWS/ApplicationELB
+      MetricName: HTTPCode_Target_5XX_Count
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !Ref TargetGroupFullName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  TargetLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-target-latency-p95
+      AlarmDescription: Backend p95 response time exceeded one second for two periods.
+      Namespace: AWS/ApplicationELB
+      MetricName: TargetResponseTime
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !Ref TargetGroupFullName
+      ExtendedStatistic: p95
+      Period: 300
+      EvaluationPeriods: 2
+      DatapointsToAlarm: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  UnhealthyTargetsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-unhealthy-targets
+      AlarmDescription: One or more backend targets are unhealthy.
+      Namespace: AWS/ApplicationELB
+      MetricName: UnHealthyHostCount
+      Dimensions:
+        - Name: LoadBalancer
+          Value: !Ref LoadBalancerFullName
+        - Name: TargetGroup
+          Value: !Ref TargetGroupFullName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  WebCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-web-cpu
+      AlarmDescription: ECS web service CPU is above the operating threshold.
+      Namespace: AWS/ECS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsClusterName
+        - Name: ServiceName
+          Value: !Ref WebServiceName
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  WebMemoryAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-web-memory
+      AlarmDescription: ECS web service memory is above the operating threshold.
+      Namespace: AWS/ECS
+      MetricName: MemoryUtilization
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsClusterName
+        - Name: ServiceName
+          Value: !Ref WebServiceName
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 85
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  WebTaskCountAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-web-task-count
+      AlarmDescription: Fewer than two web tasks are running.
+      Namespace: ECS/ContainerInsights
+      MetricName: RunningTaskCount
+      Dimensions:
+        - Name: ClusterName
+          Value: !Ref EcsClusterName
+        - Name: ServiceName
+          Value: !Ref WebServiceName
+      Statistic: Minimum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 2
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  DatabaseCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-database-cpu
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsDbInstanceIdentifier
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  DatabaseConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-database-connections
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsDbInstanceIdentifier
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref DatabaseConnectionAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  DatabaseFreeStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-database-free-storage
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref RdsDbInstanceIdentifier
+      Statistic: Minimum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 10737418240
+      ComparisonOperator: LessThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  RedisCpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-redis-cpu
+      Namespace: AWS/ElastiCache
+      MetricName: EngineCPUUtilization
+      Dimensions:
+        - Name: ReplicationGroupId
+          Value: !Ref RedisReplicationGroupId
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      DatapointsToAlarm: 2
+      Threshold: 75
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  RedisEvictionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-redis-evictions
+      Namespace: AWS/ElastiCache
+      MetricName: Evictions
+      Dimensions:
+        - Name: ReplicationGroupId
+          Value: !Ref RedisReplicationGroupId
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  RedisConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-redis-connections
+      Namespace: AWS/ElastiCache
+      MetricName: CurrConnections
+      Dimensions:
+        - Name: ReplicationGroupId
+          Value: !Ref RedisReplicationGroupId
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: !Ref RedisConnectionAlarmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: breaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  QueueDepthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-queue-depth
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref TaskQueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 100
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  QueueAgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-queue-age
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref TaskQueueName
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 300
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  DeadLetterQueueAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-dead-letter-queue
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref TaskDeadLetterQueueName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  ApplicationHttpFiveXxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-application-http-5xx
+      Namespace: TailoraHub/Application
+      MetricName: Http5xx
+      Dimensions:
+        - Name: Environment
+          Value: !Ref EnvironmentName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  ExternalProviderFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-provider-failures
+      Namespace: TailoraHub/Application
+      MetricName: ExternalProviderFailure
+      Dimensions:
+        - Name: Environment
+          Value: !Ref EnvironmentName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  PaymentWebhookFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-payment-webhook-failure
+      Namespace: TailoraHub/Application
+      MetricName: PaymentWebhookFailure
+      Dimensions:
+        - Name: Environment
+          Value: !Ref EnvironmentName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  BackgroundJobFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub tailorahub-${EnvironmentName}-background-job-failure
+      Namespace: TailoraHub/Application
+      MetricName: BackgroundJobFailure
+      Dimensions:
+        - Name: Environment
+          Value: !Ref EnvironmentName
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref OperationsTopic]
+      OKActions: [!Ref OperationsTopic]
+
+  OperationsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub TailoraHub-${EnvironmentName}-Operations
+      DashboardBody: !Sub |
+        {
+          "start":"-PT6H",
+          "periodOverride":"inherit",
+          "widgets":[
+            {"type":"metric","x":0,"y":0,"width":12,"height":6,"properties":{"title":"API traffic, errors, and p95 latency","region":"${AWS::Region}","view":"timeSeries","metrics":[["AWS/ApplicationELB","RequestCount","LoadBalancer","${LoadBalancerFullName}",{"stat":"Sum"}],["AWS/ApplicationELB","HTTPCode_Target_5XX_Count","LoadBalancer","${LoadBalancerFullName}","TargetGroup","${TargetGroupFullName}",{"stat":"Sum","yAxis":"right"}],["AWS/ApplicationELB","TargetResponseTime","LoadBalancer","${LoadBalancerFullName}","TargetGroup","${TargetGroupFullName}",{"stat":"p95"}]]}},
+            {"type":"metric","x":12,"y":0,"width":12,"height":6,"properties":{"title":"ECS web capacity","region":"${AWS::Region}","view":"timeSeries","metrics":[["AWS/ECS","CPUUtilization","ClusterName","${EcsClusterName}","ServiceName","${WebServiceName}",{"stat":"Average"}],["AWS/ECS","MemoryUtilization","ClusterName","${EcsClusterName}","ServiceName","${WebServiceName}",{"stat":"Average"}],["ECS/ContainerInsights","RunningTaskCount","ClusterName","${EcsClusterName}","ServiceName","${WebServiceName}",{"stat":"Minimum"}]]}},
+            {"type":"metric","x":0,"y":6,"width":8,"height":6,"properties":{"title":"PostgreSQL","region":"${AWS::Region}","metrics":[["AWS/RDS","CPUUtilization","DBInstanceIdentifier","${RdsDbInstanceIdentifier}"],["AWS/RDS","DatabaseConnections","DBInstanceIdentifier","${RdsDbInstanceIdentifier}",{"yAxis":"right"}],["AWS/RDS","FreeStorageSpace","DBInstanceIdentifier","${RdsDbInstanceIdentifier}",{"yAxis":"right"}]]}},
+            {"type":"metric","x":8,"y":6,"width":8,"height":6,"properties":{"title":"Redis / Valkey","region":"${AWS::Region}","metrics":[["AWS/ElastiCache","EngineCPUUtilization","ReplicationGroupId","${RedisReplicationGroupId}"],["AWS/ElastiCache","CurrConnections","ReplicationGroupId","${RedisReplicationGroupId}",{"yAxis":"right"}],["AWS/ElastiCache","Evictions","ReplicationGroupId","${RedisReplicationGroupId}",{"stat":"Sum","yAxis":"right"}]]}},
+            {"type":"metric","x":16,"y":6,"width":8,"height":6,"properties":{"title":"Background queues","region":"${AWS::Region}","metrics":[["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${TaskQueueName}"],["AWS/SQS","ApproximateAgeOfOldestMessage","QueueName","${TaskQueueName}",{"yAxis":"right"}],["AWS/SQS","ApproximateNumberOfMessagesVisible","QueueName","${TaskDeadLetterQueueName}",{"yAxis":"right"}]]}},
+            {"type":"metric","x":0,"y":12,"width":12,"height":6,"properties":{"title":"Application failures","region":"${AWS::Region}","metrics":[["TailoraHub/Application","Http5xx","Environment","${EnvironmentName}",{"stat":"Sum"}],["TailoraHub/Application","ExternalProviderFailure","Environment","${EnvironmentName}",{"stat":"Sum"}],["TailoraHub/Application","PaymentWebhookFailure","Environment","${EnvironmentName}",{"stat":"Sum"}],["TailoraHub/Application","BackgroundJobFailure","Environment","${EnvironmentName}",{"stat":"Sum"}]]}},
+            {"type":"log","x":12,"y":12,"width":12,"height":6,"properties":{"title":"Recent application errors","region":"${AWS::Region}","view":"table","query":"SOURCE logGroups(namePrefix: ['/ecs/tailorahub/${EnvironmentName}/']) | fields @timestamp, serviceRole, requestId, event, message | filter level in ['ERROR','CRITICAL'] | sort @timestamp desc | limit 50"}}
+          ]
+        }
+
+Outputs:
+  OperationsTopicArn:
+    Value: !Ref OperationsTopic
+  AlbAccessLogsBucketName:
+    Value: !Ref AlbAccessLogsBucket
+  DashboardName:
+    Value: !Ref OperationsDashboard

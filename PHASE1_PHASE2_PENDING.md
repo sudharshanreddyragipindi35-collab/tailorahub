@@ -1,4 +1,4 @@
-# Phase 1 through Phase 7 pending items
+# Phase 1 through Phase 8 pending items
 
 This file is the single backlog for production-account work and measured validation intentionally deferred while implementation continues.
 
@@ -88,3 +88,20 @@ The Phase 6 source implementation and production variables are documented in `PH
 14. Confirm RDS Proxy, Redis TLS, private S3 media, CloudFront delivery, SQS/DLQ, security-group boundaries, and approved `/32` admin access work from the deployed services.
 
 The Phase 7 infrastructure source and ordered production runbook are documented in `PHASE7_IMPLEMENTATION.md`.
+
+## Phase 8: production monitoring and operational validation
+
+1. Replace every placeholder in a private copy of `deployment/phase8-parameters.example.json` with the real ALB, target group, ECS, RDS, Redis, and SQS CloudWatch dimensions.
+2. Reauthenticate `tailorahub-prod`, validate `deployment/phase8-observability-cloudformation.yml` in AWS, and deploy the observability stack.
+3. Confirm the SNS operations subscription and send one controlled alarm plus recovery notification to verify the channel end to end.
+4. Add the Phase 8 `AlbAccessLogsBucketName` output to the Phase 7 parameters, update the application stack, and verify ALB log objects arrive under the expected account prefix.
+5. Deploy the Phase 8 backend image and confirm valid JSON logs, `X-Request-ID` correlation, EMF extraction, log-group retention, and safe absence of bodies, headers, OTPs, identity values, and provider secrets.
+6. Verify every alarm uses the correct production dimensions and is not stuck in `INSUFFICIENT_DATA` because of an identifier or metric mismatch.
+7. Replace the initial RDS and Redis connection thresholds with values derived from actual instance limits and the Phase 1 connection budget.
+8. Generate representative traffic and tune ALB, ECS, RDS, Redis, SQS, and application thresholds after measuring normal, peak, and quiet periods.
+9. Run controlled unhealthy-task, high-latency, queue-backlog, DLQ, provider-failure, and payment-webhook drills using `OPERATIONS_RUNBOOK.md`.
+10. Confirm the CloudWatch dashboard and incident queries are usable by the people responsible for production without granting unnecessary data or infrastructure access.
+11. Assign named owners for deploys, rollbacks, database access, secret rotation, billing, alert response, and incident leadership in the private operations system.
+12. Review monitoring cost, log retention, alarm noise, and SNS delivery monthly, preserving security and payment alarms even during tuning.
+
+The Phase 8 source implementation, deployment order, alarms, and operational procedures are documented in `PHASE8_IMPLEMENTATION.md` and `OPERATIONS_RUNBOOK.md`.

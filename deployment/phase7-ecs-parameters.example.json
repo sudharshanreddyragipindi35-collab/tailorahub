@@ -21,5 +21,7 @@
   { "ParameterKey": "CorsOrigins", "ParameterValue": "https://tailorahub.com,https://www.tailorahub.com" },
   { "ParameterKey": "AdminAllowedNetworks", "ParameterValue": "YOUR_APPROVED_IP/32" },
   { "ParameterKey": "TrustedProxyNetworks", "ParameterValue": "YOUR_VPC_CIDR" },
+  { "ParameterKey": "AlbAccessLogsBucketName", "ParameterValue": "" },
+  { "ParameterKey": "LogLevel", "ParameterValue": "INFO" },
   { "ParameterKey": "DeployServices", "ParameterValue": "false" }
 ]

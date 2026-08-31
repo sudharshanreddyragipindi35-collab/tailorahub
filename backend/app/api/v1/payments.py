@@ -20,6 +20,7 @@ from app.schemas.payments import QrPaymentIn, QrPaymentOut
 from app.services.tracker_service import tracker_connections
 from app.services.webhook_service import verify_payment_webhook_signature
 from app.settings import settings
+from app.observability import emit_metric
 
 
 router = APIRouter()
@@ -72,8 +73,11 @@ async def razorpay_webhook(
 ) -> dict:
     raw_payload = await request.body()
     if not settings.razorpay_webhook_secret and not settings.payment_webhook_secret:
+        emit_metric("PaymentWebhookFailure", 1, Category="not_configured")
         raise HTTPException(503, "Payment webhook verification is not configured.")
     if not x_razorpay_signature or not verify_payment_webhook_signature(raw_payload, x_razorpay_signature):
+        logger.warning("razorpay_webhook_rejected category=invalid_signature")
+        emit_metric("PaymentWebhookFailure", 1, Category="invalid_signature")
         raise HTTPException(401, "Invalid Razorpay webhook signature.")
     try:
         payload = json.loads(raw_payload)
@@ -208,6 +212,7 @@ async def razorpay_webhook(
         )
         await db.commit()
         logger.exception("razorpay_webhook_processing_failed event_id=%s category=%s", event_id, type(exc).__name__)
+        emit_metric("PaymentWebhookFailure", 1, Category="processing_failed")
         raise HTTPException(500, "Webhook processing failed and may be retried.")
 
 

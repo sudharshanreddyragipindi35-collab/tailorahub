@@ -31,6 +31,8 @@ def env_int(name: str, default: int) -> int:
 class Settings:
     base_dir = BASE_DIR
     app_env = env_value("APP_ENV", "development").lower()
+    log_level = env_value("LOG_LEVEL", "INFO").upper()
+    cloudwatch_emf_enabled = env_bool("CLOUDWATCH_EMF_ENABLED", app_env == "production")
     database_url = env_value(
         "DATABASE_URL",
         "postgresql+psycopg://tailorahub@localhost:5432/tailorahub_dev",

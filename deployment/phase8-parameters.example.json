@@ -1,0 +1,14 @@
+[
+  { "ParameterKey": "EnvironmentName", "ParameterValue": "production" },
+  { "ParameterKey": "AlarmEmail", "ParameterValue": "operations@tailorahub.com" },
+  { "ParameterKey": "LoadBalancerFullName", "ParameterValue": "app/tailorahub-production/REPLACE" },
+  { "ParameterKey": "TargetGroupFullName", "ParameterValue": "targetgroup/tailorahub-production-web/REPLACE" },
+  { "ParameterKey": "EcsClusterName", "ParameterValue": "tailorahub-production" },
+  { "ParameterKey": "WebServiceName", "ParameterValue": "tailorahub-production-web" },
+  { "ParameterKey": "RdsDbInstanceIdentifier", "ParameterValue": "tailorahub-production" },
+  { "ParameterKey": "RedisReplicationGroupId", "ParameterValue": "tailorahub-production" },
+  { "ParameterKey": "TaskQueueName", "ParameterValue": "tailorahub-production-tasks" },
+  { "ParameterKey": "TaskDeadLetterQueueName", "ParameterValue": "tailorahub-production-tasks-dlq" },
+  { "ParameterKey": "DatabaseConnectionAlarmThreshold", "ParameterValue": "80" },
+  { "ParameterKey": "RedisConnectionAlarmThreshold", "ParameterValue": "1000" }
+]

@@ -185,8 +185,11 @@ The initial sizes below are starting hypotheses and must be adjusted using load-
 
 ## Phase 8: Monitoring, alerting, and operations
 
-- [ ] Enable structured application logs with request IDs.
-- [ ] Enable CloudWatch logs for backend, worker, scheduler, and load balancer.
+- [x] Enable structured application logs with validated request IDs and safe route-template fields.
+- [x] Emit low-cardinality CloudWatch EMF metrics for application 5xx, provider, payment-webhook, and background-job failures.
+- [x] Prepare encrypted ALB access-log storage, CloudWatch dashboard, SNS topic, and production alarm definitions.
+- [x] Add incident response and rollback runbooks.
+- [ ] Enable CloudWatch logs for backend, worker, and scheduler, plus encrypted ALB access logs and CloudWatch ALB metrics.
 - [ ] Enable ECS Container Insights.
 - [ ] Monitor request rate, latency, error rate, CPU, memory, task count, restarts, and unhealthy targets.
 - [ ] Monitor PostgreSQL CPU, storage, connections, locks, slow queries, and replica lag when applicable.

@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app.db import engine
 from app.settings import settings
+from app.observability import configure_logging, emit_metric, reset_request_id, set_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -137,18 +138,32 @@ def _fail(message: dict, error: Exception) -> None:
 
 
 def process_message(message: dict) -> bool:
-    if not _claim(message):
-        return True
+    token = set_request_id(str(message.get("jobId") or "background-job")[:128])
     try:
-        result = execute_task_inline(message)
-        _finish(message, result)
-        return True
-    except Exception as exc:
-        _fail(message, exc)
-        raise
+        if not _claim(message):
+            return True
+        try:
+            result = execute_task_inline(message)
+            _finish(message, result)
+            return True
+        except Exception as exc:
+            _fail(message, exc)
+            logger.exception(
+                "background_job_failed",
+                extra={
+                    "event": "background_job_failed",
+                    "job_type": str(message.get("jobType") or "unknown"),
+                    "job_id": str(message.get("jobId") or "unknown"),
+                },
+            )
+            emit_metric("BackgroundJobFailure", 1, JobType=str(message.get("jobType") or "unknown"))
+            raise
+    finally:
+        reset_request_id(token)
 
 
 def main() -> None:
+    configure_logging()
     if settings.task_queue_backend != "sqs" or not settings.sqs_task_queue_url:
         raise RuntimeError("The worker requires TASK_QUEUE_BACKEND=sqs and SQS_TASK_QUEUE_URL")
     import boto3
@@ -164,6 +179,7 @@ def main() -> None:
             AttributeNames=["ApproximateReceiveCount"],
         )
         for sqs_message in response.get("Messages", []):
+            message: dict = {}
             try:
                 message = json.loads(sqs_message["Body"])
                 process_message(message)
@@ -176,7 +192,9 @@ def main() -> None:
                     ReceiptHandle=sqs_message["ReceiptHandle"],
                     VisibilityTimeout=delay,
                 )
-                logger.exception("background_job_failed attempts=%s", attempts)
+                if not message:
+                    logger.exception("background_message_invalid attempts=%s", attempts)
+                    emit_metric("BackgroundJobFailure", 1, JobType="invalid_message")
         if not response.get("Messages") and settings.task_long_poll_seconds == 0:
             time.sleep(1)
 
