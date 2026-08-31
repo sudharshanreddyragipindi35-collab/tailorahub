@@ -27,7 +27,7 @@ const suiteFunctions = {
 };
 
 const profiles = {
-  smoke: [{ duration: "15s", target: 1 }],
+  smoke: [{ duration: "30s", target: 1 }],
   baseline: [
     { duration: "30s", target: 50 },
     { duration: "2m", target: 50 },
@@ -108,6 +108,7 @@ export const options = {
     "http_req_duration{operation:read}": ["p(95)<500"],
     "http_req_duration{operation:write}": ["p(95)<1000"],
     checks: ["rate>0.99"],
+    iterations: ["count>0"],
   },
 };
 
