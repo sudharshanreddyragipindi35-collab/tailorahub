@@ -37,3 +37,17 @@ messages to the configured outbox instead of sending them.
 
 For Amazon SES or SendGrid, set `EMAIL_PROVIDER` and its provider secret, then
 verify the domain/aliases with that provider before switching production traffic.
+
+## EC2 runtime secret loading
+
+The backend can load the JSON application secret at startup using the EC2
+instance role. Set only the secret identifier in the container environment:
+
+```dotenv
+AWS_SECRETS_MANAGER_SECRET_ID=arn:aws:secretsmanager:eu-north-1:<account>:secret:tailorahub/production/application-<suffix>
+AWS_SECRETS_MANAGER_REGION=eu-north-1
+```
+
+The application reads the secret in memory and does not write its values to a
+file or log them. Remove the old plaintext `DATABASE_URL`, JWT, admin, and
+Aadhaar variables from the container after enabling this setting.

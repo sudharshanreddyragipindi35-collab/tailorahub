@@ -1,11 +1,41 @@
 import os
 import secrets
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
+
+
+def _load_runtime_secret() -> None:
+    """Load application settings from Secrets Manager when explicitly enabled.
+
+    The EC2 instance role supplies temporary credentials. Values are placed in
+    the process environment before Settings is evaluated; they are never
+    written to disk or printed.
+    """
+    secret_id = os.getenv("AWS_SECRETS_MANAGER_SECRET_ID", "").strip()
+    if not secret_id:
+        return
+    try:
+        import boto3
+
+        region = os.getenv("AWS_SECRETS_MANAGER_REGION") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+        client = boto3.client("secretsmanager", region_name=region) if region else boto3.client("secretsmanager")
+        response = client.get_secret_value(SecretId=secret_id)
+        payload = json.loads(response.get("SecretString") or "{}")
+        if not isinstance(payload, dict):
+            raise ValueError("secret must contain a JSON object")
+        for key, value in payload.items():
+            if isinstance(key, str) and value is not None:
+                os.environ[key] = str(value)
+    except Exception as exc:
+        raise RuntimeError("AWS_SECRETS_MANAGER_SECRET_ID is configured but the application secret could not be loaded") from exc
+
+
+_load_runtime_secret()
 _RUNTIME_JWT_SECRET = secrets.token_urlsafe(48)
 _RUNTIME_JWT_REFRESH_SECRET = secrets.token_urlsafe(48)
 _RUNTIME_ADMIN_PASSWORD = secrets.token_urlsafe(18)
