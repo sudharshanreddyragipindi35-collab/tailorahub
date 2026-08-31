@@ -29,7 +29,7 @@ Create one JSON secret such as `tailorahub/production/application` with these ke
 
 ```json
 {
-  "DATABASE_URL": "postgresql+psycopg://USER:PASSWORD@RDS_PROXY_HOST:5432/DATABASE",
+  "DATABASE_URL": "postgresql+psycopg://USER:PASSWORD@RDS_PROXY_HOST:5432/DATABASE?sslmode=require",
   "JWT_SECRET": "GENERATE_A_LONG_RANDOM_VALUE",
   "JWT_REFRESH_SECRET": "GENERATE_A_DIFFERENT_LONG_RANDOM_VALUE",
   "ADMIN_PASSWORD": "GENERATE_A_STRONG_UNIQUE_PASSWORD",
@@ -51,6 +51,8 @@ When live SMS, email, and Razorpay credentials arrive, create a separate JSON se
 ```
 
 Never add either live JSON document to this repository. Pass only the secret ARNs to CloudFormation.
+
+The Phase 9 production guard rejects plaintext PostgreSQL/Redis connections, placeholder or short secrets, wildcard/non-HTTPS CORS origins, demo data, and plaintext admin-credential files. The Phase 7 task definition sets both local-only bootstrap switches to `false`; keep the database `sslmode` and the `rediss://` Redis URL shown above.
 
 ## Deployment order
 

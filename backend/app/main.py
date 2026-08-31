@@ -39,6 +39,7 @@ from .security import (
     is_valid_aadhaar_format,
     verify_password,
 )
+from .security_hardening import apply_api_security_headers, validate_production_settings
 from .settings import settings
 from .services.media_storage import MediaStorageError, get_media_storage, validate_file_signature
 from .services.tracker_service import tracker_connections
@@ -115,6 +116,13 @@ async def restrict_admin_network(request: Request, call_next):
         if not _ip_in_networks(client_ip, ADMIN_ALLOWED_NETWORKS):
             return JSONResponse(status_code=403, content={"detail": "Administrator access is not available from this network."})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def secure_api_responses(request: Request, call_next):
+    response = await call_next(request)
+    apply_api_security_headers(response, settings.app_env == "production")
+    return response
 
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,128}$")
@@ -1102,6 +1110,28 @@ def delete_uploaded_url(url: str | None) -> None:
         pass
 
 
+def delete_uploaded_references(value) -> None:
+    """Best-effort deletion for nested media/document references before anonymization."""
+    if isinstance(value, dict):
+        for nested in value.values():
+            delete_uploaded_references(nested)
+        return
+    if isinstance(value, (list, tuple)):
+        for nested in value:
+            delete_uploaded_references(nested)
+        return
+    if not isinstance(value, str) or not value.strip():
+        return
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        parsed = None
+    if isinstance(parsed, (dict, list)):
+        delete_uploaded_references(parsed)
+    elif value.startswith(("/uploads/", "http://", "https://", "s3://")):
+        delete_uploaded_url(value)
+
+
 def queue_media_postprocess(object_key: str, content_type: str) -> None:
     enqueue_task(
         "media_postprocess",
@@ -1153,29 +1183,29 @@ def seed_admin(db: Session) -> None:
             {"id": uid("u"), "phone": settings.admin_phone, "email": settings.admin_email, "username": settings.admin_username, "password_hash": password_hash},
         )
     db.commit()
-    cred = settings.base_dir / "admin-credentials.txt"
-    password_note = (
-        settings.admin_password
-        if not existing or settings.admin_password_configured
-        else "existing password unchanged; set ADMIN_PASSWORD in backend/.env to rotate it"
-    )
-    cred.write_text(
-        "\n".join(
-            [
-                "TailoraHub Admin Credentials",
-                "============================",
-                "Backend production: https://tailorahub.com/api",
-                "Backend local: http://localhost:8001",
-                "Username: " + settings.admin_username,
-                "Password: " + password_note,
-                "Email: " + settings.admin_email,
-                "Phone: " + settings.admin_phone,
-                "Updated: " + datetime.now(timezone.utc).isoformat(),
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    if settings.write_admin_credential_file:
+        cred = settings.base_dir / "admin-credentials.txt"
+        password_note = (
+            settings.admin_password
+            if not existing or settings.admin_password_configured
+            else "existing password unchanged; set ADMIN_PASSWORD in backend/.env to rotate it"
+        )
+        cred.write_text(
+            "\n".join(
+                [
+                    "TailoraHub local-development admin credentials",
+                    "===============================================",
+                    "Backend local: http://localhost:8001",
+                    "Username: " + settings.admin_username,
+                    "Password: " + password_note,
+                    "Email: " + settings.admin_email,
+                    "Phone: " + settings.admin_phone,
+                    "Updated: " + datetime.now(timezone.utc).isoformat(),
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
 
 
 def seed_demo_tailors(db: Session) -> None:
@@ -1444,30 +1474,15 @@ def seed_demo_tailors(db: Session) -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    if settings.app_env == "production":
-        if settings.auto_migrate:
-            raise RuntimeError("Production web containers require AUTO_MIGRATE=false; run SERVICE_ROLE=migration once")
-        if settings.task_queue_backend != "sqs" or not settings.sqs_task_queue_url or not settings.sqs_task_dlq_url:
-            raise RuntimeError("Production requires the SQS task queue and dead-letter queue configuration")
-        if settings.media_storage_backend != "s3":
-            raise RuntimeError("Production requires MEDIA_STORAGE_BACKEND=s3")
-        if not settings.cloudfront_media_base_url:
-            raise RuntimeError("Production requires CLOUDFRONT_MEDIA_BASE_URL")
-        if settings.realtime_backplane != "redis":
-            raise RuntimeError("Production requires REALTIME_BACKPLANE=redis")
-        if settings.traffic_store_backend != "redis":
-            raise RuntimeError("Production requires TRAFFIC_STORE_BACKEND=redis for shared caching and rate limits")
-        if settings.payment_provider == "razorpay" and not settings.razorpay_webhook_secret:
-            raise RuntimeError("Production Razorpay requires RAZORPAY_WEBHOOK_SECRET")
-        if "localhost" in settings.redis_url or "127.0.0.1" in settings.redis_url:
-            raise RuntimeError("Production REDIS_URL must point to the shared Redis/Valkey service")
+    validate_production_settings(settings)
     await tracker_connections.start()
     if settings.auto_migrate:
         run_schema()
     db = next(db_session())
     try:
         seed_admin(db)
-        seed_demo_tailors(db)
+        if settings.enable_demo_data:
+            seed_demo_tailors(db)
     finally:
         db.close()
 
@@ -3292,13 +3307,17 @@ def delete_customer(customer_id: str, reason: str = Query("Admin deletion"), adm
     if not check["safeToDelete"]:
         raise HTTPException(409, "Resolve active orders and pending payments before deleting this customer")
     user = fetch_one(db, "SELECT * FROM users WHERE id=:id", {"id": customer_id})
+    delete_uploaded_url(user.get("profile_image"))
     db.execute(text("UPDATE booking_requirements SET status='CANCELLED' WHERE customer_id=:id AND status='OPEN'"), {"id": customer_id})
     db.execute(text("UPDATE booking_requests SET status='CANCELLED' WHERE requirement_id IN (SELECT id FROM booking_requirements WHERE customer_id=:id) AND status='PENDING'"), {"id": customer_id})
+    db.execute(text("UPDATE refresh_sessions SET revoked_at=COALESCE(revoked_at, now()) WHERE user_id=:id"), {"id": customer_id})
     db.execute(
-        text("""UPDATE users SET status='DELETED', anonymized=TRUE, deleted_at=now(), name='Deleted customer', phone='deleted-' || substr(md5(random()::text),1,10), email=NULL, address=NULL, password_hash=NULL, profile_image=NULL WHERE id=:id"""),
+        text("""UPDATE users SET status='DELETED', anonymized=TRUE, deleted_at=now(), name='Deleted customer',
+        phone='deleted-' || substr(md5(random()::text),1,10), email=NULL, address=NULL, lat=NULL, lng=NULL,
+        password_hash=NULL, profile_image=NULL, vehicle=NULL, referral_code=NULL, referred_by_customer_id=NULL WHERE id=:id"""),
         {"id": customer_id},
     )
-    audit(db, admin, "CUSTOMER_DELETE", "customer", customer_id, user["name"], reason, {"anonymized": True})
+    audit(db, admin, "CUSTOMER_DELETE", "customer", customer_id, "Deleted customer", reason, {"anonymized": True, "sessionsRevoked": True})
     db.commit()
     return {"ok": True, "anonymized": True}
 
@@ -3391,11 +3410,35 @@ def delete_tailor(tailor_id: str, reason: str = Query("Admin deletion"), admin: 
     if not check["safeToDelete"]:
         raise HTTPException(409, "Resolve active orders and pending payments before deleting this tailor")
     t = fetch_one(db, "SELECT * FROM tailors WHERE id=:id", {"id": tailor_id})
-    db.execute(text("UPDATE tailors SET account_status='DELETED', approval_status='REJECTED', deleted_at=now() WHERE id=:id"), {"id": tailor_id})
+    delete_uploaded_url(t.get("profile_image"))
+    delete_uploaded_references(t.get("portfolio"))
+    delete_uploaded_references(t.get("documents"))
+    db.execute(
+        text(
+            """UPDATE tailors SET account_status='DELETED', approval_status='REJECTED', verified=FALSE,
+            accepting_requests=FALSE, featured=FALSE, deleted_at=now(), shop='Deleted atelier',
+            owner_name='Deleted tailor', shop_address=NULL, lat=NULL, lng=NULL, profile_image=NULL,
+            expertise='{}', bio=NULL, portfolio='{}', documents='{}'::jsonb, full_name='Deleted tailor',
+            phone_number=NULL, email=NULL, dob=NULL, aadhaar_number_hash=NULL,
+            aadhaar_number_encrypted=NULL, aadhaar_verified=FALSE, username=NULL, password_hash=NULL,
+            referral_code=NULL, availability_note=NULL, reject_reason='Account deleted', updated_at=now()
+            WHERE id=:id"""
+        ),
+        {"id": tailor_id},
+    )
     db.execute(text("UPDATE booking_requests SET status='CANCELLED' WHERE tailor_id=:id AND status='PENDING'"), {"id": tailor_id})
-    audit(db, admin, "TAILOR_DELETE", "tailor", tailor_id, t["shop"], reason, {"softDeleted": True})
+    db.execute(text("UPDATE refresh_sessions SET revoked_at=COALESCE(revoked_at, now()) WHERE user_id=:id"), {"id": t["user_id"]})
+    db.execute(
+        text(
+            """UPDATE users SET status='DELETED', anonymized=TRUE, deleted_at=now(), name='Deleted tailor',
+            phone='deleted-' || substr(md5(random()::text),1,10), email=NULL, address=NULL, lat=NULL, lng=NULL,
+            password_hash=NULL, profile_image=NULL, admin_username=NULL WHERE id=:id"""
+        ),
+        {"id": t["user_id"]},
+    )
+    audit(db, admin, "TAILOR_DELETE", "tailor", tailor_id, "Deleted atelier", reason, {"anonymized": True, "sessionsRevoked": True, "mediaDeletionRequested": True})
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "anonymized": True}
 
 
 @app.get("/api/admin/orders")

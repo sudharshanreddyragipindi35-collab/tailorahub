@@ -402,6 +402,10 @@ Resources:
               Value: !Ref LogLevel
             - Name: CLOUDWATCH_EMF_ENABLED
               Value: "true"
+            - Name: ENABLE_DEMO_DATA
+              Value: "false"
+            - Name: WRITE_ADMIN_CREDENTIAL_FILE
+              Value: "false"
             - Name: CORS_ORIGINS
               Value: !Ref CorsOrigins
             - Name: MEDIA_STORAGE_BACKEND

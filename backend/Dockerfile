@@ -6,6 +6,12 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8001
 
+# Refresh the slim base's security packages at image-build time. Release images
+# are immutable and must be rebuilt regularly so this upgrade is not bypassed.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

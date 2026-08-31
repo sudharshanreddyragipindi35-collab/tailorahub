@@ -1,4 +1,4 @@
-# Phase 1 through Phase 8 pending items
+# Phase 1 through Phase 9 pending items
 
 This file is the single backlog for production-account work and measured validation intentionally deferred while implementation continues.
 
@@ -105,3 +105,18 @@ The Phase 7 infrastructure source and ordered production runbook are documented 
 12. Review monitoring cost, log retention, alarm noise, and SNS delivery monthly, preserving security and payment alarms even during tuning.
 
 The Phase 8 source implementation, deployment order, alarms, and operational procedures are documented in `PHASE8_IMPLEMENTATION.md` and `OPERATIONS_RUNBOOK.md`.
+
+## Phase 9: production security and privacy validation
+
+1. Inventory every production secret and rotate any credential that has appeared in Git history, logs, screenshots, ZIP files, local credential notes, support records, or a previous container. Force a controlled ECS deployment so new tasks load rotated Secrets Manager values.
+2. Enable and require the GitHub `Security checks` workflow on `main`, `daily`, and `mobile-app`; resolve every Gitleaks, `pip-audit`, `npm audit`, and HIGH/CRITICAL Trivy finding for the exact release image or document a time-bounded, owner-approved exception.
+3. Verify the public and API domains redirect to HTTPS, serve valid certificates, return the Phase 9 HSTS/CSP/security headers, and do not load blocked or mixed HTTP content during maps, tracking, media, and Razorpay flows.
+4. Verify encryption at rest for RDS, RDS snapshots/backups, ElastiCache/Valkey, S3 media, ALB logs, CloudWatch logs where supported, SQS/DLQ, ECR, and Secrets Manager; record the KMS keys and their restricted administrators in the private operations system.
+5. Review the deployed ECS execution/task roles, CI/CD role, support users, database users, bucket/queue policies, KMS grants, security groups, and admin `/32` network rules for least privilege. Remove unused wildcard or administrator access.
+6. Complete a route-by-route authorization review using customer, tailor, admin, cross-account, deleted, blocked, and unauthenticated cases. Include legacy `/api` and versioned `/api/v1` routes, WebSocket tickets, media objects, exports, support records, payments, wallets, and deletion endpoints.
+7. Inspect representative production logs, traces, alarms, SQS messages, DLQ messages, exports, support tickets, and provider failures. Confirm they exclude passwords, tokens, OTPs, Aadhaar values, authorization headers, full addresses, private media URLs, provider secrets, and unnecessary payloads.
+8. Run representative customer and tailor deletion tests using `DATA_RETENTION_AND_DELETION.md`; verify session revocation, database anonymization, booking cancellation, S3/CloudFront media removal, audit evidence, and correct retention of pseudonymized transaction records.
+9. Obtain legal, tax, finance, payment-provider, KYC-provider, backup, support, and privacy approval for exact retention periods, deletion SLAs, backup expiry handling, the permanent security contact, and vulnerability-response targets.
+10. Complete an independent pre-launch application/infrastructure security review and remediate all critical/high findings before public launch. Repeat after material authentication, payment, KYC, storage, network, or authorization changes.
+
+The Phase 9 source controls and production release gate are documented in `PHASE9_IMPLEMENTATION.md`, `SECURITY.md`, and `DATA_RETENTION_AND_DELETION.md`.

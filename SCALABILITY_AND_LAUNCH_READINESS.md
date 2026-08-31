@@ -202,15 +202,21 @@ The initial sizes below are starting hypotheses and must be adjusted using load-
 
 ## Phase 9: Security and privacy review
 
-- [ ] Keep secrets out of Git, frontend bundles, ZIP files, Docker images, screenshots, and logs.
+- [x] Add source, Git, frontend-variable, Docker-context, and CI controls that keep secrets and credential artifacts out of releases.
+- [x] Disable production demo accounts and plaintext admin-credential files with fail-closed startup validation.
+- [x] Reject unsafe production secrets, plaintext PostgreSQL/Redis URLs, wildcard/non-HTTPS CORS, and missing admin CIDRs.
+- [x] Add API and Amplify security response headers, including CSP and production HSTS.
+- [x] Revoke sessions, delete media references, and anonymize customer/tailor identity fields through controlled admin deletion.
+- [x] Document private vulnerability reporting plus account deletion and retention procedures.
+- [x] Add automated Gitleaks, Python, npm, and container vulnerability scanning.
 - [ ] Rotate any secret that was previously exposed.
-- [ ] Encrypt production traffic with HTTPS.
-- [ ] Encrypt RDS, Redis, S3, backups, and secrets at rest.
-- [ ] Apply least-privilege IAM permissions.
-- [ ] Validate authorization for every customer, tailor, and admin record operation.
-- [ ] Review logging for phone numbers, addresses, payment references, OTPs, and identity data.
-- [ ] Add data retention and account deletion procedures.
-- [ ] Complete a dependency and container vulnerability scan.
+- [ ] Verify production HTTPS, certificates, HSTS, CSP, and absence of mixed content.
+- [ ] Verify RDS, Redis, S3, backups, queues, registries, logs, and secrets are encrypted at rest.
+- [ ] Complete a least-privilege IAM, network, database-user, bucket, queue, and KMS review.
+- [ ] Complete a route-by-route authorization review for every customer, tailor, admin, media, WebSocket, export, payment, and support operation.
+- [ ] Review production logs and asynchronous payloads for phone numbers, addresses, payment references, OTPs, identity data, tokens, and provider secrets.
+- [ ] Approve exact legal/business retention periods and verify representative production deletion requests end to end.
+- [ ] Run the dependency, secret, and container scans against the exact production release and resolve findings.
 - [ ] Complete a pre-launch security review.
 
 ## Phase 10: Load and resilience testing

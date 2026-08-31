@@ -8,6 +8,23 @@ __pycache__/
 
 .env
 .env.*
+admin-credentials.txt
+**/admin-credentials.txt
+*.pem
+*.key
+*.p8
+*.jks
+*.keystore
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.png
+*.jpg
+*.jpeg
+*.webp
+.git/
+.github/
 *.pyc
 *.pyo
 *.pyd

@@ -44,13 +44,17 @@ class Settings:
     database_statement_timeout_ms = env_int("DATABASE_STATEMENT_TIMEOUT_MS", 5000)
     database_slow_query_ms = env_int("DATABASE_SLOW_QUERY_MS", 500)
     jwt_secret = env_value("JWT_SECRET", _RUNTIME_JWT_SECRET)
+    jwt_secret_configured = bool(os.getenv("JWT_SECRET") and os.getenv("JWT_SECRET", "").strip())
     jwt_refresh_secret = env_value("JWT_REFRESH_SECRET", _RUNTIME_JWT_REFRESH_SECRET)
+    jwt_refresh_secret_configured = bool(os.getenv("JWT_REFRESH_SECRET") and os.getenv("JWT_REFRESH_SECRET", "").strip())
     jwt_algorithm = "HS256"
     access_token_minutes = env_int("ACCESS_TOKEN_MINUTES", 1440)
     session_inactivity_minutes = env_int("SESSION_INACTIVITY_MINUTES", 15)
     cors_origins = [x.strip() for x in env_value("CORS_ORIGINS", "http://localhost:5173,https://tailorahub.com,https://www.tailorahub.com,https://api.tailorahub.com").split(",") if x.strip()]
 
     auto_migrate = env_bool("AUTO_MIGRATE", True)
+    enable_demo_data = env_bool("ENABLE_DEMO_DATA", app_env != "production")
+    write_admin_credential_file = env_bool("WRITE_ADMIN_CREDENTIAL_FILE", app_env != "production")
 
     admin_username = env_value("ADMIN_USERNAME", "admin")
     admin_password_configured = bool(os.getenv("ADMIN_PASSWORD") and os.getenv("ADMIN_PASSWORD", "").strip())
@@ -93,6 +97,9 @@ class Settings:
     aadhaar_kyc_api_secret = env_value("AADHAAR_KYC_API_SECRET")
     aadhaar_kyc_base_url = env_value("AADHAAR_KYC_BASE_URL")
     aadhaar_encryption_key = env_value("AADHAAR_ENCRYPTION_KEY")
+    aadhaar_encryption_key_configured = bool(
+        os.getenv("AADHAAR_ENCRYPTION_KEY") and os.getenv("AADHAAR_ENCRYPTION_KEY", "").strip()
+    )
 
     payment_provider = env_value("PAYMENT_PROVIDER", "mock").lower()
     payment_api_key = env_value("PAYMENT_API_KEY")
