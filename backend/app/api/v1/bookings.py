@@ -33,6 +33,7 @@ from app.services.tracker_service import tracker_connections
 from app.services.media_storage import MediaStorageError, get_media_storage, validate_file_signature
 from app.services.booking_rules import APP_TIMEZONE, BookingRuleError, calculate_booking, zoned_slot
 from app.services.external_resilience import CircuitOpenError, external_call, external_timeout_seconds
+from app.services.invoices import ensure_invoice_for_payment
 from app.settings import settings as runtime_settings
 
 
@@ -2282,11 +2283,21 @@ async def verify_razorpay_booking_payment(
     if intent.get("customer_id") != customer["id"]:
         raise HTTPException(403, "This payment request belongs to another customer.")
     if str(order.get("payment_status") or "").lower() == "paid" or intent.get("status") == "verified":
+        invoice = None
+        if intent.get("gateway_payment_id"):
+            try:
+                invoice = await ensure_invoice_for_payment(
+                    db, booking_id, str(intent["id"]), str(intent["gateway_payment_id"]), str(intent.get("gateway_order_id") or body.razorpay_order_id)
+                )
+                await db.commit()
+            except Exception:
+                logger.exception("invoice_generation_failed booking_id=%s", booking_id)
         return {
             "ok": True,
             "booking": public_booking(order),
             "paymentIntent": payment_intent_payload(intent),
             "payment_intent": payment_intent_payload(intent),
+            "invoice": invoice,
             "message": "Payment was already verified. Delivery OTP is enabled.",
         }
     if intent.get("status") != "pending":
@@ -2334,6 +2345,15 @@ async def verify_razorpay_booking_payment(
         "SELECT o.*, t.shop, u.name AS customer_name FROM orders o JOIN tailors t ON t.id=o.tailor_id JOIN users u ON u.id=o.customer_id WHERE o.id=:id",
         {"id": booking_id},
     )
+    invoice = None
+    try:
+        invoice = await ensure_invoice_for_payment(
+            db, booking_id, str(intent["id"]), body.razorpay_payment_id, body.razorpay_order_id
+        )
+        await db.commit()
+    except Exception:
+        # Payment remains successful even if PDF storage or email delivery fails.
+        logger.exception("invoice_generation_failed booking_id=%s payment_id=%s", booking_id, body.razorpay_payment_id)
     payload = await tracker_status_payload(db, updated)
     await tracker_connections.broadcast(booking_id, jsonable_encoder(payload))
     return {
@@ -2341,8 +2361,75 @@ async def verify_razorpay_booking_payment(
         "booking": public_booking(updated),
         "paymentIntent": payload.get("paymentIntent"),
         "payment_intent": payload.get("paymentIntent"),
+        "invoice": invoice,
         "message": "Payment completed securely through Razorpay. Delivery OTP is now enabled.",
     }
+
+
+@router.get("/{booking_id}/invoice")
+async def booking_invoice(
+    booking_id: str,
+    customer: dict = Depends(get_current_customer),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    invoice = await fetch_one(
+        db,
+        """
+        SELECT i.*
+        FROM invoices i
+        JOIN orders o ON o.id=i.booking_id
+        WHERE i.booking_id=:booking_id AND o.customer_id=:customer_id
+        ORDER BY i.created_at DESC
+        LIMIT 1
+        """,
+        {"booking_id": booking_id, "customer_id": customer["id"]},
+    )
+    if not invoice:
+        raise HTTPException(404, "Invoice is not available for this booking yet.")
+    invoice["download_url"] = get_media_storage().download_url(invoice.get("pdf_reference"))
+    invoice["downloadUrl"] = invoice["download_url"]
+    return {"ok": True, "invoice": invoice}
+
+
+@router.post("/{booking_id}/invoice/email")
+async def resend_booking_invoice_email(
+    booking_id: str,
+    customer: dict = Depends(get_current_customer),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    invoice = await fetch_one(
+        db,
+        """
+        SELECT i.*, o.code AS booking_code, u.name AS customer_name, u.email AS customer_email
+        FROM invoices i JOIN orders o ON o.id=i.booking_id JOIN users u ON u.id=i.customer_id
+        WHERE i.booking_id=:booking_id AND o.customer_id=:customer_id
+        ORDER BY i.created_at DESC LIMIT 1
+        """,
+        {"booking_id": booking_id, "customer_id": customer["id"]},
+    )
+    if not invoice:
+        raise HTTPException(404, "Invoice is not available for this booking yet.")
+    if invoice.get("email_status") == "sent":
+        return {"ok": True, "invoice": invoice, "message": "The invoice was already sent to your registered email."}
+    try:
+        pdf = get_media_storage().read_private_bytes(invoice["pdf_reference"])
+        delivery = send_email(
+            invoice["customer_email"],
+            f"Payment Successful - TailoraHub Invoice {invoice['invoice_number']}",
+            f"Hi {invoice['customer_name'] or 'Customer'},\n\nYour TailoraHub invoice for booking {invoice['booking_code']} is attached.\n\nRegards,\nTailoraHub Team",
+            purpose="payments",
+            attachments=[{"filename": f"{invoice['invoice_number']}.pdf", "maintype": "application", "subtype": "pdf", "data": pdf}],
+        )
+        status = "sent" if delivery.get("mode") == "live" and delivery.get("delivered") else "queued" if delivery.get("ok") else "failed"
+        error = None if delivery.get("ok") else delivery.get("reason")
+    except Exception as exc:
+        status, error, delivery = "failed", type(exc).__name__, {"ok": False, "reason": type(exc).__name__}
+    await db.execute(text("UPDATE invoices SET email_status=:status,email_error=:error,emailed_at=CASE WHEN :status='sent' THEN now() ELSE emailed_at END WHERE id=:id"), {"status": status, "error": error, "id": invoice["id"]})
+    await db.commit()
+    invoice.update({"email_status": status, "email_error": error})
+    if not delivery.get("ok"):
+        raise HTTPException(502, "Invoice email could not be sent. Please try again later.")
+    return {"ok": True, "invoice": invoice, "message": "Invoice email queued successfully."}
 
 
 @router.post("/{booking_id}/send-delivery-otp")

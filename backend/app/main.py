@@ -1601,9 +1601,9 @@ def request_otp(body: OtpRequest, db: Session = Depends(db_session)):
         db.rollback()
         raise HTTPException(429 if exc.code == "cooldown" else 400, exc.message)
     user = fetch_one(db, "SELECT id FROM users WHERE lower(email)=:email AND status <> 'DELETED'", {"email": email})
-    delivery = send_email(email, "Your TailoraHub OTP", f"Your TailoraHub OTP is {code}. It is valid for {otp.OTP_TTL_MINUTES} minutes.", purpose="verify")
+    delivery = send_email(email, "Your TailoraHub verification code", f"Your TailoraHub verification code is {code}. It is valid for 10 minutes. Do not share this code with anyone. - TailoraHub", purpose="verify")
     response = {"sent": True, "registered": bool(user), "channel": "email", "delivery": delivery}
-    if delivery.get("mode") == "mock":
+    if delivery.get("mode") == "mock" and settings.expose_dev_otp:
         response["devOtp"] = code
     return response
 
@@ -1644,13 +1644,13 @@ def send_purpose_otp(body: OtpSendIn, db: Session = Depends(db_session)):
         raise HTTPException(429 if exc.code == "cooldown" else 400, exc.message)
     db.commit()
     if is_email:
-        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {otp.OTP_TTL_MINUTES} minutes.", purpose="verify")
+        delivery = send_email(target, "Your TailoraHub verification code", f"Your TailoraHub verification code is {code}. It is valid for 10 minutes. Do not share this code with anyone. - TailoraHub", purpose="verify")
         mock_mode = delivery.get("mode") == "mock"
     else:
         delivery = sms_service().send_otp(clean_phone(target), code)
         mock_mode = delivery.get("mode") == "mock"
     response = {"sent": True, "target": target, "purpose": body.purpose, "expiresInSeconds": otp.OTP_TTL_MINUTES * 60}
-    if mock_mode:
+    if mock_mode and settings.expose_dev_otp:
         response["devOtp"] = code
     return response
 

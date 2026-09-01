@@ -13,13 +13,14 @@ from app.emailer import send_email
 from app.integrations import sms_service
 from app.schemas.otp import OtpSendIn, OtpSendOut, OtpVerifyIn, OtpVerifyOut
 from app.security import hash_otp, verify_otp_hash
+from app.settings import settings
 
 
 router = APIRouter()
 
 VALID_OTP_PURPOSES = {"registration_phone", "registration_email", "login", "forgot_password", "delivery", "withdrawal", "measurement_arrival"}
 PHONE_RE = re.compile(r"^[6-9]\d{9}$")
-OTP_TTL_MINUTES = 5
+OTP_TTL_MINUTES = 10
 MAX_VERIFY_ATTEMPTS = 5
 RESEND_COOLDOWN_SECONDS = 30
 
@@ -142,17 +143,19 @@ async def send_otp(body: OtpSendIn, db: AsyncSession = Depends(get_db)) -> dict:
         raise HTTPException(exc.status_code, exc.message)
 
     if is_email:
-        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {OTP_TTL_MINUTES} minutes.", purpose="verify")
+        delivery = send_email(target, "Your TailoraHub verification code", f"Your TailoraHub verification code is {code}. It is valid for 10 minutes. Do not share this code with anyone. - TailoraHub", purpose="verify")
         mock_mode = delivery.get("mode") == "mock"
     else:
         delivery = sms_service().send_otp(target, code)
         mock_mode = delivery.get("mode") == "mock"
+    if not delivery.get("ok", True):
+        raise HTTPException(502, "Unable to send the verification code right now. Please try again shortly.")
 
     return {
         "sent": True,
         "expires_at": expires_at.isoformat(),
         "expires_in_seconds": OTP_TTL_MINUTES * 60,
-        "dev_otp": code if mock_mode else None,
+        **({"dev_otp": code} if mock_mode and settings.expose_dev_otp else {}),
     }
 
 

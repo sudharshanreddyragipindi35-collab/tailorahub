@@ -14,10 +14,12 @@ from app.emailer import send_email
 from app.integrations import sms_service
 from app.schemas.auth import ForgotPasswordIn, LoginIn, ResetPasswordIn
 from app.security import hash_password, verify_password
+from app.settings import settings
 
 
 router = APIRouter()
 PHONE_RE = re.compile(r"^[6-9]\d{9}$")
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 class RefreshIn(BaseModel):
@@ -133,8 +135,12 @@ async def resolve_tailor(db: AsyncSession, identifier: str) -> dict:
 
 async def resolve_customer(db: AsyncSession, identifier: str) -> dict:
     raw = identifier.strip()
+    if "@" in raw and not EMAIL_RE.fullmatch(raw):
+        raise HTTPException(400, "Enter a valid email address, for example name@example.com")
     ident = raw.lower()
     phone = clean_phone(raw)
+    if "@" not in raw and not PHONE_RE.fullmatch(phone):
+        raise HTTPException(400, "Enter a valid email address or 10-digit mobile number")
     row = await fetch_one(
         db,
         """SELECT
@@ -156,9 +162,19 @@ async def resolve_customer(db: AsyncSession, identifier: str) -> dict:
     return row
 
 
-def login_target(row: dict, prefer_email: bool = False) -> tuple[str, bool]:
+def login_target(row: dict, prefer_email: bool = False, channel: str | None = None) -> tuple[str, bool]:
     email = (row.get("tailor_email") or row.get("user_email") or "").strip().lower()
     phone = clean_phone(row.get("phone_number") or row.get("user_phone") or "")
+    if channel == "email":
+        if email:
+            return email, True
+        raise HTTPException(400, "No verified email is available for this account")
+    if channel == "sms":
+        if phone and PHONE_RE.fullmatch(phone):
+            return phone, False
+        raise HTTPException(400, "No verified mobile number is available for this account")
+    if settings.auth_otp_channel == "email" and email:
+        return email, True
     if prefer_email and email:
         return email, True
     if phone and PHONE_RE.fullmatch(phone):
@@ -168,9 +184,19 @@ def login_target(row: dict, prefer_email: bool = False) -> tuple[str, bool]:
     raise HTTPException(400, "No verified phone or email is available for this tailor")
 
 
-def customer_login_target(row: dict, prefer_email: bool = False) -> tuple[str, bool]:
+def customer_login_target(row: dict, prefer_email: bool = False, channel: str | None = None) -> tuple[str, bool]:
     email = (row.get("user_email") or "").strip().lower()
     phone = clean_phone(row.get("user_phone") or "")
+    if channel == "email":
+        if email:
+            return email, True
+        raise HTTPException(400, "No verified email is available for this account")
+    if channel == "sms":
+        if phone and PHONE_RE.fullmatch(phone):
+            return phone, False
+        raise HTTPException(400, "No verified mobile number is available for this account")
+    if settings.auth_otp_channel == "email" and email:
+        return email, True
     if prefer_email and email:
         return email, True
     if phone and PHONE_RE.fullmatch(phone):
@@ -180,8 +206,8 @@ def customer_login_target(row: dict, prefer_email: bool = False) -> tuple[str, b
     raise HTTPException(400, "No phone or email is available for this customer")
 
 
-async def send_code(db: AsyncSession, row: dict, purpose: str, prefer_email: bool = False) -> dict:
-    target, is_email = login_target(row, prefer_email=prefer_email)
+async def send_code(db: AsyncSession, row: dict, purpose: str, prefer_email: bool = False, channel: str | None = None) -> dict:
+    target, is_email = login_target(row, prefer_email=prefer_email, channel=channel)
     try:
         code, expires_at = await issue_otp(db, target, purpose)
         await db.commit()
@@ -190,23 +216,25 @@ async def send_code(db: AsyncSession, row: dict, purpose: str, prefer_email: boo
         raise HTTPException(exc.status_code, exc.message)
 
     if is_email:
-        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {OTP_TTL_MINUTES} minutes.", purpose="verify")
+        delivery = send_email(target, "Your TailoraHub verification code", f"Your TailoraHub verification code is {code}. It is valid for 10 minutes. Do not share this code with anyone. - TailoraHub", purpose="verify")
         mock_mode = delivery.get("mode") == "mock"
     else:
         delivery = sms_service().send_otp(target, code)
         mock_mode = delivery.get("mode") == "mock"
+    if not delivery.get("ok", True):
+        raise HTTPException(502, "Unable to send the verification code right now. Please try again shortly.")
 
     return {
         "otpSent": True,
         "target": mask_target(target),
         "channel": "email" if is_email else "sms",
         "expiresInSeconds": OTP_TTL_MINUTES * 60,
-        "devOtp": code if mock_mode else None,
+        **({"devOtp": code} if mock_mode and settings.expose_dev_otp else {}),
     }
 
 
-async def send_customer_code(db: AsyncSession, row: dict, purpose: str, prefer_email: bool = False) -> dict:
-    target, is_email = customer_login_target(row, prefer_email=prefer_email)
+async def send_customer_code(db: AsyncSession, row: dict, purpose: str, prefer_email: bool = False, channel: str | None = None) -> dict:
+    target, is_email = customer_login_target(row, prefer_email=prefer_email, channel=channel)
     try:
         code, _ = await issue_otp(db, target, purpose)
         await db.commit()
@@ -215,23 +243,25 @@ async def send_customer_code(db: AsyncSession, row: dict, purpose: str, prefer_e
         raise HTTPException(exc.status_code, exc.message)
 
     if is_email:
-        delivery = send_email(target, "Your TailoraHub verification code", f"Your verification code is {code}. It is valid for {OTP_TTL_MINUTES} minutes.", purpose="verify")
+        delivery = send_email(target, "Your TailoraHub verification code", f"Your TailoraHub verification code is {code}. It is valid for 10 minutes. Do not share this code with anyone. - TailoraHub", purpose="verify")
         mock_mode = delivery.get("mode") == "mock"
     else:
         delivery = sms_service().send_otp(target, code)
         mock_mode = delivery.get("mode") == "mock"
+    if not delivery.get("ok", True):
+        raise HTTPException(502, "Unable to send the verification code right now. Please try again shortly.")
 
     return {
         "otpSent": True,
         "target": mask_target(target),
         "channel": "email" if is_email else "sms",
         "expiresInSeconds": OTP_TTL_MINUTES * 60,
-        "devOtp": code if mock_mode else None,
+        **({"devOtp": code} if mock_mode and settings.expose_dev_otp else {}),
     }
 
 
-async def verify_code(db: AsyncSession, row: dict, purpose: str, code: str, prefer_email: bool = False) -> None:
-    target, _ = login_target(row, prefer_email=prefer_email)
+async def verify_code(db: AsyncSession, row: dict, purpose: str, code: str, prefer_email: bool = False, channel: str | None = None) -> None:
+    target, _ = login_target(row, prefer_email=prefer_email, channel=channel)
     try:
         matched = await verify_otp(db, target, purpose, code)
         await db.commit()
@@ -242,8 +272,8 @@ async def verify_code(db: AsyncSession, row: dict, purpose: str, code: str, pref
         raise HTTPException(401, "Incorrect code")
 
 
-async def verify_customer_code(db: AsyncSession, row: dict, purpose: str, code: str, prefer_email: bool = False) -> None:
-    target, _ = customer_login_target(row, prefer_email=prefer_email)
+async def verify_customer_code(db: AsyncSession, row: dict, purpose: str, code: str, prefer_email: bool = False, channel: str | None = None) -> None:
+    target, _ = customer_login_target(row, prefer_email=prefer_email, channel=channel)
     try:
         matched = await verify_otp(db, target, purpose, code)
         await db.commit()
@@ -312,36 +342,23 @@ async def auth_scaffold() -> dict:
 @router.post("/login")
 async def tailor_login(body: LoginIn, db: AsyncSession = Depends(get_db)) -> dict:
     row = await resolve_tailor(db, body.identifier)
-    if body.mode == "password":
-        if not body.password:
-            raise HTTPException(400, "Password is required")
-        tailor_hash = row.get("tailor_password_hash")
-        valid = verify_password(body.password, tailor_hash) if tailor_hash else verify_password(body.password, row.get("user_password_hash"))
-        if not valid:
-            raise HTTPException(401, "Invalid tailor credentials")
-        return await auth_payload(db, row)
-
-    if body.otp:
-        await verify_code(db, row, "login", body.otp)
-        return await auth_payload(db, row)
-    return await send_code(db, row, "login")
+    if not body.password:
+        raise HTTPException(400, "Password is required")
+    tailor_hash = row.get("tailor_password_hash")
+    valid = verify_password(body.password, tailor_hash) if tailor_hash else verify_password(body.password, row.get("user_password_hash"))
+    if not valid:
+        raise HTTPException(401, "Invalid tailor credentials")
+    return await auth_payload(db, row)
 
 
 @router.post("/customer-login")
 async def customer_login(body: LoginIn, db: AsyncSession = Depends(get_db)) -> dict:
     row = await resolve_customer(db, body.identifier)
-    prefer_email = "@" in body.identifier
-    if body.mode == "password":
-        if not body.password:
-            raise HTTPException(400, "Password is required")
-        if not verify_password(body.password, row.get("user_password_hash")):
-            raise HTTPException(401, "Invalid customer credentials")
-        return await customer_auth_payload(db, row)
-
-    if body.otp:
-        await verify_customer_code(db, row, "login", body.otp, prefer_email=prefer_email)
-        return await customer_auth_payload(db, row)
-    return await send_customer_code(db, row, "login", prefer_email=prefer_email)
+    if not body.password:
+        raise HTTPException(400, "Password is required")
+    if not verify_password(body.password, row.get("user_password_hash")):
+        raise HTTPException(401, "Invalid customer credentials")
+    return await customer_auth_payload(db, row)
 
 
 @router.post("/refresh")
@@ -359,7 +376,7 @@ async def refresh_session(body: RefreshIn, db: AsyncSession = Depends(get_db)) -
 async def forgot_password(body: ForgotPasswordIn, db: AsyncSession = Depends(get_db)) -> dict:
     row = await resolve_tailor(db, body.identifier)
     prefer_email = "@" in body.identifier
-    return await send_code(db, row, "forgot_password", prefer_email=prefer_email)
+    return await send_code(db, row, "forgot_password", prefer_email=prefer_email, channel=body.channel)
 
 
 @router.post("/reset-password")
@@ -370,7 +387,7 @@ async def reset_password(body: ResetPasswordIn, db: AsyncSession = Depends(get_d
         raise HTTPException(400, "Password must be at least 8 characters and include one letter and one number")
     row = await resolve_tailor(db, body.identifier)
     prefer_email = "@" in body.identifier
-    await verify_code(db, row, "forgot_password", body.otp, prefer_email=prefer_email)
+    await verify_code(db, row, "forgot_password", body.otp, prefer_email=prefer_email, channel=body.channel)
     password_hash = hash_password(body.new_password)
     if "customer" not in (row.get("roles") or []):
         await db.execute(text("UPDATE users SET password_hash=:hash WHERE id=:id"), {"hash": password_hash, "id": row["user_id"]})
@@ -383,7 +400,7 @@ async def reset_password(body: ResetPasswordIn, db: AsyncSession = Depends(get_d
 async def customer_forgot_password(body: ForgotPasswordIn, db: AsyncSession = Depends(get_db)) -> dict:
     row = await resolve_customer(db, body.identifier)
     prefer_email = "@" in body.identifier
-    return await send_customer_code(db, row, "forgot_password", prefer_email=prefer_email)
+    return await send_customer_code(db, row, "forgot_password", prefer_email=prefer_email, channel=body.channel)
 
 
 @router.post("/customer-reset-password")
@@ -394,7 +411,7 @@ async def customer_reset_password(body: ResetPasswordIn, db: AsyncSession = Depe
         raise HTTPException(400, "Password must be at least 8 characters and include one letter and one number")
     row = await resolve_customer(db, body.identifier)
     prefer_email = "@" in body.identifier
-    await verify_customer_code(db, row, "forgot_password", body.otp, prefer_email=prefer_email)
+    await verify_customer_code(db, row, "forgot_password", body.otp, prefer_email=prefer_email, channel=body.channel)
     await db.execute(
         text("UPDATE users SET password_hash=:hash WHERE id=:id"),
         {"hash": hash_password(body.new_password), "id": row["user_id"]},

@@ -188,6 +188,10 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
     # Network restriction behavior is covered independently and remains enabled
     # whenever ADMIN_ALLOWED_NETWORKS is configured in a running environment.
     monkeypatch.setattr(main_module, "ADMIN_ALLOWED_NETWORKS", [])
+    monkeypatch.setattr(settings, "expose_dev_otp", True)
+    monkeypatch.setattr(settings, "email_provider", "mock")
+    monkeypatch.setattr(settings, "smtp_host", "")
+    monkeypatch.setattr(settings, "sms_provider", "mock")
     monkeypatch.setattr(otp_module.secrets, "randbelow", lambda upper_bound: 123456)
     gateway_secret = "integration-secret"
     webhook_secret = "integration-webhook-secret"
@@ -211,6 +215,15 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
             assert client.post(
                 "/api/v1/otp/verify",
                 json={"target": phone, "purpose": "registration_phone", "otp": phone_code},
+            ).status_code == 200
+
+            customer_email_otp = client.post("/api/v1/otp/send", json={"target": email, "purpose": "registration_email"})
+            assert customer_email_otp.status_code == 200, customer_email_otp.text
+            customer_email_code = customer_email_otp.json().get("dev_otp") or customer_email_otp.json().get("devOtp")
+            assert customer_email_code
+            assert client.post(
+                "/api/v1/otp/verify",
+                json={"target": email, "purpose": "registration_email", "otp": customer_email_code},
             ).status_code == 200
 
             customer_register = client.post(
@@ -239,15 +252,6 @@ def test_three_dashboard_flow_allows_separate_customer_and_tailor_credentials(mo
             )
             assert tailor_phone_available.status_code == 200, tailor_phone_available.text
             assert tailor_phone_available.json()["available"] is True
-
-            email_otp = client.post("/api/v1/otp/send", json={"target": email, "purpose": "registration_email"})
-            assert email_otp.status_code == 200, email_otp.text
-            email_code = email_otp.json().get("dev_otp") or email_otp.json().get("devOtp")
-            assert email_code
-            assert client.post(
-                "/api/v1/otp/verify",
-                json={"target": email, "purpose": "registration_email", "otp": email_code},
-            ).status_code == 200
 
             tailor_register = client.post(
                 "/api/v1/tailors/register",

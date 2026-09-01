@@ -4007,6 +4007,112 @@ input[readonly] {
   }
 }
 
+/* Centered confirmation surface for sensitive account actions. */
+.th-confirm-backdrop {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(10, 9, 8, 0.56);
+  backdrop-filter: blur(5px);
+  animation: th-confirm-fade-in 160ms ease-out;
+}
+
+.th-confirm-dialog {
+  width: min(430px, 100%);
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 14px;
+  padding: 26px;
+  border: 1px solid var(--border-primary);
+  border-radius: var(--th-radius-lg);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-md);
+  animation: th-confirm-rise-in 180ms ease-out;
+}
+
+.th-confirm-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-primary);
+  border-radius: 13px;
+  color: var(--gold-primary);
+  background: var(--primary-light);
+}
+
+.payment-success-invoice {
+  display: grid;
+  gap: 8px;
+}
+
+.payment-success-invoice .secondary-btn {
+  width: fit-content;
+}
+
+.th-confirm-copy h2 {
+  margin: 1px 0 6px;
+  color: var(--text-primary);
+  font-size: 19px;
+  line-height: 1.25;
+}
+
+.th-confirm-copy p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.th-confirm-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.th-confirm-actions .secondary-btn,
+.th-confirm-actions .primary-btn {
+  width: auto;
+  min-width: 96px;
+  min-height: 42px;
+  border-radius: 11px;
+}
+
+.th-confirm-actions .secondary-btn {
+  border-color: var(--border-secondary);
+  background: var(--surface-secondary);
+  color: var(--text-primary);
+}
+
+.th-confirm-actions .primary-btn {
+  border: 1px solid var(--gold-dark);
+  background: linear-gradient(135deg, var(--gold-light), var(--gold-primary));
+  color: #17110a;
+}
+
+@keyframes th-confirm-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes th-confirm-rise-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (max-width: 520px) {
+  .th-confirm-dialog { padding: 22px; }
+  .th-confirm-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .th-confirm-actions .secondary-btn,
+  .th-confirm-actions .primary-btn { width: 100%; }
+}
+
 /* Approved responsive workspace navigation for customer and tailor dashboards. */
 .workspace-mobile-back,
 .workspace-mobile-current,

@@ -9,7 +9,9 @@ class LoginIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     identifier: str = Field(min_length=3)
-    mode: Literal["password", "otp"] = "password"
+    # Password is the only interactive login method. OTP is reserved for
+    # registration verification and password recovery.
+    mode: Literal["password"] = "password"
     password: str | None = None
     otp: str | None = Field(default=None, min_length=4, max_length=8)
 
@@ -18,6 +20,7 @@ class ForgotPasswordIn(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
     identifier: str = Field(min_length=3)
+    channel: Literal["email", "sms"] | None = None
 
 
 class ResetPasswordIn(BaseModel):
@@ -27,6 +30,7 @@ class ResetPasswordIn(BaseModel):
     otp: str = Field(min_length=4, max_length=8)
     new_password: str = Field(min_length=8)
     confirm_password: str = Field(min_length=8)
+    channel: Literal["email", "sms"] | None = None
 
 
 class TokenPairOut(BaseModel):

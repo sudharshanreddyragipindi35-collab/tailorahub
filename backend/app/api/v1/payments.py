@@ -194,6 +194,21 @@ async def razorpay_webhook(
             {"booking_id": order["id"], "event_id": event_id},
         )
         await db.commit()
+        try:
+            from app.services.invoices import ensure_invoice_for_payment
+
+            await ensure_invoice_for_payment(
+                db,
+                order["id"],
+                str(intent["id"]),
+                gateway_payment_id,
+                gateway_order_id,
+            )
+            await db.commit()
+        except Exception:
+            # A delivery/storage issue must never roll back a verified payment.
+            await db.rollback()
+            logger.exception("invoice_generation_failed booking_id=%s payment_id=%s", order["id"], gateway_payment_id)
         from app.api.v1.bookings import tracker_status_payload
 
         updated = await fetch_one(

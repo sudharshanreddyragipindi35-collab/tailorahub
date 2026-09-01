@@ -7,6 +7,8 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.settings import settings as runtime_settings
+
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
@@ -20,7 +22,10 @@ class AppSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=BASE_DIR / ".env", env_ignore_empty=True, extra="ignore")
 
-    database_url: str = Field(default="postgresql+psycopg://tailorahub@localhost:5432/tailorahub_dev", alias="DATABASE_URL")
+    # The production runtime can provide DATABASE_URL through Secrets Manager.
+    # Reuse the canonical runtime settings so API routes and Alembic migrations
+    # connect to the same database.
+    database_url: str = Field(default_factory=lambda: runtime_settings.database_url, alias="DATABASE_URL")
     database_pool_size: int = Field(default=10, ge=1, alias="DATABASE_POOL_SIZE")
     database_max_overflow: int = Field(default=10, ge=0, alias="DATABASE_MAX_OVERFLOW")
     database_pool_timeout_seconds: int = Field(default=30, ge=1, alias="DATABASE_POOL_TIMEOUT_SECONDS")

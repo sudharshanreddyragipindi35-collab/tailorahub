@@ -15,6 +15,7 @@ from app.integrations import sms_service
 from app.emailer import send_email
 from app.qr import generate_wallet_qr
 from app.schemas.wallet import SetUpiIn, WithdrawIn, WalletOut
+from app.settings import settings
 
 
 router = APIRouter()
@@ -138,7 +139,7 @@ async def send_withdrawal_otp(db: AsyncSession, tailor: dict) -> dict:
         "target": mask_target(target),
         "channel": "email" if is_email else "sms",
         "expires_in_seconds": OTP_TTL_MINUTES * 60,
-        "dev_otp": code if mock_mode else None,
+        **({"dev_otp": code} if mock_mode and settings.expose_dev_otp else {}),
     }
 
 

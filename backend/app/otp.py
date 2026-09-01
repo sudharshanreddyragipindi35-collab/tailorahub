@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from .db import fetch_one
 from .security import hash_otp, verify_otp_hash
 
-OTP_TTL_MINUTES = 5
+OTP_TTL_MINUTES = 10
 MAX_VERIFY_ATTEMPTS = 5
 RESEND_COOLDOWN_SECONDS = 30
 

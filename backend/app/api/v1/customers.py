@@ -344,7 +344,7 @@ async def my_customer_referral_count(
 @router.post("/register", status_code=201)
 async def register_customer(body: CustomerRegisterIn, db: AsyncSession = Depends(get_db)) -> dict:
     phone = clean_phone(body.phone_number)
-    email = str(body.email).lower() if body.email else None
+    email = str(body.email).lower()
     full_name = body.full_name.strip()
 
     if not PHONE_RE.fullmatch(phone):
@@ -356,14 +356,17 @@ async def register_customer(body: CustomerRegisterIn, db: AsyncSession = Depends
     if not body.terms_accepted:
         raise HTTPException(400, "You must accept the terms and conditions")
 
-    for field, value in {"phone": phone, "email": email or ""}.items():
+    for field, value in {"phone": phone, "email": email}.items():
         message = await duplicate_message(db, field, value)
         if message:
             raise HTTPException(400, message)
 
+    email_target, _ = normalize_target(email, "registration_email")
     phone_target, _ = normalize_target(phone, "registration_phone")
     if not await is_recently_verified(db, phone_target, "registration_phone"):
         raise HTTPException(400, "Verify your mobile number first")
+    if not await is_recently_verified(db, email_target, "registration_email"):
+        raise HTTPException(400, "Verify your email address first")
 
     referral_code_used = (body.referral_code or "").strip().upper() or None
     referrer = await customer_referrer_for_code(db, referral_code_used)

@@ -12,6 +12,7 @@ import smtplib
 from urllib import parse, request
 import uuid
 import hashlib
+from typing import Iterable
 
 from .settings import settings
 from .services.external_resilience import external_call, external_timeout_seconds, safe_provider_error
@@ -29,7 +30,7 @@ class IntegrationResult:
 
 
 class EmailService:
-    def send(self, to_email: str, subject: str, body: str, purpose: str = "default") -> dict:
+    def send(self, to_email: str, subject: str, body: str, purpose: str = "default", attachments: Iterable[dict] | None = None) -> dict:
         raise NotImplementedError
 
 
@@ -50,7 +51,7 @@ def _sender_parts(sender: str) -> tuple[str, str]:
 
 
 class MockEmailService(EmailService):
-    def send(self, to_email: str, subject: str, body: str, purpose: str = "default") -> dict:
+    def send(self, to_email: str, subject: str, body: str, purpose: str = "default", attachments: Iterable[dict] | None = None) -> dict:
         outbox = Path(settings.email_outbox)
         outbox.parent.mkdir(parents=True, exist_ok=True)
         with outbox.open("a", encoding="utf-8") as f:
@@ -63,7 +64,7 @@ class MockEmailService(EmailService):
 
 
 class SmtpEmailService(EmailService):
-    def send(self, to_email: str, subject: str, body: str, purpose: str = "default") -> dict:
+    def send(self, to_email: str, subject: str, body: str, purpose: str = "default", attachments: Iterable[dict] | None = None) -> dict:
         msg = EmailMessage()
         msg["From"] = _sender_for(purpose)
         msg["To"] = to_email
@@ -71,6 +72,16 @@ class SmtpEmailService(EmailService):
         if settings.email_reply_to:
             msg["Reply-To"] = settings.email_reply_to
         msg.set_content(body)
+        for attachment in attachments or []:
+            data = attachment.get("data") or b""
+            if isinstance(data, str):
+                data = data.encode("utf-8")
+            msg.add_attachment(
+                data,
+                maintype=str(attachment.get("maintype") or "application"),
+                subtype=str(attachment.get("subtype") or "octet-stream"),
+                filename=str(attachment.get("filename") or "attachment"),
+            )
         def deliver() -> None:
             if settings.smtp_secure:
                 server = smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=external_timeout_seconds())
@@ -91,7 +102,7 @@ class SmtpEmailService(EmailService):
 
 
 class ApiEmailService(EmailService):
-    def send(self, to_email: str, subject: str, body: str, purpose: str = "default") -> dict:
+    def send(self, to_email: str, subject: str, body: str, purpose: str = "default", attachments: Iterable[dict] | None = None) -> dict:
         sender = _sender_for(purpose)
         sender_email, sender_name = _sender_parts(sender)
         if settings.email_provider == "ses":
@@ -175,7 +186,7 @@ class LiveSmsService(SmsService):
             sid = settings.sms_api_secret
             token = settings.sms_api_key
             url = f"https://api.twilio.com/2010-04-01/Accounts/{parse.quote(sid)}/Messages.json"
-            payload = parse.urlencode({"To": "+91" + phone_number[-10:], "From": settings.sms_sender_id, "Body": f"TRHB: Your TailoraHub OTP is {code}."}).encode("utf-8")
+            payload = parse.urlencode({"To": "+91" + phone_number[-10:], "From": settings.sms_sender_id, "Body": f"Your TailoraHub verification code is {code}. It is valid for 10 minutes. Do not share this code with anyone. - TailoraHub"}).encode("utf-8")
             auth = base64.b64encode(f"{sid}:{token}".encode("utf-8")).decode("ascii")
             req = request.Request(url, data=payload, headers={"Authorization": f"Basic {auth}"}, method="POST")
             try:

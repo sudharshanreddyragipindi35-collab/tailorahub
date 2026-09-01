@@ -14,7 +14,7 @@ class CustomerRegisterIn(BaseModel):
 
     full_name: str = Field(min_length=2, max_length=160)
     phone_number: str = Field(pattern=PHONE_PATTERN)
-    email: EmailStr | None = None
+    email: EmailStr
     password: str = Field(min_length=8)
     confirm_password: str | None = Field(default=None, min_length=8)
     referral_code: str | None = Field(default=None, max_length=40)

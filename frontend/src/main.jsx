@@ -864,6 +864,66 @@ function readFileAsDataUrl(file) {
   });
 }
 
+function LogoutConfirmDialog({ open, onCancel, onConfirm }) {
+  const cancelButtonRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    cancelButtonRef.current?.focus();
+    function handleKeyDown(event) {
+      if (event.key === "Escape") onCancel();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, onCancel]);
+
+  if (!open) return null;
+  return (
+    <div className="th-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+      <section className="th-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="logout-dialog-title" aria-describedby="logout-dialog-description">
+        <div className="th-confirm-icon" aria-hidden="true"><LogOut size={20} /></div>
+        <div className="th-confirm-copy">
+          <h2 id="logout-dialog-title">Log out of TailoraHub?</h2>
+          <p id="logout-dialog-description">You will need to sign in again to access your workspace.</p>
+        </div>
+        <div className="th-confirm-actions">
+          <button ref={cancelButtonRef} type="button" className="secondary-btn" onClick={onCancel}>Cancel</button>
+          <button type="button" className="primary-btn" onClick={onConfirm}>Log out</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ExternalPaymentConfirmDialog({ open, onCancel, onConfirm, busy = false }) {
+  const cancelButtonRef = useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    cancelButtonRef.current?.focus();
+    function handleKeyDown(event) {
+      if (event.key === "Escape" && !busy) onCancel();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, onCancel, busy]);
+  if (!open) return null;
+  return (
+    <div className="th-confirm-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) onCancel(); }}>
+      <section className="th-confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="payment-dialog-title" aria-describedby="payment-dialog-description">
+        <div className="th-confirm-icon payment-confirm-icon" aria-hidden="true"><CreditCard size={20} /></div>
+        <div className="th-confirm-copy">
+          <h2 id="payment-dialog-title">Continue to secure payment?</h2>
+          <p id="payment-dialog-description">You are about to continue to Razorpay, our secure payment partner, to complete this booking payment.</p>
+        </div>
+        <div className="th-confirm-actions">
+          <button ref={cancelButtonRef} type="button" className="secondary-btn" onClick={onCancel} disabled={busy}>Cancel</button>
+          <button type="button" className="primary-btn" onClick={onConfirm} disabled={busy}>{busy ? "Opening..." : "Proceed to payment"}</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function TailorAvatar({ tailor, size = "md" }) {
   const image = assetUrl(tailor?.profileImage);
   const initials = String(tailor?.shop || tailor?.ownerName || "TH").trim().slice(0, 2).toUpperCase();
@@ -919,6 +979,7 @@ function App() {
   const [signedIn, setSignedIn] = useState(false);
   const [authInitializing, setAuthInitializing] = useState(true);
   const [authNotice, setAuthNotice] = useState("");
+  const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
   const [theme, setTheme] = useState(initialTheme);
   const [language, setLanguage] = useState(initialLanguage);
   const languageValue = useMemo(() => ({
@@ -926,6 +987,10 @@ function App() {
     setLanguage,
     t: (key, fallback, values) => translate(language, key, fallback, values),
   }), [language]);
+
+  useEffect(() => {
+    if (!signedIn) setLogoutConfirmOpen(false);
+  }, [signedIn]);
 
   useEffect(() => {
     function handleSessionCleared(event) {
@@ -1051,7 +1116,12 @@ function App() {
     }
   }
 
+  function requestLogout() {
+    setLogoutConfirmOpen(true);
+  }
+
   async function logout() {
+    setLogoutConfirmOpen(false);
     const refresh = getRefreshToken();
     if (refresh) await api.logoutSession(refresh).catch(() => {});
     clearSession();
@@ -1064,12 +1134,17 @@ function App() {
   let content;
   if (authInitializing) content = <main className="app-shell"><section className="panel"><p>Restoring your secure session...</p></section></main>;
   else if (!signedIn) content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={referralEntry} sessionMessage={authNotice} adminPortal={adminPortal} />;
-  else if (!adminPortal && role === "customer") content = <CustomerApp onLogout={logout} />;
-  else if (!adminPortal && role === "tailor") content = <TailorApp onLogout={logout} />;
-  else if (adminPortal && role === "admin") content = <AdminApp onLogout={logout} />;
+  else if (!adminPortal && role === "customer") content = <CustomerApp onLogout={requestLogout} />;
+  else if (!adminPortal && role === "tailor") content = <TailorApp onLogout={requestLogout} />;
+  else if (adminPortal && role === "admin") content = <AdminApp onLogout={requestLogout} />;
   else content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={null} sessionMessage="Use the correct TailoraHub portal for this account." adminPortal={adminPortal} />;
 
-  return <LanguageContext.Provider value={languageValue}>{content}</LanguageContext.Provider>;
+  return (
+    <LanguageContext.Provider value={languageValue}>
+      {content}
+      <LogoutConfirmDialog open={logoutConfirmOpen} onCancel={() => setLogoutConfirmOpen(false)} onConfirm={logout} />
+    </LanguageContext.Provider>
+  );
 }
 
 const tailorWizardSteps = [
@@ -1125,6 +1200,13 @@ function isValidAadhaar(value) {
 
 function isValidEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
+}
+
+function customerIdentifierError(value) {
+  const identifier = String(value || "").trim();
+  if (!identifier) return "Enter your mobile number or email";
+  if (identifier.includes("@")) return isValidEmail(identifier) ? "" : "Enter a valid email address, for example name@example.com";
+  return isValidIndianPhone(identifier) ? "" : "Enter a valid email address or 10-digit mobile number";
 }
 
 function passwordScore(value) {
@@ -1203,7 +1285,6 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   const [authStage, setAuthStage] = useAppHistoryState("authStage", adminPortal ? "auth" : "home");
   const [selectedRole, setSelectedRole] = useState(adminPortal ? "admin" : "customer");
   const [mode, setMode] = useState("login");
-  const [tailorLoginMode, setTailorLoginMode] = useState("password");
   const [wizardStep, setWizardStep] = useState(0);
   const [form, setForm] = useState({
     identifier: "",
@@ -1238,11 +1319,11 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   const [fieldErrors, setFieldErrors] = useState({});
   const [fieldSuccess, setFieldSuccess] = useState({});
   const [checking, setChecking] = useState({});
-  const [loginOtp, setLoginOtp] = useState({ sent: false, code: "", target: "", cooldown: 0 });
   const [forgotFlow, setForgotFlow] = useState({
     active: false,
     step: "request",
     identifier: "",
+    channel: "email",
     otp: "",
     newPassword: "",
     confirmPassword: "",
@@ -1281,9 +1362,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   useEffect(() => {
     if (selectedRole === "admin") setMode("login");
     setWizardStep(0);
-    setTailorLoginMode("password");
-    setLoginOtp({ sent: false, code: "", target: "", cooldown: 0 });
-    setForgotFlow({ active: false, step: "request", identifier: "", otp: "", newPassword: "", confirmPassword: "", target: "", cooldown: 0 });
+    setForgotFlow({ active: false, step: "request", identifier: "", channel: "email", otp: "", newPassword: "", confirmPassword: "", target: "", cooldown: 0 });
     setAadhaarVerified(false);
     setFieldErrors({});
     setFieldSuccess({});
@@ -1318,13 +1397,12 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   }, [otpState.phoneCooldown, otpState.emailCooldown]);
 
   useEffect(() => {
-    if (!loginOtp.cooldown && !forgotFlow.cooldown) return undefined;
+    if (!forgotFlow.cooldown) return undefined;
     const timer = setInterval(() => {
-      setLoginOtp((old) => ({ ...old, cooldown: Math.max(0, old.cooldown - 1) }));
       setForgotFlow((old) => ({ ...old, cooldown: Math.max(0, old.cooldown - 1) }));
     }, 1000);
     return () => clearInterval(timer);
-  }, [loginOtp.cooldown, forgotFlow.cooldown]);
+  }, [forgotFlow.cooldown]);
 
   useEffect(() => {
     if (mode !== "register" || selectedRole !== "tailor" || !form.phone || !isValidIndianPhone(form.phone)) return undefined;
@@ -1388,9 +1466,6 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
     if (key === "phone") {
       setOtpState((old) => ({ ...old, phoneVerified: false, phoneSent: false, phoneCode: "" }));
       setFieldSuccess((old) => ({ ...old, phone: "" }));
-    }
-    if (key === "identifier") {
-      setLoginOtp((old) => ({ ...old, sent: false, code: "", target: "" }));
     }
     if (key === "email") {
       setOtpState((old) => ({ ...old, emailVerified: false, emailSent: false, emailCode: "" }));
@@ -1511,73 +1586,18 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   }
 
   async function submitTailorLogin() {
-    if (!form.identifier.trim()) throw new Error("Enter your username or mobile number");
-    if (tailorLoginMode === "password") {
-      if (!form.password) throw new Error("Enter your password");
-      const res = await api.tailorV1Login({ identifier: form.identifier, mode: "password", password: form.password });
-      onAuth(res, "tailor");
-      return;
-    }
-    if (!loginOtp.sent) {
-      const res = await api.tailorV1Login({ identifier: form.identifier, mode: "otp" });
-      setLoginOtp({ sent: true, code: "", target: res.target || "", cooldown: 30 });
-      setInfo(res.devOtp ? `Dev mode code: ${res.devOtp}` : `OTP sent to ${res.target || "registered contact"}.`);
-      return;
-    }
-    if (!loginOtp.code) throw new Error("Enter the OTP sent to your registered contact");
-    const res = await api.tailorV1Login({ identifier: form.identifier, mode: "otp", otp: loginOtp.code });
+    if (!form.identifier.trim()) throw new Error("Enter your username, mobile number or email");
+    if (!form.password) throw new Error("Enter your password");
+    const res = await api.tailorV1Login({ identifier: form.identifier, mode: "password", password: form.password });
     onAuth(res, "tailor");
   }
 
   async function submitCustomerLogin() {
-    if (!form.identifier.trim()) throw new Error("Enter your mobile number or email");
-    if (tailorLoginMode === "password") {
-      if (!form.password) throw new Error("Enter your password");
-      const res = await api.customerV1Login({ identifier: form.identifier, mode: "password", password: form.password });
-      onAuth(res, "customer");
-      return;
-    }
-    if (!loginOtp.sent) {
-      const res = await api.customerV1Login({ identifier: form.identifier, mode: "otp" });
-      setLoginOtp({ sent: true, code: "", target: res.target || "", cooldown: 30 });
-      setInfo(res.devOtp ? `Dev mode code: ${res.devOtp}` : `OTP sent to ${res.target || "registered contact"}.`);
-      return;
-    }
-    if (!loginOtp.code) throw new Error("Enter the OTP sent to your registered contact");
-    const res = await api.customerV1Login({ identifier: form.identifier, mode: "otp", otp: loginOtp.code });
+    const identifierError = customerIdentifierError(form.identifier);
+    if (identifierError) throw new Error(identifierError);
+    if (!form.password) throw new Error("Enter your password");
+    const res = await api.customerV1Login({ identifier: form.identifier, mode: "password", password: form.password });
     onAuth(res, "customer");
-  }
-
-  async function resendTailorLoginOtp() {
-    setBusy(true);
-    setError("");
-    setInfo("");
-    try {
-      if (!form.identifier.trim()) throw new Error("Enter your username or mobile number");
-      const res = await api.tailorV1Login({ identifier: form.identifier, mode: "otp" });
-      setLoginOtp({ sent: true, code: "", target: res.target || "", cooldown: 30 });
-      setInfo(res.devOtp ? `Dev mode code: ${res.devOtp}` : `OTP sent to ${res.target || "registered contact"}.`);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function resendCustomerLoginOtp() {
-    setBusy(true);
-    setError("");
-    setInfo("");
-    try {
-      if (!form.identifier.trim()) throw new Error("Enter your mobile number or email");
-      const res = await api.customerV1Login({ identifier: form.identifier, mode: "otp" });
-      setLoginOtp({ sent: true, code: "", target: res.target || "", cooldown: 30 });
-      setInfo(res.devOtp ? `Dev mode code: ${res.devOtp}` : `OTP sent to ${res.target || "registered contact"}.`);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setBusy(false);
-    }
   }
 
   async function sendOtp() {
@@ -1622,6 +1642,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
       active: true,
       step: "request",
       identifier: form.identifier,
+      channel: "email",
       otp: "",
       newPassword: "",
       confirmPassword: "",
@@ -1633,7 +1654,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
   function closeForgotPassword() {
     setError("");
     setInfo("");
-    setForgotFlow({ active: false, step: "request", identifier: "", otp: "", newPassword: "", confirmPassword: "", target: "", cooldown: 0 });
+    setForgotFlow({ active: false, step: "request", identifier: "", channel: "email", otp: "", newPassword: "", confirmPassword: "", target: "", cooldown: 0 });
   }
 
   async function sendForgotPasswordOtp() {
@@ -1642,11 +1663,15 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
     setInfo("");
     try {
       if (!forgotFlow.identifier.trim()) throw new Error(selectedRole === "customer" ? "Enter your mobile number or email" : "Enter your username, mobile number or email");
+      if (selectedRole === "customer") {
+        const identifierError = customerIdentifierError(forgotFlow.identifier);
+        if (identifierError) throw new Error(identifierError);
+      }
       const res = selectedRole === "customer"
-        ? await api.customerForgotPassword(forgotFlow.identifier)
-        : await api.tailorForgotPassword(forgotFlow.identifier);
+        ? await api.customerForgotPassword(forgotFlow.identifier, forgotFlow.channel)
+        : await api.tailorForgotPassword(forgotFlow.identifier, forgotFlow.channel);
       setForgotFlow((old) => ({ ...old, step: "reset", target: res.target || "", cooldown: 30 }));
-      setInfo(res.devOtp ? `Dev mode code: ${res.devOtp}` : `Reset OTP sent to ${res.target || "registered contact"}.`);
+      setInfo(`Reset OTP sent to ${res.target || "your registered contact"}.`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1664,6 +1689,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
       if (message) throw new Error(message);
       const payload = {
         identifier: forgotFlow.identifier,
+        channel: forgotFlow.channel,
         otp: forgotFlow.otp,
         new_password: forgotFlow.newPassword,
         confirm_password: forgotFlow.confirmPassword,
@@ -1672,7 +1698,6 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
       else await api.tailorResetPassword(payload);
       update("identifier", forgotFlow.identifier);
       update("password", "");
-      setTailorLoginMode("password");
       closeForgotPassword();
       setInfo("Password updated. You can now sign in.");
     } catch (err) {
@@ -1682,9 +1707,8 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
     }
   }
 
-  // Registration-time phone/email verification (file 05) -- separate purpose-scoped
-  // OTP pool from the login flow above, required by the backend before a tailor
-  // account can be created.
+  // Registration-time phone/email verification uses separate purpose-scoped OTPs
+  // and must complete before either a customer or tailor account is created.
   async function sendRegistrationOtp(kind) {
     setBusy(true);
     setError("");
@@ -1701,13 +1725,12 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
       }
       const purpose = kind === "phone" ? "registration_phone" : "registration_email";
       const res = await api.sendPurposeOtp(target, purpose);
-      const devOtp = res.dev_otp || res.devOtp;
       setOtpState((old) => ({
         ...old,
         [`${kind}Sent`]: true,
         [`${kind}Cooldown`]: 30,
       }));
-      setInfo(devOtp ? `Dev mode code: ${devOtp}` : `Code sent to your ${kind === "phone" ? "mobile number" : "email"}.`);
+      setInfo(`Verification code sent to your ${kind === "phone" ? "mobile number" : "email"}.`);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1772,8 +1795,9 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
     if (!isValidIndianPhone(form.phone)) return "Enter a valid 10-digit mobile number";
     if (fieldErrors.phone) return fieldErrors.phone;
     if (!otpState.phoneVerified) return "Verify your mobile number";
-    if (form.email && !isValidEmail(form.email)) return "Enter a valid email address";
+    if (!isValidEmail(form.email)) return "Enter a valid email address";
     if (fieldErrors.email) return fieldErrors.email;
+    if (!otpState.emailVerified) return "Verify your email address";
     if (!form.confirmPassword) return "Confirm your password";
     if (passwordMessage(form.password, form.confirmPassword)) return passwordMessage(form.password, form.confirmPassword);
     if (!form.termsAccepted) return "Accept the terms and conditions";
@@ -1857,125 +1881,36 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
     setAuthStage("home");
     setError("");
     setInfo("");
-    setForgotFlow({ active: false, step: "request", identifier: "", otp: "", newPassword: "", confirmPassword: "", target: "", cooldown: 0 });
+    setForgotFlow({ active: false, step: "request", identifier: "", channel: "email", otp: "", newPassword: "", confirmPassword: "", target: "", cooldown: 0 });
   }
 
   function renderTailorLogin() {
     if (forgotFlow.active) return renderForgotPassword();
     return (
       <div className="tailor-login-panel">
-        <div className="segmented login-mode-toggle">
-          <button
-            type="button"
-            className={tailorLoginMode === "password" ? "active" : ""}
-            onClick={() => {
-              setTailorLoginMode("password");
-              setLoginOtp({ sent: false, code: "", target: "", cooldown: 0 });
-              setError("");
-              setInfo("");
-            }}
-          >
-            {t("auth.passwordMode", "Password")}
-          </button>
-          <button
-            type="button"
-            className={tailorLoginMode === "otp" ? "active" : ""}
-            onClick={() => {
-              setTailorLoginMode("otp");
-              setLoginOtp({ sent: false, code: "", target: "", cooldown: 0 });
-              setError("");
-              setInfo("");
-            }}
-          >
-            {t("auth.otpMode", "OTP")}
-          </button>
-        </div>
-        <Field label={t("auth.usernameOrMobile", "Username or mobile number")}>
-          <input value={form.identifier} onChange={(e) => update("identifier", e.target.value)} autoComplete="username" placeholder="username or 10 digit mobile" />
+        <Field label={t("auth.usernameMobileOrEmail", "Username, mobile number or email")}>
+          <input value={form.identifier} onChange={(e) => update("identifier", e.target.value)} autoComplete="username" placeholder="username, 10 digit mobile or email" />
         </Field>
-        {tailorLoginMode === "password" ? (
-          <>
-            <Field label={t("common.password", "Password")}>
-              <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="current-password" />
-            </Field>
-            <button type="button" className="text-link" onClick={openForgotPassword}>{t("auth.forgotPassword", "Forgot password?")}</button>
-          </>
-        ) : (
-          <div className="otp-box">
-            {loginOtp.sent ? (
-              <>
-                <Field label={t("auth.otpCode", "OTP code")} hint={loginOtp.target ? `Sent to ${loginOtp.target}` : "Sent to registered contact"}>
-                  <input value={loginOtp.code} onChange={(e) => setLoginOtp((old) => ({ ...old, code: cleanDigits(e.target.value) }))} inputMode="numeric" maxLength={6} placeholder="6 digit OTP" />
-                </Field>
-                <button type="button" className="text-link" onClick={resendTailorLoginOtp} disabled={busy || loginOtp.cooldown > 0}>
-                  {loginOtp.cooldown > 0 ? `Resend in ${loginOtp.cooldown}s` : "Resend OTP"}
-                </button>
-              </>
-            ) : (
-              <div className="notice">Use your registered mobile number or username. We will send a login OTP to your registered contact.</div>
-            )}
-          </div>
-        )}
+        <Field label={t("common.password", "Password")}>
+          <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="current-password" />
+        </Field>
+        <button type="button" className="text-link" onClick={openForgotPassword}>{t("auth.forgotPassword", "Forgot password?")}</button>
       </div>
     );
   }
 
   function renderCustomerLogin() {
     if (forgotFlow.active) return renderForgotPassword();
+    const identifierError = form.identifier.trim() ? customerIdentifierError(form.identifier) : "";
     return (
       <div className="tailor-login-panel">
-        <div className="segmented login-mode-toggle">
-          <button
-            type="button"
-            className={tailorLoginMode === "password" ? "active" : ""}
-            onClick={() => {
-              setTailorLoginMode("password");
-              setLoginOtp({ sent: false, code: "", target: "", cooldown: 0 });
-              setError("");
-              setInfo("");
-            }}
-          >
-            {t("auth.passwordMode", "Password")}
-          </button>
-          <button
-            type="button"
-            className={tailorLoginMode === "otp" ? "active" : ""}
-            onClick={() => {
-              setTailorLoginMode("otp");
-              setLoginOtp({ sent: false, code: "", target: "", cooldown: 0 });
-              setError("");
-              setInfo("");
-            }}
-          >
-            {t("auth.otpMode", "OTP")}
-          </button>
-        </div>
-        <Field label={t("auth.mobileOrEmail", "Mobile number or email")}>
+        <Field label={t("auth.mobileOrEmail", "Mobile number or email")} error={identifierError}>
           <input value={form.identifier} onChange={(e) => update("identifier", e.target.value)} autoComplete="username" placeholder="10 digit mobile or email" />
         </Field>
-        {tailorLoginMode === "password" ? (
-          <>
-            <Field label={t("common.password", "Password")}>
-              <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="current-password" />
-            </Field>
-            <button type="button" className="text-link" onClick={openForgotPassword}>{t("auth.forgotPassword", "Forgot password?")}</button>
-          </>
-        ) : (
-          <div className="otp-box">
-            {loginOtp.sent ? (
-              <>
-                <Field label={t("auth.otpCode", "OTP code")} hint={loginOtp.target ? `Sent to ${loginOtp.target}` : "Sent to registered contact"}>
-                  <input value={loginOtp.code} onChange={(e) => setLoginOtp((old) => ({ ...old, code: cleanDigits(e.target.value) }))} inputMode="numeric" maxLength={6} placeholder="6 digit OTP" />
-                </Field>
-                <button type="button" className="text-link" onClick={resendCustomerLoginOtp} disabled={busy || loginOtp.cooldown > 0}>
-                  {loginOtp.cooldown > 0 ? `Resend in ${loginOtp.cooldown}s` : "Resend OTP"}
-                </button>
-              </>
-            ) : (
-              <div className="notice">Use your registered mobile number or email. We will send a login OTP to your registered contact.</div>
-            )}
-          </div>
-        )}
+        <Field label={t("common.password", "Password")}>
+          <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="current-password" />
+        </Field>
+        <button type="button" className="text-link" onClick={openForgotPassword}>{t("auth.forgotPassword", "Forgot password?")}</button>
       </div>
     );
   }
@@ -1994,8 +1929,13 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
         </div>
         {forgotFlow.step === "request" ? (
           <>
-            <Field label={isCustomer ? t("auth.mobileOrEmail", "Mobile number or email") : t("auth.usernameOrMobile", "Username, mobile number or email")}>
-              <input value={forgotFlow.identifier} onChange={(e) => setForgotFlow((old) => ({ ...old, identifier: e.target.value }))} autoComplete="username" />
+            <label className="field-label">Send reset code to</label>
+            <div className="segmented login-mode-toggle" role="group" aria-label="Reset code delivery method">
+              <button type="button" className={forgotFlow.channel === "email" ? "active" : ""} onClick={() => setForgotFlow((old) => ({ ...old, channel: "email" }))}>Email</button>
+              <button type="button" className={forgotFlow.channel === "sms" ? "active" : ""} onClick={() => setForgotFlow((old) => ({ ...old, channel: "sms" }))}>Mobile SMS</button>
+            </div>
+            <Field label={isCustomer ? t("auth.mobileOrEmail", "Mobile number or email") : t("auth.usernameMobileOrEmail", "Username, mobile number or email")}>
+              <input value={forgotFlow.identifier} onChange={(e) => setForgotFlow((old) => ({ ...old, identifier: e.target.value }))} autoComplete="username" placeholder={forgotFlow.channel === "email" ? "Enter registered email" : "Enter registered mobile number"} />
             </Field>
             <button type="button" className="primary-btn" onClick={sendForgotPasswordOtp} disabled={busy}>{busy ? t("common.pleaseWait", "Please wait...") : t("auth.sendResetOtp", "Send reset OTP")}</button>
           </>
@@ -2031,9 +1971,16 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
           <Field label={t("auth.fullName", "Full name")} error={fieldErrors.name}>
             <input value={form.name} onChange={(e) => update("name", e.target.value)} autoComplete="name" />
           </Field>
-          <Field label={t("auth.emailOptional", "Email (optional)")} error={fieldErrors.email} success={fieldSuccess.email || (checking.email ? "Checking..." : "")}>
-            <input value={form.email} onChange={(e) => update("email", e.target.value)} onBlur={() => form.email && checkAvailability("email", form.email)} type="email" autoComplete="email" placeholder="Verify later, not required now" />
+          <Field label={t("auth.emailRequired", "Email address (required)")} error={fieldErrors.email} success={otpState.emailVerified ? "Email verified" : fieldSuccess.email || (checking.email ? "Checking..." : "")}>
+            <input value={form.email} onChange={(e) => update("email", e.target.value)} onBlur={() => checkAvailability("email", form.email)} type="email" autoComplete="email" placeholder="Enter your email address" />
           </Field>
+          <Field label={t("auth.sixDigitOtp", "6 digit OTP")} error={otpState.emailSent && !otpState.emailVerified && !otpState.emailCode ? "Enter the OTP sent to email" : ""}>
+            <input value={otpState.emailCode} onChange={(e) => setOtpState((old) => ({ ...old, emailCode: cleanDigits(e.target.value) }))} inputMode="numeric" maxLength={6} disabled={otpState.emailVerified} />
+          </Field>
+          <div className="span-2 inline-actions">
+            <button type="button" className="secondary-btn" onClick={() => sendRegistrationOtp("email")} disabled={busy || otpState.emailVerified || otpState.emailCooldown > 0}>{otpState.emailCooldown > 0 ? `Resend in ${otpState.emailCooldown}s` : otpState.emailSent ? "Resend OTP" : "Send email OTP"}</button>
+            <button type="button" className="ok-btn" onClick={() => verifyRegistrationOtp("email")} disabled={busy || otpState.emailVerified || !otpState.emailSent}>Verify email</button>
+          </div>
           <Field label={t("auth.mobileNumber", "Mobile number")} error={fieldErrors.phone} success={otpState.phoneVerified ? "Mobile number verified" : fieldSuccess.phone || (checking.phone ? "Checking..." : "")}>
             <input value={form.phone} onChange={(e) => update("phone", e.target.value)} onBlur={() => checkAvailability("phone", form.phone)} type="tel" inputMode="numeric" maxLength={10} autoComplete="tel" placeholder="Enter 10 digit mobile number" />
           </Field>
@@ -2041,8 +1988,8 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
             <input value={otpState.phoneCode} onChange={(e) => setOtpState((old) => ({ ...old, phoneCode: cleanDigits(e.target.value) }))} inputMode="numeric" maxLength={6} disabled={otpState.phoneVerified} />
           </Field>
           <div className="span-2 inline-actions">
-            <button type="button" className="secondary-btn" onClick={() => sendRegistrationOtp("phone")} disabled={busy || otpState.phoneVerified || otpState.phoneCooldown > 0}>{otpState.phoneCooldown > 0 ? `Resend in ${otpState.phoneCooldown}s` : otpState.phoneSent ? "Resend OTP" : "Send OTP"}</button>
-            <button type="button" className="ok-btn" onClick={() => verifyRegistrationOtp("phone")} disabled={busy || otpState.phoneVerified || !otpState.phoneSent}>Verify OTP</button>
+            <button type="button" className="secondary-btn" onClick={() => sendRegistrationOtp("phone")} disabled={busy || otpState.phoneVerified || otpState.phoneCooldown > 0}>{otpState.phoneCooldown > 0 ? `Resend in ${otpState.phoneCooldown}s` : otpState.phoneSent ? "Resend OTP" : "Send mobile OTP"}</button>
+            <button type="button" className="ok-btn" onClick={() => verifyRegistrationOtp("phone")} disabled={busy || otpState.phoneVerified || !otpState.phoneSent}>Verify mobile</button>
           </div>
           <Field label={t("common.password", "Password")} error={fieldErrors.password}>
             <PasswordInput value={form.password} onChange={(e) => update("password", e.target.value)} autoComplete="new-password" />
@@ -2347,7 +2294,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
           {error ? <div className="error">{error}</div> : null}
           {(mode === "login" && !forgotFlow.active) || (mode === "register" && selectedRole !== "tailor") ? (
             <button className="primary-btn" disabled={busy || (mode === "register" && selectedRole === "customer" && Boolean(customerRegistrationError()))}>
-              {busy ? t("common.pleaseWait", "Please wait...") : mode === "login" && ["tailor", "customer"].includes(selectedRole) && tailorLoginMode === "otp" ? (loginOtp.sent ? t("auth.verifyOtpLogin", "Verify OTP and login") : t("auth.sendLoginOtp", "Send login OTP")) : mode === "login" ? t("auth.loginAs", `Login as ${selectedRole}`, { role: selectedRoleLabel }) : t("auth.createAccount", `Create ${selectedRole} account`, { role: selectedRoleLabel })}
+              {busy ? t("common.pleaseWait", "Please wait...") : mode === "login" ? t("auth.loginAs", `Login as ${selectedRole}`, { role: selectedRoleLabel }) : t("auth.createAccount", `Create ${selectedRole} account`, { role: selectedRoleLabel })}
             </button>
           ) : null}
           </form>
@@ -4635,10 +4582,12 @@ function CustomerOrderCard({ order, reload }) {
   const [statusData, setStatusData] = useState(() => normalizeOrderStatusPayload(order, null));
   const [breakdown, setBreakdown] = useState(null);
   const [paymentIntent, setPaymentIntent] = useState(order.paymentIntent || order.payment_intent || null);
+  const [invoice, setInvoice] = useState(order.invoice || null);
   const [activeView, setActiveView] = useState("");
   const [detailsOpen, setDetailsOpen] = useState(deepLinked);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [paymentConfirmOpen, setPaymentConfirmOpen] = useState(false);
   const paymentRequestKeyRef = useRef(null);
 
   async function loadStatus() {
@@ -4660,6 +4609,15 @@ function CustomerOrderCard({ order, reload }) {
     }
   }
 
+  async function loadInvoice() {
+    try {
+      const response = await api.bookingInvoice(order.id);
+      setInvoice(response.invoice || null);
+    } catch {
+      setInvoice(null);
+    }
+  }
+
   useEffect(() => {
     if (!detailsOpen) {
       setStatusData(normalizeOrderStatusPayload(order, null));
@@ -4667,6 +4625,7 @@ function CustomerOrderCard({ order, reload }) {
     }
     loadStatus();
     loadBreakdown();
+    if (String(statusData.paymentStatus || statusData.payment_status || "").toLowerCase() === "paid") loadInvoice();
   }, [order, detailsOpen]);
 
   useBookingLiveUpdates(
@@ -4701,14 +4660,33 @@ function CustomerOrderCard({ order, reload }) {
         razorpay_signature: paymentResult.razorpay_signature,
       });
       const verifiedIntent = verified.paymentIntent || verified.payment_intent || nextIntent;
+      if (verified.invoice) setInvoice(verified.invoice);
       paymentRequestKeyRef.current = null;
       if (verifiedIntent) setPaymentIntent(verifiedIntent);
       setMessage(verified.message || "Payment completed securely through Razorpay. Delivery OTP is now enabled.");
       if (res.breakdown) setBreakdown(res.breakdown);
       await loadStatus();
+      await loadInvoice();
       await reload();
     } catch (err) {
       if (/expired|cancelled|already/i.test(err.message || "")) paymentRequestKeyRef.current = null;
+      setMessage(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function requestPayment() {
+    if (!busy) setPaymentConfirmOpen(true);
+  }
+
+  async function resendInvoice() {
+    setBusy(true);
+    try {
+      const response = await api.resendBookingInvoiceEmail(order.id);
+      setInvoice(response.invoice || invoice);
+      setMessage(response.message || "Invoice email queued successfully.");
+    } catch (err) {
       setMessage(err.message);
     } finally {
       setBusy(false);
@@ -4850,7 +4828,7 @@ function CustomerOrderCard({ order, reload }) {
               ) : null}
             </>
           ) : null}
-          {!isPaid && !completed && !cancelled ? <button type="button" onClick={pay} disabled={busy}>{busy ? "Opening..." : "Pay securely"}</button> : null}
+          {!isPaid && !completed && !cancelled ? <button type="button" onClick={requestPayment} disabled={busy}>{busy ? "Opening..." : "Pay securely"}</button> : null}
           {completed ? <button type="button" className={activeView === "feedback" ? "active" : ""} onClick={() => setActiveView((view) => view === "feedback" ? "" : "feedback")}>Feedback</button> : null}
           <StatusPill value={statusData.paymentStatus || statusData.payment_status} />
         </div>
@@ -4905,6 +4883,20 @@ function CustomerOrderCard({ order, reload }) {
 
       {detailsOpen && activeView === "feedback" && completed ? <OrderFeedbackCard order={statusData} onSubmit={submitFeedback} busy={busy} /> : null}
       {message ? <div className={message.includes("raised") || message.includes("completed") || message.includes("submitted") || message.includes("created") || message.includes("verified") || message.includes("securely") || message.includes("updated") || message.includes("cancelled") ? "notice ok" : "error"}>{message}</div> : null}
+      {invoice ? (
+        <div className="notice ok payment-success-invoice">
+          <strong>Payment successful</strong>
+          <span>Your booking is confirmed and invoice {invoice.invoice_number || invoice.invoiceNumber} is available.</span>
+          {(invoice.download_url || invoice.downloadUrl) ? <a className="secondary-btn" href={invoice.download_url || invoice.downloadUrl} target="_blank" rel="noreferrer">View invoice PDF</a> : null}
+          {invoice.email_status === "failed" ? <button type="button" className="secondary-btn" onClick={resendInvoice} disabled={busy}>Retry invoice email</button> : null}
+        </div>
+      ) : null}
+      <ExternalPaymentConfirmDialog
+        open={paymentConfirmOpen}
+        busy={busy}
+        onCancel={() => setPaymentConfirmOpen(false)}
+        onConfirm={() => { setPaymentConfirmOpen(false); pay(); }}
+      />
     </article>
   );
 }
@@ -5744,7 +5736,7 @@ function TailorWalletPanel() {
       const res = await api.sendWithdrawOtp();
       setOtpSent(true);
       setOtpTarget(res.target || "");
-      setMessage(res.dev_otp || res.devOtp ? `Dev mode withdrawal OTP: ${res.dev_otp || res.devOtp}` : `Withdrawal OTP sent to ${res.target || "registered contact"}.`);
+      setMessage(`Withdrawal OTP sent to ${res.target || "your registered contact"}.`);
     } catch (err) {
       setMessage(err.message);
     } finally {
@@ -6226,6 +6218,7 @@ function TailorServicesPanel() {
   }
 
   async function toggleActive(service) {
+    if (service.isActive && !window.confirm("Deactivate this service? Customers will no longer be able to book it.")) return;
     setBusy(true);
     setMessage("");
     try {
@@ -6437,6 +6430,7 @@ function TailorRequests({ rows, reload }) {
   }
 
   async function reject(row) {
+    if (!window.confirm("Reject this booking request?")) return;
     const reason = window.prompt("Reject reason:", "Cannot take this order now") || "Rejected by tailor";
     setWorkingId(row.id);
     setMessage("");
@@ -6562,6 +6556,7 @@ function TailorWaitingListPanel({ reloadDashboard }) {
   }
 
   async function reject(row) {
+    if (!window.confirm("Reject this waiting-list booking?")) return;
     const reason = window.prompt("Reason for rejecting this request:", "Unable to accept this booking") || "Unable to accept this booking";
     setBusy(row.id);
     try {
@@ -7538,7 +7533,11 @@ function Approvals({ rows, reload }) {
           <p>{r.email || r.phone}</p>
           <div className="actions">
             <button className="ok-btn" onClick={async () => { await api.approveTailor(r.id); reload(); }}>Approve + Verify</button>
-            <button className="danger-btn" onClick={async () => { await api.rejectTailor(r.id, prompt("Reject reason:") || "Documents incomplete"); reload(); }}>Reject</button>
+            <button className="danger-btn" onClick={async () => {
+              if (!window.confirm("Reject this tailor application?")) return;
+              await api.rejectTailor(r.id, prompt("Reject reason:") || "Documents incomplete");
+              reload();
+            }}>Reject</button>
           </div>
         </div>
       )}

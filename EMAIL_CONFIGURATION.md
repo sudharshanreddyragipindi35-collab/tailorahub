@@ -35,6 +35,42 @@ Your provider must authorize each `From` alias (or use the account address as
 all senders). Until SMTP is enabled, the app remains in mock mode and writes
 messages to the configured outbox instead of sending them.
 
+## Hostinger example
+
+If your domain mailbox is hosted by Hostinger, use the full mailbox address
+as `SMTP_USER` and keep its password only in Secrets Manager. Hostinger's
+standard settings are `smtp.hostinger.com` with port `587` and STARTTLS (or
+port `465` with SSL/TLS):
+
+```dotenv
+EMAIL_PROVIDER=smtp
+AUTH_OTP_CHANNEL=email
+SMTP_HOST=smtp.hostinger.com
+SMTP_PORT=587
+SMTP_STARTTLS=true
+SMTP_SECURE=false
+SMTP_USER=<full-mailbox-address>@tailorahub.com
+SMTP_PASS=<mailbox-password>
+```
+
+`AUTH_OTP_CHANNEL=email` keeps login and customer registration on domain email
+OTP while SMS/Msg91 is pending. After Msg91 is configured and tested, change it
+to `auto` to allow mobile OTP delivery again.
+
+Set `EXPOSE_DEV_OTP=false` for local and production browser testing so mock
+delivery never places a development code in an API response. Real SMTP delivery
+does not return a development code.
+
+Verification email text is intentionally fixed to:
+
+```text
+Your TailoraHub verification code is 123456. It is valid for 10 minutes. Do not share this code with anyone. - TailoraHub
+```
+
+For the first setup, set every `EMAIL_FROM_*` value to that same mailbox
+address unless the provider has separately authorized aliases such as
+`verify@tailorahub.com` and `bookings@tailorahub.com`.
+
 For Amazon SES or SendGrid, set `EMAIL_PROVIDER` and its provider secret, then
 verify the domain/aliases with that provider before switching production traffic.
 

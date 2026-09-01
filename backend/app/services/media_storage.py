@@ -126,6 +126,21 @@ class MediaStorage:
             return
         self._s3().delete_object(Bucket=self.bucket, Key=self._object_key(safe))
 
+    def read_private_bytes(self, reference: str | None) -> bytes:
+        """Read a private object for an authorized server-side operation."""
+        key = self.key_from_url(reference)
+        if not key:
+            raise MediaStorageError("Invalid private media reference")
+        if self.backend == "local":
+            target = (self.local_root / Path(*PurePosixPath(key).parts)).resolve()
+            try:
+                target.relative_to(self.local_root)
+            except ValueError as exc:
+                raise MediaStorageError("Invalid local media target") from exc
+            return target.read_bytes()
+        response = self._s3().get_object(Bucket=self.bucket, Key=self._object_key(key))
+        return response["Body"].read()
+
     def key_from_url(self, url: str | None) -> str | None:
         if not url:
             return None

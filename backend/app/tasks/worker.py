@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import csv
 from io import StringIO
 import json
@@ -22,7 +23,19 @@ _running = True
 def _handle_email(payload: dict) -> dict:
     from app.integrations import email_service
 
-    result = email_service().send(payload["to"], payload["subject"], payload["body"], payload.get("purpose", "default"))
+    attachments = []
+    for attachment in payload.get("attachments") or []:
+        try:
+            data = base64.b64decode(attachment.get("data") or "", validate=True)
+        except Exception as exc:
+            raise ValueError("Invalid email attachment encoding") from exc
+        attachments.append({
+            "filename": attachment.get("filename") or "attachment",
+            "maintype": attachment.get("maintype") or "application",
+            "subtype": attachment.get("subtype") or "octet-stream",
+            "data": data,
+        })
+    result = email_service().send(payload["to"], payload["subject"], payload["body"], payload.get("purpose", "default"), attachments=attachments)
     if not result.get("ok"):
         return {**result, "terminalFailure": True, "reason": result.get("reason") or "email_delivery_failed"}
     return result
