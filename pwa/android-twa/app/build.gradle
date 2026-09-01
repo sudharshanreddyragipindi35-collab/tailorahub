@@ -24,8 +24,8 @@ def twaManifest = [
     applicationId: 'com.sr.tailoringmarketplace',
     hostName: 'www.tailorahub.com', // The domain being opened in the TWA.
     launchUrl: '/?source=pwa', // The start path for the TWA. Must be relative to the domain.
-    name: 'Vastrivo', // The application name.
-    launcherName: 'Vastrivo', // The name shown on the Android Launcher.
+    name: 'TailoraHub', // The application name.
+    launcherName: 'TailoraHub', // The name shown on the Android Launcher.
     themeColor: '#0B0D10', // The color used for the status bar.
     themeColorDark: '#000000', // The color used for the dark status bar.
     navigationColor: '#000000', // The color used for the navigation bar.
@@ -57,8 +57,8 @@ android {
         applicationId "com.sr.tailoringmarketplace"
         minSdkVersion 21
         targetSdkVersion 36
-        versionCode 5
-        versionName "5"
+        versionCode 6
+        versionName "6"
 
         // The name for the application
         resValue "string", "appName", twaManifest.name

@@ -1,8 +1,9 @@
+# Signs the TailoraHub version 6 release bundle using the existing Play upload key.
 $ErrorActionPreference = "Stop"
 
 $projectDirectory = $PSScriptRoot
-$unsignedBundle = Join-Path $projectDirectory "Vastrivo-v5-release-unsigned.aab"
-$signedBundle = Join-Path $projectDirectory "Vastrivo-v5-release.aab"
+$unsignedBundle = Join-Path $projectDirectory "TailoraHub-v6-release-unsigned.aab"
+$signedBundle = Join-Path $projectDirectory "TailoraHub-v6-release.aab"
 $keystore = Join-Path $projectDirectory "android.keystore"
 $keyAlias = "android"
 
@@ -20,7 +21,7 @@ if (-not (Get-Command jarsigner -ErrorAction SilentlyContinue)) {
     throw "jarsigner was not found. Install/use JDK 17 and make sure its bin directory is on PATH."
 }
 
-Write-Host "Signing Vastrivo version 5 with the existing Play Store upload key."
+Write-Host "Signing TailoraHub version 6 with the existing Play Store upload key."
 Write-Host "Enter your existing Android keystore password when jarsigner prompts you."
 Write-Host "Do not paste that password into chat or save it in this project."
 
