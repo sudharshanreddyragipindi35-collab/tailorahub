@@ -6,6 +6,7 @@ scanning it only ever reveals which wallet to credit, resolved server-side
 by the payment endpoint.
 """
 
+from base64 import b64encode
 from io import BytesIO
 
 import qrcode
@@ -27,3 +28,24 @@ def generate_wallet_qr(wallet_id: str) -> str:
         output.getvalue(),
         "image/png",
     )
+
+
+def generate_tailor_profile_qr(profile_url: str) -> str:
+    """Return a print-quality QR image for a public tailor profile URL.
+
+    The QR deliberately encodes a normal HTTPS URL (not contact information,
+    payment credentials, or an authenticated API URL) so it is safe to print
+    and share in a tailor's shop.
+    """
+    code = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_H,
+        box_size=12,
+        border=4,
+    )
+    code.add_data(profile_url)
+    code.make(fit=True)
+    image = code.make_image(fill_color="#111827", back_color="white")
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return "data:image/png;base64," + b64encode(output.getvalue()).decode("ascii")

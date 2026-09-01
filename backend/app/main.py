@@ -27,7 +27,7 @@ from .db import db_session, fetch_all, fetch_one, run_schema
 from .emailer import send_email
 from .integrations import aadhaar_kyc_service, maps_service, payment_service, sms_service
 from .pagination import PageParams
-from .qr import generate_wallet_qr
+from .qr import generate_tailor_profile_qr, generate_wallet_qr
 from .core.security import create_refresh_token, decode_refresh_token
 from .security import (
     create_token,
@@ -1957,6 +1957,73 @@ def public_tailors(page: PageParams = Depends(PageParams), db: Session = Depends
     return [as_tailor(r) for r in rows]
 
 
+@app.get("/api/public/tailors/{tailor_id}")
+def public_tailor_profile(tailor_id: str, db: Session = Depends(db_session)):
+    """Public, QR-safe tailor page data.
+
+    Keep this response intentionally smaller than an authenticated customer
+    profile: no account identifiers, email, mobile number, documents, or
+    exact coordinates are released through a printed QR code.
+    """
+    tailor = fetch_one(
+        db,
+        """
+        SELECT t.*, COALESCE(min(s.price), 0)::int AS starting_price
+        FROM tailors t
+        LEFT JOIN tailor_services s ON s.tailor_id=t.id AND s.active
+        WHERE t.id=:id
+          AND t.approval_status='APPROVED'
+          AND t.account_status='ACTIVE'
+          AND t.deleted_at IS NULL
+        GROUP BY t.id
+        """,
+        {"id": tailor_id},
+    )
+    if not tailor:
+        raise HTTPException(404, "This tailor profile is not available")
+
+    services = fetch_all(
+        db,
+        """
+        SELECT id, name, price, description
+        FROM tailor_services
+        WHERE tailor_id=:id AND active=TRUE
+        ORDER BY price, name
+        LIMIT 12
+        """,
+        {"id": tailor_id},
+    )
+    return {
+        "tailor": {
+            "id": tailor["id"],
+            "shop": tailor.get("shop") or "Tailor studio",
+            "ownerName": tailor.get("owner_name") or tailor.get("full_name") or "Tailor",
+            "zoneId": tailor.get("zone_id"),
+            "shopAddress": tailor.get("shop_address"),
+            "expertise": tailor.get("expertise") or [],
+            "years": tailor.get("years") or 0,
+            "experienceDisplay": compute_experience_display(tailor.get("experience_years_base"), tailor.get("stitching_since_date")),
+            "bio": tailor.get("bio"),
+            "profileImage": tailor.get("profile_image"),
+            "rating": float(tailor.get("rating") or 0),
+            "ratingCount": tailor.get("rating_count") or 0,
+            "completed": tailor.get("completed") or 0,
+            "startingPrice": tailor.get("starting_price") or 0,
+            "availability": tailor.get("availability"),
+            "acceptingRequests": bool(tailor.get("accepting_requests", True)),
+        },
+        "services": [
+            {
+                "id": row["id"],
+                "name": row.get("name") or "Tailoring service",
+                "price": row.get("price") or 0,
+                "description": row.get("description"),
+            }
+            for row in services
+        ],
+    }
+
+
 @app.get("/api/customer/tailors")
 def customer_tailors(
     q: str = "",
@@ -2377,6 +2444,19 @@ def create_review(order_id: str, body: ReviewCreate, customer: dict = Depends(cu
 def tailor_profile(user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
     """file 08: editable profile, excludes Aadhaar entirely via as_tailor_private's fixed field whitelist."""
     return as_tailor_private(get_tailor_for_user(db, user))
+
+
+@app.get("/api/tailor/me/profile-qr")
+def tailor_profile_qr(user: dict = Depends(tailor_user), db: Session = Depends(db_session)):
+    """Create a shareable QR for the authenticated tailor's public profile."""
+    tailor = get_tailor_for_user(db, user)
+    profile_url = f"{settings.public_web_url}/?tailor={tailor['id']}"
+    return {
+        "profileUrl": profile_url,
+        "qrDataUrl": generate_tailor_profile_qr(profile_url),
+        "tailorName": tailor.get("owner_name") or tailor.get("full_name") or tailor.get("shop") or "Tailor",
+        "shopName": tailor.get("shop") or "TailoraHub studio",
+    }
 
 
 @app.patch("/api/tailor/me")

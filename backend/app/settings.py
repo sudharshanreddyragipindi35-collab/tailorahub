@@ -85,6 +85,7 @@ class Settings:
     # email. Set AUTH_OTP_CHANNEL=auto when mobile/SMS delivery is enabled.
     auth_otp_channel = env_value("AUTH_OTP_CHANNEL", "email").lower()
     cors_origins = [x.strip() for x in env_value("CORS_ORIGINS", "http://localhost:5173,https://tailorahub.com,https://www.tailorahub.com,https://api.tailorahub.com").split(",") if x.strip()]
+    public_web_url = env_value("PUBLIC_WEB_URL", "https://tailorahub.com").rstrip("/")
 
     auto_migrate = env_bool("AUTO_MIGRATE", True)
     enable_demo_data = env_bool("ENABLE_DEMO_DATA", app_env != "production")

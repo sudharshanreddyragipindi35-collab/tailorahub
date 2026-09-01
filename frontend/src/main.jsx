@@ -8,9 +8,11 @@ import Bell from "lucide-react/dist/esm/icons/bell.js";
 import ChevronDown from "lucide-react/dist/esm/icons/chevron-down.js";
 import ChevronLeft from "lucide-react/dist/esm/icons/chevron-left.js";
 import CheckCircle2 from "lucide-react/dist/esm/icons/check-circle-2.js";
+import Copy from "lucide-react/dist/esm/icons/copy.js";
 import ClipboardList from "lucide-react/dist/esm/icons/clipboard-list.js";
 import Crown from "lucide-react/dist/esm/icons/crown.js";
 import CreditCard from "lucide-react/dist/esm/icons/credit-card.js";
+import Download from "lucide-react/dist/esm/icons/download.js";
 import FileClock from "lucide-react/dist/esm/icons/file-clock.js";
 import Globe2 from "lucide-react/dist/esm/icons/globe-2.js";
 import Heart from "lucide-react/dist/esm/icons/heart.js";
@@ -23,9 +25,12 @@ import Megaphone from "lucide-react/dist/esm/icons/megaphone.js";
 import Menu from "lucide-react/dist/esm/icons/menu.js";
 import Moon from "lucide-react/dist/esm/icons/moon.js";
 import Pencil from "lucide-react/dist/esm/icons/pencil.js";
+import Printer from "lucide-react/dist/esm/icons/printer.js";
+import QrCode from "lucide-react/dist/esm/icons/qr-code.js";
 import RefreshCw from "lucide-react/dist/esm/icons/refresh-cw.js";
 import Scissors from "lucide-react/dist/esm/icons/scissors.js";
 import Search from "lucide-react/dist/esm/icons/search.js";
+import Share2 from "lucide-react/dist/esm/icons/share-2.js";
 import Shield from "lucide-react/dist/esm/icons/shield.js";
 import SlidersHorizontal from "lucide-react/dist/esm/icons/sliders-horizontal.js";
 import Star from "lucide-react/dist/esm/icons/star.js";
@@ -39,6 +44,7 @@ import Video from "lucide-react/dist/esm/icons/video.js";
 import XCircle from "lucide-react/dist/esm/icons/x-circle.js";
 import { api, assetUrl, clearSession, getRefreshToken, getRole, getToken, hasValidStoredSession, INACTIVITY_LOGOUT_MESSAGE, isSessionExpired, isSessionInactive, markSessionActive, setSession } from "./api";
 import { registerPwa } from "./registerPwa";
+import tailoraHubLogo from "./assets/tailorahub-logo.png";
 import "./styles.css";
 import "./premium-ui.css";
 
@@ -471,13 +477,16 @@ function roleFromAuthenticatedUser(storedRole, user) {
   return ["admin", "tailor", "customer"].find((candidate) => roles.includes(candidate)) || "";
 }
 
-function replaceWithRoleLanding(roleName) {
+function replaceWithRoleLanding(roleName, pendingTailorId = "") {
   const defaultView = ROLE_DEFAULT_VIEWS[roleName];
   const url = new URL(window.location.href);
   url.pathname = roleName === "admin" ? "/admin" : "/";
   url.search = "";
   url.hash = "";
-  if (defaultView) url.searchParams.set("view", defaultView);
+  if (roleName === "customer" && pendingTailorId) {
+    url.searchParams.set("view", "profile");
+    url.searchParams.set("tailorId", pendingTailorId);
+  } else if (defaultView) url.searchParams.set("view", defaultView);
   window.history.replaceState({ [APP_HISTORY_KEY]: {} }, "", `${url.pathname}${url.search}`);
 }
 
@@ -972,8 +981,82 @@ function MediaGallery({ portfolio, onRemove }) {
   );
 }
 
+function PublicTailorProfile({ tailorId }) {
+  const [profile, setProfile] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+    setProfile(null);
+    setError("");
+    api.publicTailorProfile(tailorId)
+      .then((data) => { if (!cancelled) setProfile(data); })
+      .catch((err) => { if (!cancelled) setError(err.message || "This tailor profile is not available."); });
+    return () => { cancelled = true; };
+  }, [tailorId]);
+
+  function continueToBooking() {
+    const url = new URL(window.location.origin + "/");
+    url.searchParams.set("view", "profile");
+    url.searchParams.set("tailorId", tailorId);
+    if (hasValidStoredSession() && getRole() === "customer") {
+      window.location.assign(`${url.pathname}${url.search}`);
+      return;
+    }
+    sessionStorage.setItem("tailorahub:pending-tailor-id", tailorId);
+    window.location.assign("/?auth=auth");
+  }
+
+  const tailor = profile?.tailor;
+  return (
+    <main className="public-tailor-page">
+      <section className="public-tailor-card">
+        <header className="public-tailor-brand">
+          <img src={tailoraHubLogo} alt="TailoraHub" />
+          <span>TailoraHub connection</span>
+        </header>
+        {error ? <div className="error">{error}</div> : null}
+        {!tailor && !error ? <div className="loading">Opening tailor profile...</div> : null}
+        {tailor ? (
+          <>
+            <div className="public-tailor-identity">
+              <TailorAvatar tailor={tailor} size="lg" />
+              <div>
+                <span className="approved-card-eyebrow">Verified tailor profile</span>
+                <h1>{tailor.shop}</h1>
+                <p>Owned by {tailor.ownerName}</p>
+                <div className="public-tailor-meta">
+                  <StatusPill value={tailor.availability} />
+                  {tailor.rating ? <span><Star size={15} /> {Number(tailor.rating).toFixed(1)} ({tailor.ratingCount || 0})</span> : null}
+                </div>
+              </div>
+            </div>
+            <p className="public-tailor-description">{tailor.bio || `${tailor.ownerName} is available on TailoraHub for made-to-measure tailoring.`}</p>
+            <div className="public-tailor-details">
+              {tailor.shopAddress || tailor.zoneId ? <span><MapPin size={16} /> {tailor.shopAddress || tailor.zoneId}</span> : null}
+              {tailor.experienceDisplay || tailor.years ? <span><BadgeCheck size={16} /> {tailor.experienceDisplay || tailor.years} years experience</span> : null}
+              {tailor.startingPrice ? <span><Tag size={16} /> From {money(tailor.startingPrice)}</span> : null}
+            </div>
+            {profile.services?.length ? (
+              <section className="public-tailor-services">
+                <h2>Popular services</h2>
+                <div>{profile.services.slice(0, 4).map((service) => <span key={service.id}>{service.name} <b>{money(service.price)}</b></span>)}</div>
+              </section>
+            ) : null}
+            <button type="button" className="primary-btn public-tailor-book" onClick={continueToBooking} disabled={!tailor.acceptingRequests}>
+              {tailor.acceptingRequests ? "Book with this tailor" : "This tailor is not taking requests"} <ArrowRight size={16} />
+            </button>
+            <button type="button" className="text-link public-tailor-home" onClick={() => window.location.assign("/")}>Go to TailoraHub</button>
+          </>
+        ) : null}
+      </section>
+    </main>
+  );
+}
+
 function App() {
   const adminPortal = isAdminPortalPath();
+  const publicTailorId = new URLSearchParams(window.location.search).get("tailor") || "";
   const [referralEntry, setReferralEntry] = useState(() => readReferralEntry());
   const [role, setRole] = useState("");
   const [signedIn, setSignedIn] = useState(false);
@@ -1104,8 +1187,10 @@ function App() {
       setAuthNotice(adminPortal ? "Only an administrator can use this private portal." : "Administrator access is available only through the private admin portal.");
       return;
     }
+    const pendingTailorId = nextRole === "customer" ? sessionStorage.getItem("tailorahub:pending-tailor-id") || "" : "";
+    sessionStorage.removeItem("tailorahub:pending-tailor-id");
     clearNavigationState();
-    replaceWithRoleLanding(nextRole);
+    replaceWithRoleLanding(nextRole, pendingTailorId);
     setSession(res.token || res.access_token, nextRole, res.refreshToken || res.refresh_token);
     setAuthNotice("");
     setRole(nextRole);
@@ -1132,7 +1217,8 @@ function App() {
   }
 
   let content;
-  if (authInitializing) content = <main className="app-shell"><section className="panel"><p>Restoring your secure session...</p></section></main>;
+  if (!adminPortal && publicTailorId) content = <PublicTailorProfile tailorId={publicTailorId} />;
+  else if (authInitializing) content = <main className="app-shell"><section className="panel"><p>Restoring your secure session...</p></section></main>;
   else if (!signedIn) content = <AuthShell onAuth={handleAuth} theme={theme} setTheme={setTheme} language={language} setLanguage={setLanguage} referralEntry={referralEntry} sessionMessage={authNotice} adminPortal={adminPortal} />;
   else if (!adminPortal && role === "customer") content = <CustomerApp onLogout={requestLogout} />;
   else if (!adminPortal && role === "tailor") content = <TailorApp onLogout={requestLogout} />;
@@ -2221,7 +2307,7 @@ function AuthShell({ onAuth, theme, setTheme, language, setLanguage, referralEnt
             )}
           </div>
           <div className="brand-row">
-            <div className="brand-mark">TH</div>
+            <div className="brand-mark brand-logo-mark"><img src={tailoraHubLogo} alt="TailoraHub" /></div>
             <div>
               <h1>TailoraHub</h1>
               <p>{mode === "login" ? t("auth.loginSubtitle", `${selectedRoleLabel} login`, { role: selectedRoleLabel }) : t("auth.registrationSubtitle", `${selectedRoleLabel} registration`, { role: selectedRoleLabel })}</p>
@@ -2347,7 +2433,7 @@ function Shell({ title, subtitle, icon: Icon, onLogout, children, actions, varia
     <div className="page-shell">
       <header className="app-header">
         <div className="brand-row compact no-border">
-          <div className="brand-mark">TH</div>
+          <div className="brand-mark brand-logo-mark"><img src={tailoraHubLogo} alt="TailoraHub" /></div>
           <div>
             <div className="eyebrow"><Icon size={14} /> {subtitle}</div>
             <h2>{title}</h2>
@@ -4162,6 +4248,166 @@ function CustomerAccountPanel({ account, onNavigate }) {
   );
 }
 
+function loadCanvasImage(source) {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Unable to prepare the QR card image."));
+    image.src = source;
+  });
+}
+
+async function createTailorQrCardBlob(qr) {
+  const [brand, code] = await Promise.all([loadCanvasImage(tailoraHubLogo), loadCanvasImage(qr.qrDataUrl)]);
+  const canvas = document.createElement("canvas");
+  canvas.width = 1200;
+  canvas.height = 1680;
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fbfaf7";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = "#0c1724";
+  context.fillRect(0, 0, canvas.width, 240);
+  context.drawImage(brand, 425, 30, 350, 175);
+  context.fillStyle = "#b68a37";
+  context.font = "600 34px Arial";
+  context.textAlign = "center";
+  context.fillText("TAILORAHUB CONNECTION", 600, 305);
+  context.fillStyle = "#1d2837";
+  context.font = "700 56px Georgia";
+  context.fillText(qr.shopName || "TailoraHub atelier", 600, 382);
+  context.fillStyle = "#56606d";
+  context.font = "400 35px Arial";
+  context.fillText(`Verified profile of ${qr.tailorName || "Tailor"}`, 600, 438);
+  context.fillStyle = "#ffffff";
+  context.shadowColor = "rgba(16, 24, 40, .18)";
+  context.shadowBlur = 28;
+  context.fillRect(175, 515, 850, 850);
+  context.shadowColor = "transparent";
+  context.drawImage(code, 225, 565, 750, 750);
+  context.fillStyle = "#1d2837";
+  context.font = "600 32px Arial";
+  context.fillText("Scan to view this tailor and book securely", 600, 1462);
+  context.fillStyle = "#687280";
+  context.font = "400 28px Arial";
+  context.fillText("tailorahub.com", 600, 1520);
+  context.fillStyle = "#b68a37";
+  context.fillRect(390, 1575, 420, 4);
+  return new Promise((resolve, reject) => canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Unable to create QR card.")), "image/png"));
+}
+
+function TailorProfileQrCard({ tailor }) {
+  const [qr, setQr] = useState(null);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [working, setWorking] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setError("");
+    setQr(null);
+    api.tailorProfileQr()
+      .then((data) => { if (!cancelled) setQr(data); })
+      .catch((err) => { if (!cancelled) setError(err.message || "Unable to create your profile QR."); });
+    return () => { cancelled = true; };
+  }, [tailor?.id]);
+
+  async function downloadCard() {
+    if (!qr) return;
+    setWorking(true);
+    setMessage("");
+    try {
+      const blob = await createTailorQrCardBlob(qr);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `TailoraHub-${String(qr.shopName || "tailor").replace(/[^a-z0-9]+/gi, "-")}-QR.png`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setMessage("Your printable QR card has been downloaded.");
+    } catch (err) {
+      setError(err.message || "Unable to download your QR card.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function printCard() {
+    if (!qr) return;
+    const printWindow = window.open("", "_blank", "noopener,noreferrer,width=720,height=900");
+    if (!printWindow) {
+      setError("Allow pop-ups to print your QR card.");
+      return;
+    }
+    setWorking(true);
+    setMessage("");
+    try {
+      const blob = await createTailorQrCardBlob(qr);
+      const url = URL.createObjectURL(blob);
+      printWindow.document.title = "TailoraHub profile QR";
+      printWindow.document.body.style.margin = "0";
+      printWindow.document.body.style.background = "white";
+      const image = printWindow.document.createElement("img");
+      image.src = url;
+      image.alt = "TailoraHub tailor profile QR";
+      image.style.cssText = "display:block;width:100%;max-width:210mm;margin:auto;";
+      image.onload = () => printWindow.print();
+      printWindow.document.body.appendChild(image);
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } catch (err) {
+      printWindow.close();
+      setError(err.message || "Unable to prepare your QR card for printing.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function shareCard() {
+    if (!qr) return;
+    setWorking(true);
+    setMessage("");
+    try {
+      const blob = await createTailorQrCardBlob(qr);
+      const file = new File([blob], "TailoraHub-profile-QR.png", { type: "image/png" });
+      const shareData = { title: qr.shopName || "TailoraHub tailor", text: `Scan to view ${qr.shopName || "this tailor"} on TailoraHub.`, url: qr.profileUrl };
+      if (navigator.canShare?.({ files: [file] })) await navigator.share({ ...shareData, files: [file] });
+      else if (navigator.share) await navigator.share(shareData);
+      else {
+        await navigator.clipboard.writeText(qr.profileUrl);
+        setMessage("Your profile link has been copied to share.");
+      }
+    } catch (err) {
+      if (err?.name !== "AbortError") setError(err.message || "Unable to share your QR card.");
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function copyLink() {
+    if (!qr?.profileUrl) return;
+    try {
+      await navigator.clipboard.writeText(qr.profileUrl);
+      setMessage("Your tailor profile link has been copied.");
+    } catch {
+      setError("Unable to copy the profile link on this device.");
+    }
+  }
+
+  return (
+    <section className="tailor-profile-qr-card" aria-labelledby="tailor-profile-qr-title">
+      <div className="tailor-profile-qr-heading"><div><span className="approved-card-eyebrow">Print and share</span><h3 id="tailor-profile-qr-title">Your TailoraHub connection QR</h3><p>Customers scan this to open your verified profile and book with you.</p></div><QrCode size={28} /></div>
+      {qr ? <div className="tailor-profile-qr-preview"><img src={qr.qrDataUrl} alt={`QR code for ${qr.shopName || tailor.shop}`} /><div><strong>{qr.shopName || tailor.shop}</strong><span>{qr.tailorName || tailor.ownerName}</span><small>tailorahub.com</small></div></div> : error ? null : <div className="loading">Creating your secure profile QR...</div>}
+      <div className="tailor-profile-qr-actions">
+        <button type="button" className="primary-btn" onClick={downloadCard} disabled={!qr || working}><Download size={16} /> Download</button>
+        <button type="button" className="secondary-btn" onClick={printCard} disabled={!qr || working}><Printer size={16} /> Print</button>
+        <button type="button" className="secondary-btn" onClick={shareCard} disabled={!qr || working}><Share2 size={16} /> Share</button>
+        <button type="button" className="text-link" onClick={copyLink} disabled={!qr || working}><Copy size={15} /> Copy link</button>
+      </div>
+      {message ? <div className="notice ok">{message}</div> : null}
+      {error ? <div className="error">{error}</div> : null}
+    </section>
+  );
+}
+
 function TailorProfilePanel({ tailor, onNavigate }) {
   return (
     <section className="section-block no-top approved-profile-layout">
@@ -4185,6 +4431,7 @@ function TailorProfilePanel({ tailor, onNavigate }) {
           <button type="button" className="secondary-btn" onClick={() => onNavigate("media")}>Manage photos / videos</button>
           <button type="button" className="primary-btn" onClick={() => onNavigate("services")}>Manage services <ArrowRight size={15} /></button>
         </div>
+        <TailorProfileQrCard tailor={tailor} />
       </div>
     </section>
   );
@@ -6929,7 +7176,7 @@ function AdminApp({ onLogout }) {
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand-row compact">
-          <div className="brand-mark">TH</div>
+          <div className="brand-mark brand-logo-mark"><img src={tailoraHubLogo} alt="TailoraHub" /></div>
           <div><h1>{t("dashboard.admin.title", "Admin")}</h1><p>{t("dashboard.admin.subtitle", "Platform operations")}</p></div>
         </div>
         <nav>

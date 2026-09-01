@@ -335,6 +335,7 @@ export const api = {
   adminFinanceWallet: (params) => request(`/v1/admin/finance/wallet${qs(params)}`),
   exportAdminFinanceWallet: (params) => requestText(`/v1/admin/finance/wallet/export${qs(params)}`),
   tailorProfile: () => request("/tailor/me"),
+  tailorProfileQr: () => request("/tailor/me/profile-qr"),
   updateTailorProfile: (payload) => request("/tailor/me", { method: "PATCH", body: JSON.stringify(payload) }),
   setTailorLocation: (payload) => request("/tailor/me/location", { method: "POST", body: JSON.stringify(payload) }),
   updateTailorLocation: (payload) => request("/tailor/me/location", { method: "PATCH", body: JSON.stringify(payload) }),
@@ -370,6 +371,7 @@ export const api = {
   replySupportTicket: (id, body) => request(`/admin/support-tickets/${id}/messages`, { method: "POST", body: JSON.stringify({ body }) }),
 
   customerTailors: (params) => request(`/customer/tailors${qs(params)}`),
+  publicTailorProfile: (id) => request(`/public/tailors/${encodeURIComponent(id)}`),
   nearbyTailors: (params) => request(`/v1/customers/nearby-tailors${qs(params)}`),
   customerTailor: (id) => request(`/customer/tailors/${id}`),
   customerFavorites: () => request("/customer/favorites"),
